@@ -1,0 +1,542 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Trading Bot Dashboard</title>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: 'Segoe UI', Arial, sans-serif;
+            background: #131722;
+            color: #d1d4dc;
+            line-height: 1.6;
+        }
+        
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+        
+        .header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 30px;
+            padding-bottom: 20px;
+            border-bottom: 2px solid #2a2e39;
+        }
+        
+        .header h1 {
+            color: #d1d4dc;
+            font-size: 28px;
+            font-weight: 600;
+        }
+        
+        .nav-links {
+            display: flex;
+            gap: 15px;
+        }
+        
+        .nav-link {
+            color: #868b94;
+            text-decoration: none;
+            padding: 10px 20px;
+            border-radius: 6px;
+            transition: all 0.3s;
+            font-weight: 500;
+        }
+        
+        .nav-link:hover {
+            color: #d1d4dc;
+            background: #2a2e39;
+        }
+        
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 20px;
+            margin-bottom: 30px;
+        }
+        
+        .stat-card {
+            background: #1e222d;
+            border-radius: 12px;
+            padding: 25px;
+            border: 1px solid #2a2e39;
+            transition: all 0.3s;
+        }
+        
+        .stat-card:hover {
+            border-color: #3a3e49;
+            transform: translateY(-2px);
+        }
+        
+        .stat-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 15px;
+        }
+        
+        .stat-title {
+            font-size: 16px;
+            color: #868b94;
+            font-weight: 500;
+        }
+        
+        .stat-icon {
+            font-size: 24px;
+        }
+        
+        .stat-value {
+            font-size: 32px;
+            font-weight: bold;
+            color: #d1d4dc;
+            margin-bottom: 10px;
+        }
+        
+        .stat-description {
+            font-size: 14px;
+            color: #868b94;
+        }
+        
+        .status-good { color: #26a69a; }
+        .status-warning { color: #ff9f43; }
+        .status-error { color: #ef5350; }
+        
+        .main-section {
+            background: #1e222d;
+            border-radius: 12px;
+            padding: 25px;
+            margin-bottom: 30px;
+            border: 1px solid #2a2e39;
+        }
+        
+        .section-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 20px;
+            padding-bottom: 15px;
+            border-bottom: 1px solid #2a2e39;
+        }
+        
+        .section-title {
+            font-size: 20px;
+            font-weight: 600;
+            color: #d1d4dc;
+        }
+        
+        .refresh-btn {
+            background: #2962ff;
+            color: white;
+            border: none;
+            padding: 8px 16px;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 14px;
+            transition: background-color 0.3s;
+        }
+        
+        .refresh-btn:hover {
+            background: #1e53e5;
+        }
+        
+        .loading {
+            text-align: center;
+            padding: 40px;
+            color: #868b94;
+        }
+        
+        .spinner {
+            border: 3px solid #2a2e39;
+            border-top: 3px solid #2962ff;
+            border-radius: 50%;
+            width: 30px;
+            height: 30px;
+            animation: spin 1s linear infinite;
+            margin: 0 auto 15px;
+        }
+        
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+        
+        .error {
+            background: #ef5350;
+            color: white;
+            padding: 15px;
+            border-radius: 6px;
+            margin: 20px 0;
+            text-align: center;
+        }
+        
+        .chart-links {
+            display: flex;
+            gap: 15px;
+            margin-top: 20px;
+        }
+        
+        .chart-link {
+            background: #26a69a;
+            color: white;
+            text-decoration: none;
+            padding: 12px 24px;
+            border-radius: 6px;
+            font-weight: 500;
+            transition: all 0.3s;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        
+        .chart-link:hover {
+            background: #2bbbad;
+            transform: translateY(-1px);
+        }
+        
+        .info-table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+        
+        .info-table th,
+        .info-table td {
+            padding: 12px;
+            text-align: left;
+            border-bottom: 1px solid #2a2e39;
+        }
+        
+        .info-table th {
+            background: #2a2e39;
+            color: #d1d4dc;
+            font-weight: 600;
+        }
+        
+        .info-table td {
+            color: #868b94;
+        }
+        
+        @media (max-width: 768px) {
+            .container {
+                padding: 15px;
+            }
+            
+            .header {
+                flex-direction: column;
+                gap: 15px;
+                text-align: center;
+            }
+            
+            .nav-links {
+                flex-wrap: wrap;
+                justify-content: center;
+            }
+            
+            .stats-grid {
+                grid-template-columns: 1fr;
+            }
+            
+            .chart-links {
+                flex-direction: column;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>🤖 Trading Bot Dashboard</h1>
+            <div class="nav-links">
+                <a href="/chart" class="nav-link">📈 Trading Chart</a>
+                <a href="/indicators" class="nav-link">🎯 Indicators Chart</a>
+                <a href="/strategies" class="nav-link">🎯 Strategies Chart</a>
+                <a href="/api/debug/database" class="nav-link" target="_blank">🔍 Debug API</a>
+            </div>
+        </div>
+
+        <div class="stats-grid">
+            <div class="stat-card">
+                <div class="stat-header">
+                    <div class="stat-title">System Status</div>
+                    <div class="stat-icon">🟢</div>
+                </div>
+                <div class="stat-value status-good" id="systemStatus">Online</div>
+                <div class="stat-description">Trading bot is running</div>
+            </div>
+
+            <div class="stat-card">
+                <div class="stat-header">
+                    <div class="stat-title">Data Sources</div>
+                    <div class="stat-icon">📊</div>
+                </div>
+                <div class="stat-value" id="dataSources">Loading...</div>
+                <div class="stat-description">Available data sources</div>
+            </div>
+
+            <div class="stat-card">
+                <div class="stat-header">
+                    <div class="stat-title">Active Indicators</div>
+                    <div class="stat-icon">🎯</div>
+                </div>
+                <div class="stat-value" id="activeIndicators">Loading...</div>
+                <div class="stat-description">Indicators currently running</div>
+            </div>
+
+            <div class="stat-card">
+                <div class="stat-header">
+                    <div class="stat-title">Last Update</div>
+                    <div class="stat-icon">⏰</div>
+                </div>
+                <div class="stat-value" id="lastUpdate">--:--</div>
+                <div class="stat-description">Last data refresh</div>
+            </div>
+        </div>
+
+        <div class="main-section">
+            <div class="section-header">
+                <div class="section-title">📊 Data Sources Status</div>
+                <button class="refresh-btn" onclick="refreshData()">🔄 Refresh</button>
+            </div>
+            
+            <div id="dataSourcesContainer">
+                <div class="loading">
+                    <div class="spinner"></div>
+                    <div>Loading data sources...</div>
+                </div>
+            </div>
+        </div>
+
+        <div class="main-section">
+            <div class="section-header">
+                <div class="section-title">🎯 Indicators Status</div>
+                <button class="refresh-btn" onclick="refreshIndicators()">🔄 Refresh</button>
+            </div>
+            
+            <div id="indicatorsContainer">
+                <div class="loading">
+                    <div class="spinner"></div>
+                    <div>Loading indicators status...</div>
+                </div>
+            </div>
+        </div>
+
+        <div class="chart-links">
+            <a href="/chart" class="chart-link">
+                📈 <span>Open Trading Chart</span>
+            </a>
+            <a href="/indicators" class="chart-link">
+                🎯 <span>Open Indicators Chart</span>
+            </a>
+            <a href="/strategies" class="chart-link">
+                🎯 <span>Open Strategies Chart</span>
+            </a>
+        </div>
+    </div>
+
+    <script>
+        let refreshInterval;
+
+        document.addEventListener('DOMContentLoaded', function() {
+            loadDashboard();
+            startAutoRefresh();
+        });
+
+        async function loadDashboard() {
+            try {
+                await Promise.all([
+                    loadDataSources(),
+                    loadIndicatorsStatus()
+                ]);
+                updateLastUpdate();
+            } catch (error) {
+                console.error('Failed to load dashboard:', error);
+                showError('Failed to load dashboard data: ' + error.message);
+            }
+        }
+
+        async function loadDataSources() {
+            try {
+                const response = await fetch('/api/data/sources');
+                const data = await response.json();
+
+                if (data.error) {
+                    throw new Error(data.error);
+                }
+
+                updateDataSourcesDisplay(data);
+                
+                const totalSources = data.summary?.total_sources || 0;
+                document.getElementById('dataSources').textContent = totalSources;
+
+            } catch (error) {
+                console.error('Failed to load data sources:', error);
+                showDataSourcesError('Failed to load data sources: ' + error.message);
+                document.getElementById('dataSources').textContent = 'Error';
+            }
+        }
+
+        async function loadIndicatorsStatus() {
+            try {
+                const response = await fetch('/api/indicators/status');
+                const data = await response.json();
+
+                if (data.error) {
+                    throw new Error(data.error);
+                }
+
+                updateIndicatorsDisplay(data);
+                updateActiveIndicatorsCount(data);
+
+            } catch (error) {
+                console.error('Failed to load indicators:', error);
+                showIndicatorsError('Failed to load indicators status: ' + error.message);
+                document.getElementById('activeIndicators').textContent = 'Error';
+            }
+        }
+
+        function updateDataSourcesDisplay(data) {
+            const container = document.getElementById('dataSourcesContainer');
+            
+            if (!data.sources || data.sources.length === 0) {
+                container.innerHTML = '<div class="loading">No data sources found</div>';
+                return;
+            }
+
+            let html = '<table class="info-table">';
+            html += '<thead><tr><th>Exchange</th><th>Symbol</th><th>Timeframe</th><th>Source</th><th>Candles</th><th>First Data</th><th>Last Data</th></tr></thead>';
+            html += '<tbody>';
+            
+            data.sources.forEach(source => {
+                const firstDate = new Date(source.first_datetime).toISOString();
+                const lastDate = new Date(source.last_datetime).toISOString();
+                
+                html += `
+                    <tr>
+                        <td>${source.exchange}</td>
+                        <td>${source.symbol}</td>
+                        <td>${source.timeframe}</td>
+                        <td>${source.source}</td>
+                        <td>${source.candles_count.toLocaleString()}</td>
+                        <td>${firstDate}</td>
+                        <td>${lastDate}</td>
+                    </tr>
+                `;
+            });
+
+            html += '</tbody></table>';
+            container.innerHTML = html;
+        }
+
+        function updateIndicatorsDisplay(data) {
+            const container = document.getElementById('indicatorsContainer');
+            
+            if (!data.indicators || data.indicators.length === 0) {
+                container.innerHTML = '<div class="loading">No indicators found</div>';
+                return;
+            }
+
+            let html = '<table class="info-table">';
+            html += '<thead><tr><th>Indicator</th><th>Connection</th><th>Status</th><th>Count</th><th>Last Update</th></tr></thead>';
+            html += '<tbody>';
+            
+            data.indicators.forEach(indicator => {
+                const status = indicator.status || 'unknown';
+                const statusClass = status === 'active' ? 'status-good' : 'status-warning';
+                const lastUpdate = indicator.last_update ? 
+                    new Date(indicator.last_update).toLocaleString() : 'N/A';
+
+                html += `
+                    <tr>
+                        <td>${indicator.name}</td>
+                        <td>${indicator.connection}</td>
+                        <td><span class="${statusClass}">${status}</span></td>
+                        <td>${indicator.count}</td>
+                        <td>${lastUpdate}</td>
+                    </tr>
+                `;
+            });
+
+            html += '</tbody></table>';
+            container.innerHTML = html;
+        }
+
+        function updateActiveIndicatorsCount(data) {
+            const activeCount = data.indicators ? data.indicators.filter(ind => ind.status === 'active').length : 0;
+            document.getElementById('activeIndicators').textContent = activeCount;
+            
+            const element = document.getElementById('activeIndicators');
+            if (activeCount > 0) {
+                element.className = 'stat-value status-good';
+            } else {
+                element.className = 'stat-value status-warning';
+            }
+        }
+
+        function showDataSourcesError(message) {
+            const container = document.getElementById('dataSourcesContainer');
+            container.innerHTML = `<div class="error">${message}</div>`;
+        }
+
+        function showIndicatorsError(message) {
+            const container = document.getElementById('indicatorsContainer');
+            container.innerHTML = `<div class="error">${message}</div>`;
+        }
+
+        function showError(message) {
+            const container = document.querySelector('.container');
+            const errorDiv = document.createElement('div');
+            errorDiv.className = 'error';
+            errorDiv.textContent = message;
+            container.insertBefore(errorDiv, container.firstChild);
+            
+            setTimeout(() => {
+                errorDiv.remove();
+            }, 5000);
+        }
+
+        function updateLastUpdate() {
+            const now = new Date();
+            const utcTime = now.toISOString().substring(11, 19) + ' UTC';
+            document.getElementById('lastUpdate').textContent = utcTime;
+        }
+
+        function refreshData() {
+            loadDataSources();
+        }
+
+        function refreshIndicators() {
+            loadIndicatorsStatus();
+        }
+
+        function startAutoRefresh() {
+            refreshInterval = setInterval(() => {
+                loadDashboard();
+            }, 30000);
+        }
+
+        window.addEventListener('beforeunload', function() {
+            if (refreshInterval) {
+                clearInterval(refreshInterval);
+            }
+        });
+
+        document.addEventListener('keydown', function(event) {
+            if (event.key === 'r' || event.key === 'R') {
+                if (!event.ctrlKey && !event.metaKey) {
+                    event.preventDefault();
+                    loadDashboard();
+                }
+            }
+        });
+    </script>
+</body>
+</html>

@@ -1,0 +1,13 @@
+aggregation:
+  # Source timeframe mapping for aggregated candle generation.
+  # Format: "exchange:SYMBOL:target_timeframe" -> source_timeframe
+  # Example:
+  #   "myexchange:BTC_USDT:4h": "1m"
+  #   "myexchange:BTC_USDT:1d": "4h"
+  #   "myexchange:BTC_USDT:1w": "1d"
+  source_mapping: {}
+
+settings:
+  batch_size: 1000
+  historical_on_startup: true
+  gap_check_enabled: true

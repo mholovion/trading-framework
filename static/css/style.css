@@ -1,0 +1,583 @@
+/* Trading Bot Dashboard Styles */
+:root {
+    --primary-color: #4bc0c0;
+    --secondary-color: #36a2eb;
+    --success-color: #28a745;
+    --warning-color: #ffc107;
+    --danger-color: #dc3545;
+    --info-color: #17a2b8;
+    --dark-bg: #1a1a1a;
+    --darker-bg: #0d1117;
+    --card-bg: #21262d;
+    --border-color: #30363d;
+    --text-primary: #e6edf3;
+    --text-secondary: #7d8590;
+}
+
+* {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+}
+
+body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    background: var(--darker-bg);
+    color: var(--text-primary);
+    line-height: 1.6;
+}
+
+.container {
+    max-width: 1200px;
+    margin: 0 auto;
+    padding: 20px;
+}
+
+/* Header */
+.header {
+    text-align: center;
+    margin-bottom: 30px;
+    padding-bottom: 20px;
+    border-bottom: 2px solid var(--border-color);
+}
+
+.header h1 {
+    color: var(--primary-color);
+    margin-bottom: 10px;
+    font-size: 2.5rem;
+}
+
+.header p {
+    color: var(--text-secondary);
+    font-size: 1.1rem;
+}
+
+.nav-links {
+    margin-top: 15px;
+}
+
+.nav-link {
+    display: inline-block;
+    padding: 8px 16px;
+    margin: 0 5px;
+    background: var(--card-bg);
+    color: var(--text-primary);
+    text-decoration: none;
+    border-radius: 6px;
+    border: 1px solid var(--border-color);
+    transition: all 0.3s ease;
+}
+
+.nav-link:hover {
+    background: var(--primary-color);
+    color: white;
+    transform: translateY(-2px);
+}
+
+/* Stats Grid */
+.stats {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+    gap: 20px;
+    margin-bottom: 30px;
+}
+
+.stat-card {
+    background: var(--card-bg);
+    padding: 20px;
+    border-radius: 12px;
+    border: 1px solid var(--border-color);
+    text-align: center;
+    transition: all 0.3s ease;
+    transform: translateY(-2px);
+}
+
+.stat-card:hover {
+    transform: translateY(-4px) scale(1.02);
+    border-color: var(--primary-color);
+    box-shadow: 0 8px 25px rgba(75, 192, 192, 0.15);
+}
+
+.stat-number {
+    font-size: 2.5rem;
+    font-weight: bold;
+    color: var(--primary-color);
+    margin-bottom: 5px;
+}
+
+/* Indicators Grid */
+.indicators-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(350px, 1fr));
+    gap: 20px;
+    margin-bottom: 30px;
+}
+
+.indicator-card {
+    background: var(--card-bg);
+    border: 1px solid var(--border-color);
+    border-radius: 12px;
+    padding: 20px;
+    transition: all 0.3s ease;
+    transform: translateY(-2px);
+}
+
+.indicator-card:hover {
+    transform: translateY(-4px);
+    border-color: var(--primary-color);
+    box-shadow: 0 8px 25px rgba(75, 192, 192, 0.15);
+}
+
+.indicator-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 15px;
+    padding-bottom: 10px;
+    border-bottom: 1px solid var(--border-color);
+}
+
+.indicator-header h3 {
+    margin: 0;
+}
+
+.indicator-header h3 a {
+    color: var(--text-primary);
+    text-decoration: none;
+}
+
+.indicator-header h3 a:hover {
+    color: var(--primary-color);
+}
+
+.status {
+    padding: 4px 12px;
+    border-radius: 20px;
+    font-size: 0.8rem;
+    font-weight: bold;
+    text-transform: uppercase;
+}
+
+.status.enabled {
+    background: var(--success-color);
+    color: white;
+}
+
+.status.disabled {
+    background: var(--danger-color);
+    color: white;
+}
+
+.indicator-info p {
+    margin: 5px 0;
+    font-size: 0.9rem;
+}
+
+.indicator-actions {
+    margin-top: 15px;
+    display: flex;
+    gap: 10px;
+}
+
+/* Buttons */
+.btn {
+    padding: 8px 16px;
+    border: none;
+    border-radius: 6px;
+    background: var(--primary-color);
+    color: white;
+    text-decoration: none;
+    cursor: pointer;
+    font-size: 0.9rem;
+    transition: all 0.3s ease;
+    display: inline-block;
+}
+
+.btn:hover {
+    background: #36a2a2;
+    transform: translateY(-1px);
+}
+
+.btn.primary {
+    background: var(--primary-color);
+}
+
+.btn.secondary {
+    background: var(--info-color);
+}
+
+.btn.small {
+    padding: 6px 12px;
+    font-size: 0.8rem;
+}
+
+.btn.active {
+    background: var(--success-color);
+}
+
+/* Controls */
+.controls {
+    background: var(--card-bg);
+    padding: 20px;
+    border-radius: 12px;
+    border: 1px solid var(--border-color);
+    margin-bottom: 20px;
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+    gap: 15px;
+    align-items: end;
+}
+
+.control-group {
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+}
+
+.control-group label {
+    font-weight: 500;
+    color: var(--text-secondary);
+    font-size: 0.9rem;
+}
+
+.control-group select,
+.control-group input {
+    padding: 8px 12px;
+    border: 1px solid var(--border-color);
+    border-radius: 6px;
+    background: var(--dark-bg);
+    color: var(--text-primary);
+    font-size: 0.9rem;
+}
+
+.control-group select:focus,
+.control-group input:focus {
+    outline: none;
+    border-color: var(--primary-color);
+    box-shadow: 0 0 0 2px rgba(75, 192, 192, 0.2);
+}
+
+.checkbox-group {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+    max-height: 120px;
+    overflow-y: auto;
+    padding: 5px;
+    border: 1px solid var(--border-color);
+    border-radius: 6px;
+    background: var(--dark-bg);
+}
+
+.checkbox-group label {
+    margin: 0;
+    font-size: 0.85rem;
+}
+
+/* Data Sources */
+.data-sources {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+    gap: 15px;
+    margin-bottom: 20px;
+}
+
+.source-card {
+    background: var(--card-bg);
+    padding: 15px;
+    border-radius: 8px;
+    border-left: 4px solid var(--primary-color);
+}
+
+.source-card h4 {
+    margin: 0 0 10px 0;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.source-card p {
+    margin: 5px 0;
+    font-size: 0.9rem;
+}
+
+.source-card small {
+    color: var(--text-secondary);
+    font-size: 0.8rem;
+}
+
+/* Status Indicators */
+.status-indicator {
+    display: inline-block;
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+    margin-right: 8px;
+}
+
+.status-historical {
+    background: var(--success-color);
+}
+
+.status-aggregated {
+    background: var(--warning-color);
+}
+
+.status-realtime {
+    background: var(--danger-color);
+}
+
+/* Charts */
+.charts-container {
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: 20px;
+}
+
+.chart-wrapper {
+    background: var(--card-bg);
+    border: 1px solid var(--border-color);
+    border-radius: 12px;
+    overflow: hidden;
+}
+
+.chart-title {
+    padding: 15px 20px;
+    background: var(--dark-bg);
+    border-bottom: 1px solid var(--border-color);
+    font-weight: bold;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+/* Data Info */
+.data-info {
+    background: var(--card-bg);
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    padding: 20px;
+    margin-bottom: 20px;
+}
+
+.data-info h3,
+.data-info h4 {
+    margin: 0 0 15px 0;
+    color: var(--primary-color);
+}
+
+.info-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+    gap: 15px;
+}
+
+.info-item {
+    padding: 10px;
+    background: var(--dark-bg);
+    border-radius: 6px;
+    border: 1px solid var(--border-color);
+}
+
+.info-item strong {
+    color: var(--text-primary);
+}
+
+/* Gap Analysis */
+.gap-dataset {
+    margin: 10px 0;
+    padding: 15px;
+    background: var(--dark-bg);
+    border-radius: 6px;
+    border: 1px solid var(--border-color);
+}
+
+.gaps-list,
+.gaps-detailed {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+    gap: 10px;
+    margin-top: 10px;
+}
+
+.gap-item,
+.gap-detail-item {
+    padding: 10px;
+    background: var(--card-bg);
+    border: 1px solid var(--border-color);
+    border-radius: 4px;
+    font-size: 0.9rem;
+}
+
+.gap-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 5px;
+}
+
+.gap-size {
+    background: var(--danger-color);
+    color: white;
+    padding: 2px 8px;
+    border-radius: 4px;
+    font-size: 0.8rem;
+}
+
+.gap-period {
+    font-weight: bold;
+    margin-bottom: 5px;
+}
+
+.gap-context {
+    color: var(--text-secondary);
+}
+
+/* Loading & Error */
+.loading {
+    text-align: center;
+    padding: 40px;
+    background: var(--card-bg);
+    border-radius: 8px;
+    border: 1px solid var(--border-color);
+}
+
+.spinner {
+    width: 40px;
+    height: 40px;
+    border: 4px solid var(--border-color);
+    border-top: 4px solid var(--primary-color);
+    border-radius: 50%;
+    animation: spin 1s linear infinite;
+    margin: 0 auto 15px;
+}
+
+@keyframes spin {
+    0% { transform: rotate(0deg); }
+    100% { transform: rotate(360deg); }
+}
+
+.error {
+    background: var(--danger-color);
+    color: white;
+    padding: 15px;
+    border-radius: 8px;
+    margin-bottom: 20px;
+    text-align: center;
+}
+
+/* Refresh Button */
+.refresh-btn {
+    position: fixed;
+    top: 20px;
+    right: 20px;
+    background: var(--primary-color);
+    color: white;
+    border: none;
+    padding: 10px 20px;
+    border-radius: 25px;
+    cursor: pointer;
+    font-weight: bold;
+    transition: all 0.3s ease;
+    z-index: 1000;
+}
+
+.refresh-btn:hover {
+    background: #36a2a2;
+    transform: scale(1.05);
+}
+
+/* Footer */
+.footer {
+    text-align: center;
+    margin-top: 40px;
+    padding-top: 20px;
+    border-top: 1px solid var(--border-color);
+    color: var(--text-secondary);
+    font-size: 0.9rem;
+}
+
+.footer a {
+    color: var(--primary-color);
+    text-decoration: none;
+}
+
+.footer a:hover {
+    text-decoration: underline;
+}
+
+/* Additional Data */
+.additional-data {
+    background: var(--dark-bg);
+    border: 1px solid var(--border-color);
+    border-radius: 4px;
+    padding: 10px;
+    margin-top: 10px;
+    font-size: 0.8rem;
+    overflow-x: auto;
+    color: var(--text-secondary);
+}
+
+/* Chart canvas стилі */
+.chart-container canvas {
+    cursor: crosshair !important;
+}
+
+.chart-container canvas:hover {
+    cursor: crosshair !important;
+}
+
+.chart-container {
+    padding: 20px;
+    height: 400px;
+    position: relative;
+    overflow: visible;
+}
+/* Фікс для Chart.js tooltip */
+.chartjs-tooltip {
+    opacity: 1 !important;
+    pointer-events: none !important;
+    transition: all 0.2s ease !important;
+}
+
+/* Забезпечити що canvas не блокує взаємодію */
+.chart-container {
+    position: relative;
+    overflow: visible;
+}
+
+/* Responsive */
+@media (max-width: 768px) {
+    .container {
+        padding: 15px;
+    }
+
+    .chart-container {
+        height: 300px;
+    }
+    
+    .header h1 {
+        font-size: 2rem;
+    }
+    
+    .controls {
+        grid-template-columns: 1fr;
+    }
+    
+    .stats {
+        grid-template-columns: repeat(2, 1fr);
+    }
+    
+    .indicators-grid {
+        grid-template-columns: 1fr;
+    }
+    
+    .info-grid {
+        grid-template-columns: 1fr;
+    }
+    
+    .gaps-list,
+    .gaps-detailed {
+        grid-template-columns: 1fr;
+    }
+}
