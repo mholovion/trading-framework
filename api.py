@@ -130,6 +130,10 @@ class TradingBotAPI:
         self.app.router.add_get('/api/strategies/signals', self.get_strategies_signals)
         self.app.router.add_get('/api/strategies/performance', self.get_strategy_performance)
         self.app.router.add_post('/api/strategies/backfill-prices', self.backfill_signal_prices)
+
+        # Data export
+        self.app.router.add_get('/api/export/features', self.get_ml_features)
+        self.app.router.add_get('/api/export/signals', self.get_signals_with_context)
         
         # Web dashboard
         self.app.router.add_get('/', self.dashboard)
@@ -622,6 +626,259 @@ class TradingBotAPI:
 
         except Exception as e:
             self.logger.error(f"Error getting strategies status: {e}")
+            return web.json_response({'error': str(e)}, status=500)
+
+    async def get_ml_features(self, request):
+        """
+        Aligned feature matrix for ML training.
+
+        Query params:
+          exchange   – required
+          symbol     – required
+          timeframe  – candle timeframe to join prices on (default: 4h)
+          start      – ISO date, e.g. 2022-01-01
+          end        – ISO date, e.g. 2026-01-01
+          format     – json (default) | csv
+        """
+        try:
+            exchange = request.query.get('exchange', '').strip().lower()
+            symbol = request.query.get('symbol', '').strip().upper()
+            timeframe = request.query.get('timeframe', '4h').strip().lower()
+            fmt = request.query.get('format', 'json').strip().lower()
+
+            if not exchange or not symbol:
+                return web.json_response(
+                    {'error': 'exchange and symbol are required'}, status=400
+                )
+
+            start_ts, end_ts = None, None
+            try:
+                if request.query.get('start'):
+                    start_ts = int(datetime.fromisoformat(request.query['start']).replace(tzinfo=timezone.utc).timestamp())
+                if request.query.get('end'):
+                    end_ts = int(datetime.fromisoformat(request.query['end']).replace(tzinfo=timezone.utc).timestamp())
+            except ValueError as e:
+                return web.json_response({'error': f'Invalid date format: {e}'}, status=400)
+
+            from sqlalchemy import text
+
+            with self.database_manager.get_session() as session:
+                # All indicator names for this exchange+symbol
+                indicator_rows = session.execute(text("""
+                    SELECT DISTINCT indicator_name
+                    FROM indicators
+                    WHERE exchange = :ex AND symbol = :sym
+                    ORDER BY indicator_name
+                """), {'ex': exchange, 'sym': symbol}).fetchall()
+
+                indicator_names = [r.indicator_name for r in indicator_rows]
+                if not indicator_names:
+                    return web.json_response({'error': 'No indicators found for this exchange/symbol'}, status=404)
+
+                # Pivot: one column per indicator, joined to candle close price
+                indicator_joins = "\n".join([
+                    f"LEFT JOIN indicators i_{i} ON i_{i}.timestamp = c.timestamp"
+                    f"  AND i_{i}.exchange = c.exchange AND i_{i}.symbol = c.symbol"
+                    f"  AND i_{i}.indicator_name = :ind_{i}"
+                    for i, _ in enumerate(indicator_names)
+                ])
+                indicator_selects = ", ".join([
+                    f"i_{i}.value AS \"{name}\""
+                    for i, name in enumerate(indicator_names)
+                ])
+                ind_params = {f'ind_{i}': name for i, name in enumerate(indicator_names)}
+
+                where_clauses = [
+                    "c.exchange = :ex", "c.symbol = :sym",
+                    "c.timeframe = :tf", "c.source_type = 'aggregated'"
+                ]
+                if start_ts:
+                    where_clauses.append("c.timestamp >= :start_ts")
+                    ind_params['start_ts'] = start_ts
+                if end_ts:
+                    where_clauses.append("c.timestamp <= :end_ts")
+                    ind_params['end_ts'] = end_ts
+
+                ind_params.update({'ex': exchange, 'sym': symbol, 'tf': timeframe})
+
+                query = text(f"""
+                    SELECT
+                        c.timestamp,
+                        c.open_price AS open, c.high_price AS high,
+                        c.low_price AS low, c.close_price AS close, c.volume,
+                        {indicator_selects}
+                    FROM candles c
+                    {indicator_joins}
+                    WHERE {" AND ".join(where_clauses)}
+                    ORDER BY c.timestamp ASC
+                """)
+
+                rows = session.execute(query, ind_params).fetchall()
+
+            columns = ['timestamp', 'open', 'high', 'low', 'close', 'volume'] + indicator_names
+
+            if fmt == 'csv':
+                import io, csv
+                buf = io.StringIO()
+                writer = csv.writer(buf)
+                writer.writerow(['datetime', 'open', 'high', 'low', 'close', 'volume'] + indicator_names)
+                for row in rows:
+                    dt = datetime.fromtimestamp(int(row.timestamp), tz=timezone.utc).isoformat()
+                    rest = [float(v) if v is not None else None for v in list(row)[1:]]
+                    writer.writerow([dt] + rest)
+                return web.Response(
+                    body=buf.getvalue(),
+                    content_type='text/csv',
+                    headers={'Content-Disposition': f'attachment; filename="{symbol}_{exchange}_features.csv"'}
+                )
+
+            records = []
+            for row in rows:
+                rec = {
+                    'timestamp': int(row.timestamp),
+                    'datetime': datetime.fromtimestamp(int(row.timestamp), tz=timezone.utc).isoformat(),
+                    'open': float(row.open), 'high': float(row.high),
+                    'low': float(row.low), 'close': float(row.close),
+                    'volume': float(row.volume),
+                }
+                for name in indicator_names:
+                    v = getattr(row, name)
+                    rec[name] = float(v) if v is not None else None
+                records.append(rec)
+
+            return web.json_response({
+                'exchange': exchange, 'symbol': symbol, 'timeframe': timeframe,
+                'columns': ['datetime', 'open', 'high', 'low', 'close', 'volume'] + indicator_names,
+                'count': len(records),
+                'data': records
+            })
+
+        except Exception as e:
+            self.logger.error(f"Error building ML features: {e}", exc_info=True)
+            return web.json_response({'error': str(e)}, status=500)
+
+    async def get_signals_with_context(self, request):
+        """
+        Strategy signals with indicator values at signal time.
+
+        Query params:
+          connection  – filter by connection_name (e.g. sol_usdt_1m)
+          strategy    – filter by strategy_name
+          signal_type – buy | sell | hold
+          start       – ISO date
+          end         – ISO date
+          format      – json (default) | csv
+        """
+        try:
+            connection = request.query.get('connection', '').strip()
+            strategy = request.query.get('strategy', '').strip()
+            signal_type = request.query.get('signal_type', '').strip().upper()
+            fmt = request.query.get('format', 'json').strip().lower()
+
+            start_ts, end_ts = None, None
+            try:
+                if request.query.get('start'):
+                    start_ts = int(datetime.fromisoformat(request.query['start']).replace(tzinfo=timezone.utc).timestamp())
+                if request.query.get('end'):
+                    end_ts = int(datetime.fromisoformat(request.query['end']).replace(tzinfo=timezone.utc).timestamp())
+            except ValueError as e:
+                return web.json_response({'error': f'Invalid date format: {e}'}, status=400)
+
+            from sqlalchemy import text
+
+            with self.database_manager.get_session() as session:
+                where, params = [], {}
+                if connection:
+                    where.append("s.connection_name = :conn"); params['conn'] = connection
+                if strategy:
+                    where.append("s.strategy_name = :strat"); params['strat'] = strategy
+                if signal_type:
+                    where.append("UPPER(s.signal_type) = :stype"); params['stype'] = signal_type
+                if start_ts:
+                    where.append("s.timestamp >= :start_ts"); params['start_ts'] = start_ts
+                if end_ts:
+                    where.append("s.timestamp <= :end_ts"); params['end_ts'] = end_ts
+
+                where_sql = ("WHERE " + " AND ".join(where)) if where else ""
+
+                signals = session.execute(text(f"""
+                    SELECT id, strategy_name, connection_name,
+                           signal_type, timestamp, price, confidence
+                    FROM strategy_signals s
+                    {where_sql}
+                    ORDER BY timestamp ASC
+                """), params).fetchall()
+
+                if not signals:
+                    return web.json_response({'signals': [], 'count': 0})
+
+                # Resolve exchange+symbol from indicators table using connection_name
+                conn_name = connection or signals[0].connection_name
+                connections_cfg = self.config_manager.get_config('connections')
+                conn_cfg = connections_cfg.get('connections', {}).get(conn_name, {})
+                ex_q = conn_cfg.get('exchange', '')
+                sym_q = conn_cfg.get('symbol', '')
+
+                indicator_names = []
+                ind_map: dict = {}
+                if ex_q and sym_q:
+                    indicator_names = [r.indicator_name for r in session.execute(text("""
+                        SELECT DISTINCT indicator_name FROM indicators
+                        WHERE exchange = :ex AND symbol = :sym ORDER BY indicator_name
+                    """), {'ex': ex_q, 'sym': sym_q}).fetchall()]
+
+                    if indicator_names:
+                        signal_timestamps = list({int(s.timestamp) for s in signals})
+                        for row in session.execute(text("""
+                            SELECT indicator_name, timestamp, value
+                            FROM indicators
+                            WHERE exchange = :ex AND symbol = :sym
+                              AND timestamp = ANY(:ts)
+                        """), {'ex': ex_q, 'sym': sym_q, 'ts': signal_timestamps}).fetchall():
+                            ind_map.setdefault(int(row.timestamp), {})[row.indicator_name] = (
+                                float(row.value) if row.value is not None else None
+                            )
+
+            records = []
+            for s in signals:
+                ctx = ind_map.get(int(s.timestamp), {})
+                rec = {
+                    'id': s.id,
+                    'strategy': s.strategy_name,
+                    'connection': s.connection_name,
+                    'signal_type': s.signal_type,
+                    'timestamp': int(s.timestamp),
+                    'datetime': datetime.fromtimestamp(int(s.timestamp), tz=timezone.utc).isoformat(),
+                    'price': float(s.price) if s.price else None,
+                    'confidence': float(s.confidence) if s.confidence else None,
+                }
+                for name in indicator_names:
+                    rec[name] = ctx.get(name)
+                records.append(rec)
+
+            base_cols = ['datetime', 'strategy', 'connection', 'signal_type', 'price', 'confidence']
+
+            if fmt == 'csv':
+                import io, csv
+                buf = io.StringIO()
+                writer = csv.writer(buf)
+                writer.writerow(base_cols + indicator_names)
+                for rec in records:
+                    writer.writerow([rec.get(c) for c in base_cols + indicator_names])
+                return web.Response(
+                    body=buf.getvalue(),
+                    content_type='text/csv',
+                    headers={'Content-Disposition': 'attachment; filename="signals_context.csv"'}
+                )
+
+            return web.json_response({
+                'columns': base_cols + indicator_names,
+                'count': len(records),
+                'signals': records
+            })
+
+        except Exception as e:
+            self.logger.error(f"Error getting signals with context: {e}", exc_info=True)
             return web.json_response({'error': str(e)}, status=500)
 
     async def get_strategies_signals(self, request):
