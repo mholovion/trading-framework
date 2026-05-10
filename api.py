@@ -226,86 +226,26 @@ class TradingBotAPI:
                     return web.json_response(cached)
 
                 from sqlalchemy import text
-                # Scan only the latest chunk per partition key for min/max timestamps,
-                # use approximate_row_count for fast counts — avoids full 236-chunk scan.
-                query = text("""
-                    SELECT
-                        exchange,
-                        symbol,
-                        timeframe,
-                        source_type,
-                        approximate_row_count(
-                            format('%I.%I',
-                                chunk_schema,
-                                chunk_name)::regclass
-                        )                         AS candles_count,
-                        range_start_integer       AS first_timestamp,
-                        range_end_integer         AS last_timestamp
-                    FROM (
-                        SELECT DISTINCT ON (c.exchange, c.symbol, c.timeframe, c.source_type)
-                            c.exchange, c.symbol, c.timeframe, c.source_type,
-                            ch.chunk_schema, ch.chunk_name,
-                            ch.range_start_integer,
-                            ch.range_end_integer
-                        FROM timescaledb_information.chunks ch
-                        JOIN candles c ON TRUE
-                        WHERE ch.hypertable_name = 'candles'
-                          AND NOT ch.is_compressed
-                        ORDER BY c.exchange, c.symbol, c.timeframe, c.source_type,
-                                 ch.range_end_integer DESC
-                    ) sub
-                """)
-
-                # Fallback: simple query restricted to last-seen values only
-                fallback_query = text("""
-                    SELECT
-                        exchange, symbol, timeframe, source_type,
-                        COUNT(*)       AS candles_count,
-                        MIN(timestamp) AS first_timestamp,
-                        MAX(timestamp) AS last_timestamp
-                    FROM candles
-                    WHERE timestamp >= extract(epoch from now() - interval '90 days')::bigint
-                       OR timestamp = (SELECT MIN(timestamp) FROM candles)
-                    GROUP BY exchange, symbol, timeframe, source_type
-                    ORDER BY exchange, symbol, timeframe, source_type
-                """)
-
-                from sqlalchemy import text
                 with self.database_manager.get_session() as session:
-                    # Step 1: get distinct combos from the latest chunk only (fast index scan)
-                    latest_chunk_ts = session.execute(text("""
-                        SELECT MAX(range_start_integer)
-                        FROM timescaledb_information.chunks
-                        WHERE hypertable_name = 'candles'
-                    """)).scalar() or 0
-
-                    combos = session.execute(text("""
-                        SELECT DISTINCT exchange, symbol, timeframe, source_type
+                    rows = session.execute(text("""
+                        SELECT
+                            exchange, symbol, timeframe, source_type,
+                            COUNT(*)       AS candles_count,
+                            MIN(timestamp) AS first_timestamp,
+                            MAX(timestamp) AS last_timestamp
                         FROM candles
-                        WHERE timestamp >= :ts
+                        GROUP BY exchange, symbol, timeframe, source_type
                         ORDER BY exchange, symbol, timeframe, source_type
-                    """), {'ts': latest_chunk_ts}).fetchall()
+                    """)).fetchall()
 
-                    # Step 2: for each combo get MIN/MAX via index — fast per combo
                     sources = []
-                    for combo in combos:
-                        ex, sym, tf, st = combo.exchange, combo.symbol, combo.timeframe, combo.source_type
-                        bounds = session.execute(text("""
-                            SELECT MIN(timestamp) AS first_ts, MAX(timestamp) AS last_ts
-                            FROM candles
-                            WHERE exchange = :ex AND symbol = :sym
-                              AND timeframe = :tf AND source_type = :st
-                        """), {'ex': ex, 'sym': sym, 'tf': tf, 'st': st}).fetchone()
-
-                        approx_count = session.execute(text(
-                            "SELECT approximate_row_count('candles')"
-                        )).scalar() or 0
-
-                        first_date = datetime.fromtimestamp(int(bounds.first_ts), tz=timezone.utc).isoformat() if bounds.first_ts else 'N/A'
-                        last_date = datetime.fromtimestamp(int(bounds.last_ts), tz=timezone.utc).isoformat() if bounds.last_ts else 'N/A'
+                    for row in rows:
+                        first_date = datetime.fromtimestamp(int(row.first_timestamp), tz=timezone.utc).isoformat() if row.first_timestamp else 'N/A'
+                        last_date = datetime.fromtimestamp(int(row.last_timestamp), tz=timezone.utc).isoformat() if row.last_timestamp else 'N/A'
                         sources.append({
-                            'exchange': ex, 'symbol': sym, 'timeframe': tf, 'source': st,
-                            'candles_count': approx_count,
+                            'exchange': row.exchange, 'symbol': row.symbol,
+                            'timeframe': row.timeframe, 'source': row.source_type,
+                            'candles_count': row.candles_count,
                             'first_datetime': first_date,
                             'last_datetime': last_date,
                             'status': 'online'
@@ -581,13 +521,7 @@ class TradingBotAPI:
                 return web.json_response(cached)
 
             from sqlalchemy import text
-            # Restrict to latest chunk only — avoids scanning 236 chunks.
             query = text("""
-                WITH latest_chunk AS (
-                    SELECT MAX(range_start_integer) AS ts
-                    FROM timescaledb_information.chunks
-                    WHERE hypertable_name = 'indicators'
-                )
                 SELECT
                     indicator_name,
                     exchange,
@@ -595,8 +529,7 @@ class TradingBotAPI:
                     timeframe,
                     COUNT(*) AS count,
                     MAX(timestamp) AS last_update
-                FROM indicators, latest_chunk
-                WHERE timestamp >= latest_chunk.ts
+                FROM indicators
                 GROUP BY indicator_name, exchange, symbol, timeframe
                 ORDER BY indicator_name, exchange, symbol, timeframe
             """)
