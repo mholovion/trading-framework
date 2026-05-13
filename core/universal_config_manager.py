@@ -41,15 +41,19 @@ class UniversalConfigManager:
         self._connection_mapping: Optional[Dict[str, Dict[str, str]]] = None
         
     def _get_config_dir_from_args(self) -> str:
-        """Get config directory from command line arguments"""
+        """Get config directory from env var or command line arguments."""
+        # Env var takes priority (set by launcher.py when spawning workers)
+        env_override = os.environ.get('CONFIG_DIR')
+        if env_override:
+            return env_override
+
         parser = argparse.ArgumentParser(add_help=False)
-        parser.add_argument('--config-dir', '--config_dir', 
-                          default=os.path.join(os.getcwd(), 'config'),
-                          help='Configuration directory path')
-        
-        # Parse known args to avoid conflicts with other argument parsers
+        parser.add_argument(
+            '--config-dir', '--config_dir',
+            default=os.path.join(os.getcwd(), 'config'),
+            help='Configuration directory path',
+        )
         known_args, _ = parser.parse_known_args()
-        
         return known_args.config_dir
         
     def load_config(self, config_name: str) -> Dict[str, Any]:
@@ -81,27 +85,121 @@ class UniversalConfigManager:
         
         return config
         
-    def load_all_configs(self) -> Dict[str, Dict[str, Any]]:
-        """Load all required configuration files"""
+    def load_all_configs(self, symbol_filter: str = None) -> Dict[str, Dict[str, Any]]:
+        """Load all required configuration files and expand templates."""
         required_configs = ['main', 'connections', 'indicators', 'strategies', 'aggregation']
-        
+
         self.logger.info("Loading all configurations...")
-        
+
         for config_name in required_configs:
             try:
                 self.load_config(config_name)
             except FileNotFoundError as e:
                 self.logger.error(f"Missing required configuration: {config_name}")
                 raise e
-                
-        # Validate all configurations together
+
+        # Expand templates into full per-symbol configs before validation
+        self.expand_from_templates(symbol_filter=symbol_filter)
+
+        # Validate all configurations together (on expanded format)
         self.validator.validate_and_raise(self._configs)
-        
+
         # Build connection mapping
         self._build_connection_mapping()
-        
+
         self.logger.info("All configurations loaded and validated")
         return self._configs
+
+    def expand_from_templates(self, symbol_filter: str = None) -> None:
+        """Expand indicator/strategy templates into per-symbol configs.
+
+        Reads indicator_templates and strategy_templates from loaded configs,
+        iterates enabled connections, and generates the expanded format that
+        all services already understand. Optionally filters to a single symbol.
+        """
+        connections_cfg = self._configs.get('connections', {}).get('connections', {})
+        indicator_templates = self._configs.get('indicators', {}).get('indicator_templates', {})
+        strategy_templates = self._configs.get('strategies', {}).get('strategy_templates', {})
+        agg_rules = (
+            self._configs.get('aggregation', {})
+            .get('aggregation', {})
+            .get('timeframe_rules', [])
+        )
+
+        expanded_indicators: Dict[str, Any] = {}
+        expanded_strategies: Dict[str, Any] = {}
+        expanded_agg_mapping: Dict[str, str] = {}
+
+        for conn_name, conn in connections_cfg.items():
+            if not conn.get('enabled'):
+                continue
+
+            symbol = conn['symbol']
+            if symbol_filter and symbol != symbol_filter:
+                continue
+
+            exchange = conn['exchange']
+            prefix = symbol.lower().split('_')[0]  # SOL_USDT → sol
+
+            # Expand indicator templates
+            for tmpl_id in conn.get('indicators', []):
+                if tmpl_id not in indicator_templates:
+                    raise ValueError(
+                        f"Unknown indicator template '{tmpl_id}' in connection '{conn_name}'. "
+                        f"Available templates: {list(indicator_templates.keys())}"
+                    )
+                indicator_id = f"{prefix}_{tmpl_id}"
+                expanded_indicators[indicator_id] = {
+                    **indicator_templates[tmpl_id],
+                    'connection': conn_name,
+                    'enabled': True,
+                }
+
+            # Expand strategy templates
+            for strat_name, overrides in (conn.get('strategies') or {}).items():
+                if strat_name not in strategy_templates:
+                    raise ValueError(
+                        f"Unknown strategy template '{strat_name}' in connection '{conn_name}'. "
+                        f"Available templates: {list(strategy_templates.keys())}"
+                    )
+                tmpl = strategy_templates[strat_name]
+                strategy_id = f"{prefix}_{strat_name}"
+                requires = tmpl.get('requires', [])
+                required_indicators = [f"{prefix}_{ind}" for ind in requires]
+                params = {**tmpl.get('parameters', {}), **(overrides or {})}
+
+                # Auto-generate named indicator refs for ema_deviation
+                if strat_name == 'ema_deviation' and len(requires) >= 2:
+                    params['ema_indicator'] = f"{prefix}_{requires[0]}"
+                    params['trend_indicator'] = f"{prefix}_{requires[1]}"
+
+                expanded_strategies[strategy_id] = {
+                    'enabled': True,
+                    'connection': conn_name,
+                    'plugin': tmpl['plugin'],
+                    'required_indicators': required_indicators,
+                    'parameters': params,
+                }
+
+            # Expand aggregation source_mapping from timeframe rules
+            for rule in agg_rules:
+                source = rule['source']
+                for target in rule.get('targets', []):
+                    expanded_agg_mapping[f"{exchange}:{symbol}:{target}"] = source
+
+        # Replace raw template configs with the expanded format services already expect
+        self._configs['indicators'] = {'indicators': expanded_indicators}
+        self._configs['strategies'] = {'strategies': expanded_strategies}
+        if 'aggregation' not in self._configs:
+            self._configs['aggregation'] = {'aggregation': {}}
+        self._configs['aggregation'].setdefault('aggregation', {})['source_mapping'] = expanded_agg_mapping
+
+        self.logger.info(
+            f"Templates expanded: {len(expanded_indicators)} indicators, "
+            f"{len(expanded_strategies)} strategies, "
+            f"{len(expanded_agg_mapping)} aggregation mappings"
+            + (f" (symbol={symbol_filter})" if symbol_filter else "")
+        )
         
     def get_config(self, config_name: str) -> Dict[str, Any]:
         """Get loaded configuration"""

@@ -42,7 +42,7 @@ class IndicatorsReactiveService:
         self.indicator_plugins: Dict[str, Any] = {}
         
         # Concurrency control to prevent database overload
-        self.calculation_semaphore = asyncio.Semaphore(10)  # Increased to 10 for faster bulk processing
+        self.calculation_semaphore = asyncio.Semaphore(30)
         
         self.logger = get_indicators_logger()
         
@@ -138,14 +138,18 @@ class IndicatorsReactiveService:
             # Get indicators that use this connection and timeframe
             matching_indicators = self._get_matching_indicators(connection_name, timeframe)
             
-            # Calculate each matching indicator
-            for indicator_name in matching_indicators:
-                try:
-                    self.logger.info(f"Calculate indicator: {indicator_name} for {exchange}/{symbol}/{timeframe} at {timestamp}")
-                    await self._calculate_indicator(indicator_name, exchange, symbol, timeframe, timestamp)
-                except Exception as e:
-                    self.logger.error(f"Failed to calculate indicator {indicator_name}: {e}")
-                    self.stats['calculation_errors'] += 1
+            # Calculate all matching indicators in parallel
+            if matching_indicators:
+                self.logger.info(f"Calculating {len(matching_indicators)} indicators in parallel for {exchange}/{symbol}/{timeframe}")
+                tasks = [
+                    self._calculate_indicator(indicator_name, exchange, symbol, timeframe, timestamp)
+                    for indicator_name in matching_indicators
+                ]
+                results = await asyncio.gather(*tasks, return_exceptions=True)
+                for indicator_name, result in zip(matching_indicators, results):
+                    if isinstance(result, Exception):
+                        self.logger.error(f"Failed to calculate indicator {indicator_name}: {result}")
+                        self.stats['calculation_errors'] += 1
             
         except Exception as e:
             self.logger.error(f"Error handling candle update: {e}")
@@ -299,7 +303,12 @@ class IndicatorsReactiveService:
 
     async def _calculate_indicator_range(self, indicator_name: str, exchange: str, symbol: str,
                                          timeframe: str, start_timestamp: int, end_timestamp: int):
-        """Calculate indicator for a range using a single DB fetch + sliding window."""
+        """Calculate indicator for a range using a single DB fetch.
+
+        Fast path: if plugin implements calculate_stream(), uses stateful O(n)
+        calculation and writes directly to the DB (bypassing RabbitMQ).
+        Slow path: sliding-window per candle + RabbitMQ publish (legacy).
+        """
         async with self.calculation_semaphore:
             try:
                 plugin = self.indicator_plugins.get(indicator_name)
@@ -309,12 +318,10 @@ class IndicatorsReactiveService:
 
                 required_periods = getattr(plugin, 'get_required_periods', lambda: 50)()
 
-                # Derive timeframe seconds from the gap between first two candles (or fallback)
                 from core.timeframe_utils import TimeframeUtils
                 tf_seconds = TimeframeUtils.get_timeframe_seconds(timeframe)
                 warmup_start = start_timestamp - required_periods * tf_seconds
 
-                # Single query: warmup candles + target candles
                 loop = asyncio.get_event_loop()
                 all_candles = await loop.run_in_executor(
                     None, self._fetch_candles_for_range_sync,
@@ -325,7 +332,6 @@ class IndicatorsReactiveService:
                     self.logger.warning(f"No candles found for {indicator_name} range calculation")
                     return
 
-                # Find where the target range begins
                 target_start_idx = next(
                     (i for i, c in enumerate(all_candles) if c['timestamp'] >= start_timestamp),
                     len(all_candles)
@@ -334,7 +340,19 @@ class IndicatorsReactiveService:
                 self.logger.info(f"Calculating {indicator_name} for {target_count} candles "
                                  f"(warmup: {target_start_idx})")
 
-                PUBLISH_BATCH = 100
+                # ── Fast path ────────────────────────────────────────────────
+                if hasattr(plugin, 'calculate_stream'):
+                    results = await plugin.calculate_stream(all_candles, target_start_idx)
+                    indicators_config = self.config_manager.get_config('indicators')
+                    connection_name = indicators_config['indicators'][indicator_name]['connection']
+                    await self._direct_bulk_insert(
+                        indicator_name, exchange, symbol, timeframe, connection_name,
+                        all_candles[target_start_idx:], results
+                    )
+                    return
+
+                # ── Slow path (sliding window + RabbitMQ) ────────────────────
+                PUBLISH_BATCH = 500
                 calculated_indicators = []
                 total_calculated = 0
 
@@ -363,7 +381,7 @@ class IndicatorsReactiveService:
                         await self._bulk_publish_indicators(calculated_indicators)
                         calculated_indicators = []
                         self.logger.info(f" {indicator_name} batch progress: {total_calculated}/{target_count}")
-                        await asyncio.sleep(0)  # yield to event loop
+                        await asyncio.sleep(0)
 
                 if calculated_indicators:
                     await self._bulk_publish_indicators(calculated_indicators)
@@ -374,6 +392,47 @@ class IndicatorsReactiveService:
 
             except Exception as e:
                 self.logger.error(f"Error in indicator range calculation: {e}")
+
+    def _insert_chunk_sync(self, rows: list):
+        """Bulk-insert a chunk of indicator rows directly into the DB (runs in thread pool)."""
+        from sqlalchemy.dialects.postgresql import insert as pg_insert
+        with self.database_manager.get_session() as session:
+            stmt = pg_insert(Indicator.__table__).values(rows)
+            stmt = stmt.on_conflict_do_nothing(
+                index_elements=['indicator_name', 'exchange', 'symbol', 'timeframe', 'timestamp']
+            )
+            session.execute(stmt)
+            session.commit()
+
+    async def _direct_bulk_insert(self, indicator_name: str, exchange: str, symbol: str,
+                                  timeframe: str, connection_name: str,
+                                  target_candles: list, results: list):
+        """Write indicator values directly to DB, bypassing RabbitMQ for fast backfill."""
+        CHUNK = 5000
+        rows = [
+            {
+                'connection_name': connection_name,
+                'indicator_name': indicator_name,
+                'exchange': exchange,
+                'symbol': symbol,
+                'timeframe': timeframe,
+                'timestamp': c['timestamp'],
+                'value': r['value'],
+                'meta_data': '{}',
+            }
+            for c, r in zip(target_candles, results)
+            if r is not None
+        ]
+        total = 0
+        loop = asyncio.get_event_loop()
+        for i in range(0, len(rows), CHUNK):
+            chunk = rows[i: i + CHUNK]
+            await loop.run_in_executor(None, self._insert_chunk_sync, chunk)
+            total += len(chunk)
+            self.stats['indicators_calculated'] += len(chunk)
+            self.logger.info(f"  {indicator_name} direct insert: {total}/{len(rows)}")
+            await asyncio.sleep(0)  # yield to event loop
+        self.logger.info(f"Direct insert complete: {total} {indicator_name} values")
     
     async def _bulk_publish_indicators(self, calculated_indicators: List[dict]):
         """Bulk publish calculated indicators as single message to reduce queue overhead"""

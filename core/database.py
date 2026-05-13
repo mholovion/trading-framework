@@ -20,7 +20,7 @@ from sqlalchemy.exc import SQLAlchemyError, IntegrityError
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from core.exceptions import DatabaseError
-from models.base import Base, Candle, RealtimeCandle, Indicator, Strategy, StrategySignal
+from models.base import Base, Candle, RealtimeCandle, Indicator, StrategySignal
 
 
 class DatabaseManager:
@@ -44,15 +44,18 @@ class DatabaseManager:
                 f"@{self.config['host']}:{self.config['port']}/{self.config['name']}"
             )
             
-            # Create engine with connection pooling
+            # Create engine with connection pooling.
+            # jit=off: PostgreSQL JIT compilation adds 10-30s overhead for aggregate queries
+            # on small-to-medium tables — far exceeds any benefit it provides here.
             self.engine = create_engine(
                 connection_url,
                 poolclass=QueuePool,
                 pool_size=self.config.get('connection_pool_size', 20),
                 max_overflow=self.config.get('max_overflow', 10),
                 pool_timeout=self.config.get('query_timeout', 30),
-                pool_recycle=3600,  # Recycle connections every hour
-                echo=False  # Set to True for SQL debugging
+                pool_recycle=3600,
+                echo=False,
+                connect_args={"options": "-c jit=off"},
             )
             
             # Create session factory
@@ -532,55 +535,36 @@ class DatabaseManager:
             return False
     
     def get_indicator_values(self, indicator_name: str, exchange: str, symbol: str,
-                           timeframe: str, limit: int = 100) -> List[Dict]:
+                           timeframe: str, limit: int = 100,
+                           start_ts: int = None, end_ts: int = None) -> List[Dict]:
         """Get indicator values using ORM"""
         try:
             with self.get_session() as session:
-                indicators = session.query(Indicator).filter(
+                q = session.query(Indicator).filter(
                     Indicator.indicator_name == indicator_name,
                     Indicator.exchange == exchange,
                     Indicator.symbol == symbol,
                     Indicator.timeframe == timeframe
-                ).order_by(desc(Indicator.timestamp)).limit(limit).all()
-                
-                result = []
-                for indicator in indicators:
-                    result.append({
-                        'timestamp': indicator.timestamp,
-                        'value': float(indicator.value),
-                        'meta_data': indicator.meta_data
-                    })
-                
-                return result
-                
+                )
+                if start_ts is not None:
+                    q = q.filter(Indicator.timestamp >= start_ts)
+                if end_ts is not None:
+                    q = q.filter(Indicator.timestamp <= end_ts)
+
+                if start_ts is not None or end_ts is not None:
+                    indicators = q.order_by(asc(Indicator.timestamp)).all()
+                else:
+                    indicators = q.order_by(desc(Indicator.timestamp)).limit(limit).all()
+                    indicators = list(reversed(indicators))
+
+                return [
+                    {'timestamp': i.timestamp, 'value': float(i.value), 'meta_data': i.meta_data}
+                    for i in indicators
+                ]
+
         except Exception as e:
             self.logger.error(f"Error getting indicator values: {e}")
             return []
-    
-    # Strategy operations
-    def store_strategy_signal(self, strategy_name: str, exchange: str, symbol: str,
-                            timeframe: str, timestamp: int, signal: str,
-                            confidence: float, meta_data: Optional[Dict] = None) -> bool:
-        """Store strategy signal using ORM"""
-        try:
-            with self.get_session() as session:
-                strategy = Strategy(
-                    strategy_name=strategy_name,
-                    exchange=exchange,
-                    symbol=symbol,
-                    timeframe=timeframe,
-                    timestamp=timestamp,
-                    signal=signal,
-                    confidence=confidence,
-                    meta_data=meta_data
-                )
-                session.add(strategy)
-                session.commit()
-                return True
-                
-        except Exception as e:
-            self.logger.error(f"Error storing strategy signal: {e}")
-            return False
     
     def get_strategy_signals(self, strategy_name: str, exchange: str, symbol: str,
                            timeframe: str, limit: int = 100) -> List[Dict]:

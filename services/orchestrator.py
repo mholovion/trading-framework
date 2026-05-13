@@ -20,7 +20,7 @@ from core.universal_config_manager import UniversalConfigManager
 from core.database import DatabaseManager
 from core.logging_config import get_orchestrator_logger
 from core.exceptions import ConfigurationError
-from rabbitmq.rabbitmq_client import RabbitMQClient, QueueManager
+from core.queue_client import InProcessQueueClient
 from services.historical_data_service import HistoricalDataService
 from services.realtime_data_service import RealtimeDataService
 from services.database_update_service import DatabaseUpdateService
@@ -43,7 +43,8 @@ class MicroservicesOrchestratorV2:
         # Core components
         self.config_manager: Optional[UniversalConfigManager] = None
         self.database_manager: Optional[DatabaseManager] = None
-        self.queue_client: Optional[RabbitMQClient] = None
+        self.queue_client: Optional[InProcessQueueClient] = None
+        self.symbol_filter: Optional[str] = None
         
         # Microservices
         self.services: Dict[str, Any] = {}
@@ -96,10 +97,10 @@ class MicroservicesOrchestratorV2:
     async def _initialize_config(self):
         """Initialize configuration manager"""
         self.logger.info("Initializing configuration...")
-        
+
         self.config_manager = UniversalConfigManager()
-        self.config_manager.load_all_configs()
-        
+        self.config_manager.load_all_configs(symbol_filter=self.symbol_filter)
+
         self.logger.info("Configuration loaded successfully")
     
     async def _initialize_database(self):
@@ -129,23 +130,11 @@ class MicroservicesOrchestratorV2:
         self.logger.info("Database manager initialized successfully")
     
     async def _initialize_queue(self):
-        """Initialize message queue system"""
-        self.logger.info("Initializing message queue...")
-        
-        # Get RabbitMQ URL from environment (required for production)
-        rabbitmq_url = os.getenv('RABBITMQ_URL')
-        if not rabbitmq_url:
-            raise ValueError("RABBITMQ_URL environment variable is required")
-        
-        # Setup RabbitMQ queues
-        queue_manager = QueueManager(rabbitmq_url)
-        await queue_manager.setup_queues()
-        
-        # Initialize client
-        self.queue_client = RabbitMQClient(rabbitmq_url)
+        """Initialize in-process message queue."""
+        self.logger.info("Initializing in-process message queue...")
+        self.queue_client = InProcessQueueClient()
         await self.queue_client.connect()
-        
-        self.logger.info("Message queue initialized successfully")
+        self.logger.info("In-process message queue initialized")
     
     async def _load_exchange_plugins(self):
         """Load and initialize exchange plugins for all connections"""
@@ -374,14 +363,19 @@ class MicroservicesOrchestratorV2:
     async def _monitor_services(self):
         """Monitor service health and provide statistics"""
         self.logger.info("Starting services monitoring...")
-        
+        _progress_tick = 0
+
         while self.running:
             try:
-                await asyncio.sleep(60)  # Monitor every minute
-                
+                await asyncio.sleep(60)
+                _progress_tick += 1
+
                 if not self.shutdown_in_progress:
-                    await self._log_system_statistics()
                     await self._check_service_health()
+                    # Full stats every 5 min; progress every minute
+                    if _progress_tick % 5 == 0:
+                        await self._log_system_statistics()
+                    await self._log_pipeline_progress()
                 
             except asyncio.CancelledError:
                 self.logger.info("Services monitoring cancelled")
@@ -429,6 +423,100 @@ class MicroservicesOrchestratorV2:
                 except Exception as e:
                     self.logger.debug(f"Could not get statistics for {service_name}: {e}")
     
+    async def _log_pipeline_progress(self):
+        """Log compact pipeline progress every monitor cycle."""
+        try:
+            from sqlalchemy import text
+
+            indicators_cfg  = self.config_manager.get_config('indicators').get('indicators', {})
+            strategies_cfg  = self.config_manager.get_config('strategies').get('strategies', {})
+            connections_cfg = self.config_manager.get_config('connections').get('connections', {})
+            aggregation_cfg = self.config_manager.get_config('aggregation').get('aggregation', {})
+            source_mapping  = aggregation_cfg.get('source_mapping', {})
+
+            tf_sec = {'1m': 60, '5m': 300, '1h': 3600, '4h': 14400,
+                      '1d': 86400, '1w': 604800}
+
+            def _bar(pct: float, width: int = 16) -> str:
+                filled = int(pct / 100 * width)
+                return '█' * filled + '░' * (width - filled)
+
+            def _fmt(n: int) -> str:
+                return f'{n:,}'
+
+            with self.database_manager.get_session() as session:
+                # ── Candle counts per (exchange, symbol, timeframe, source) ──
+                candle_rows = session.execute(text("""
+                    SELECT exchange, symbol, timeframe, source_type, COUNT(*) AS cnt
+                    FROM candles GROUP BY exchange, symbol, timeframe, source_type
+                """)).fetchall()
+                cmap = {(r.exchange, r.symbol, r.timeframe, r.source_type): r.cnt for r in candle_rows}
+
+                # ── Indicator counts ──
+                ind_rows = session.execute(text(
+                    "SELECT indicator_name, COUNT(*) AS cnt FROM indicators GROUP BY indicator_name"
+                )).fetchall()
+                imap = {r.indicator_name: r.cnt for r in ind_rows}
+
+                # ── Strategy signal counts ──
+                strat_rows = session.execute(text(
+                    "SELECT strategy_name, COUNT(*) AS cnt FROM strategy_signals GROUP BY strategy_name"
+                )).fetchall()
+                smap = {r.strategy_name: r.cnt for r in strat_rows}
+
+            lines = ['─── Pipeline Progress ───────────────────────────────────']
+
+            # Aggregation
+            seen = set()
+            for map_key, src_tf in source_mapping.items():
+                parts = map_key.split(':')
+                if len(parts) != 3:
+                    continue
+                ex, sym, tgt_tf = parts
+                if (ex, sym, tgt_tf) in seen:
+                    continue
+                seen.add((ex, sym, tgt_tf))
+                actual = cmap.get((ex, sym, tgt_tf, 'aggregated'), 0)
+                src = cmap.get((ex, sym, src_tf, 'aggregated'), 0) or cmap.get((ex, sym, src_tf, 'realtime'), 0)
+                ratio = tf_sec.get(tgt_tf, 1) // tf_sec.get(src_tf, 1) if tf_sec.get(src_tf) else 1
+                expected = (src // ratio) if ratio > 0 else 0
+                pct = min(actual / expected * 100, 100) if expected > 0 else (100.0 if actual > 0 else 0.0)
+                lines.append(f'  AGG  {sym:12s} {src_tf}→{tgt_tf:3s}  {_bar(pct)}  {pct:5.1f}%  {_fmt(actual)}/{_fmt(expected)}')
+
+            lines.append('')
+
+            # Indicators
+            for ind_name, cfg in indicators_cfg.items():
+                if not cfg.get('enabled', True):
+                    continue
+                conn = cfg.get('connection', '')
+                ex   = connections_cfg.get(conn, {}).get('exchange', '')
+                sym  = connections_cfg.get(conn, {}).get('symbol', '')
+                src_tf = cfg.get('source_timeframe', '1m')
+                actual   = imap.get(ind_name, 0)
+                expected = cmap.get((ex, sym, src_tf, 'aggregated'), 0) or cmap.get((ex, sym, src_tf, 'realtime'), 0)
+                pct = min(actual / expected * 100, 100) if expected > 0 else (100.0 if actual > 0 else 0.0)
+                lines.append(f'  IND  {ind_name:30s}  {_bar(pct)}  {pct:5.1f}%  {_fmt(actual)}/{_fmt(expected)}')
+
+            lines.append('')
+
+            # Strategies
+            for strat_name, cfg in strategies_cfg.items():
+                if not cfg.get('enabled', True):
+                    continue
+                base_ind = cfg.get('base_indicator') or (cfg.get('required_indicators') or [None])[0]
+                actual   = smap.get(strat_name, 0)
+                expected = imap.get(base_ind, 0) if base_ind else 0
+                pct = min(actual / expected * 100, 100) if expected > 0 else (100.0 if actual > 0 else 0.0)
+                lines.append(f'  STRA {strat_name:36s}  {_bar(pct)}  {pct:5.1f}%  {_fmt(actual)}/{_fmt(expected)}')
+
+            lines.append('─' * 60)
+            for line in lines:
+                self.logger.info(line)
+
+        except Exception as e:
+            self.logger.debug(f"Progress log error: {e}")
+
     async def stop_service(self, service_name: str):
         """Stop individual service"""
         if service_name not in self.service_tasks:
@@ -552,32 +640,21 @@ class MicroservicesOrchestratorV2:
             try:
                 self.logger.info("Starting coordinated gap recovery cycle...")
                 
-                # Phase 1: Candles Gap Recovery
-                self.logger.info("Phase 1: Candle gap recovery...")
+                self.logger.info("Running gap recovery (candles + indicators + strategies in parallel)...")
+                tasks = []
                 if 'gap_recovery' in self.services:
-                    await self.services['gap_recovery'].check_and_recover_gaps()
-                    self.logger.info("Candle gap recovery completed")
-                
-                # Wait a bit for candles to settle
-                await asyncio.sleep(10)
-                
-                # Phase 2: Indicators Gap Recovery  
-                self.logger.info("Phase 2: Indicators gap recovery...")
+                    tasks.append(self.services['gap_recovery'].check_and_recover_gaps())
                 if 'indicators_gap' in self.services:
-                    await self.services['indicators_gap'].check_and_recover_gaps()
-                    self.logger.info("Indicators gap recovery completed")
-                
-                # Wait a bit for indicators to settle
-                await asyncio.sleep(10)
-                
-                # Phase 3: Strategies Gap Recovery
-                self.logger.info("Phase 3: Strategies gap recovery...")
+                    tasks.append(self.services['indicators_gap'].check_and_recover_gaps())
                 if 'strategies_gap' in self.services:
-                    await self.services['strategies_gap'].check_and_recover_gaps()
-                    self.logger.info("Strategies gap recovery completed")
-                else:
-                    self.logger.info("Strategies gap recovery completed (service not available)")
-                
+                    tasks.append(self.services['strategies_gap'].check_and_recover_gaps())
+
+                if tasks:
+                    results = await asyncio.gather(*tasks, return_exceptions=True)
+                    for i, result in enumerate(results):
+                        if isinstance(result, Exception):
+                            self.logger.error(f"Gap recovery task {i} failed: {result}")
+
                 self.logger.info("Coordinated gap recovery cycle completed")
                 
                 # Wait before next cycle
@@ -618,25 +695,40 @@ class MicroservicesOrchestratorV2:
             self.running = False
 
 
-async def main():
-    """Main function"""
-    # Setup logging - use centralized configuration
+async def main(config_dir: str = None, symbol: str = None):
+    """Main function.
+
+    Args:
+        config_dir: Override config directory (used when called from launcher.py).
+        symbol: Restrict this worker to a single symbol, e.g. "SOL_USDT".
+    """
+    import argparse
+
     logger = get_orchestrator_logger()
-    
+
+    # Parse CLI args only when running standalone (not called from launcher)
+    if config_dir is None and symbol is None:
+        parser = argparse.ArgumentParser()
+        parser.add_argument('--config-dir', default=None)
+        parser.add_argument('--symbol', default=None)
+        args, _ = parser.parse_known_args()
+        config_dir = args.config_dir
+        symbol = args.symbol or os.getenv('TRADING_SYMBOL')
+
     orchestrator = None
-    
+
     try:
-        # Create and initialize orchestrator
-        logger.info("Creating orchestrator instance...")
+        logger.info(f"Creating orchestrator instance (symbol={symbol or 'ALL'})...")
         orchestrator = MicroservicesOrchestratorV2()
-        logger.info("Initializing orchestrator...")
+        orchestrator.symbol_filter = symbol
+        if config_dir:
+            # Override the config dir used by UniversalConfigManager
+            os.environ.setdefault('CONFIG_DIR_OVERRIDE', config_dir)
+
         await orchestrator.initialize()
         logger.info("Orchestrator initialized, starting run loop...")
-        
-        # Run orchestrator
         await orchestrator.run()
-        logger.info("Orchestrator run completed")
-        
+
     except KeyboardInterrupt:
         logger.info("Keyboard interrupt received")
     except Exception as e:
@@ -645,7 +737,7 @@ async def main():
     finally:
         if orchestrator:
             await orchestrator.shutdown()
-    
+
     logger.info("Orchestrator shutdown completed")
     return 0
 

@@ -134,12 +134,16 @@ class TradingBotAPI:
         # Data export
         self.app.router.add_get('/api/export/features', self.get_ml_features)
         self.app.router.add_get('/api/export/signals', self.get_signals_with_context)
-        
+
+        # Progress endpoint
+        self.app.router.add_get('/api/progress', self.get_progress)
+
         # Web dashboard
         self.app.router.add_get('/', self.dashboard)
         self.app.router.add_get('/dashboard', self.dashboard)
-        
-        # Chart pages  
+        self.app.router.add_get('/progress', self.progress_page)
+
+        # Chart pages
         self.app.router.add_get('/chart', self.trading_chart)
         self.app.router.add_get('/indicators', self.indicators_chart)
         self.app.router.add_get('/strategies', self.strategies_chart)
@@ -225,31 +229,40 @@ class TradingBotAPI:
             
             # If no parameters provided, return dashboard-compatible format
             if not any([exchange, symbol, timeframe]):
-                cached, hit = _get_cached('candle_sources', 60.0)
+                cached, hit = _get_cached('candle_sources', 300.0)
                 if hit:
                     return web.json_response(cached)
 
                 from sqlalchemy import text
+                # Use per-group index scans (DISTINCT ON) + approx count instead of
+                # full COUNT(*) GROUP BY which triggers a slow multi-chunk seq scan.
                 with self.database_manager.get_session() as session:
-                    rows = session.execute(text("""
-                        SELECT
-                            exchange, symbol, timeframe, source_type,
-                            COUNT(*)       AS candles_count,
-                            MIN(timestamp) AS first_timestamp,
-                            MAX(timestamp) AS last_timestamp
+                    groups = session.execute(text("""
+                        SELECT DISTINCT exchange, symbol, timeframe, source_type
                         FROM candles
-                        GROUP BY exchange, symbol, timeframe, source_type
                         ORDER BY exchange, symbol, timeframe, source_type
                     """)).fetchall()
 
                     sources = []
-                    for row in rows:
-                        first_date = datetime.fromtimestamp(int(row.first_timestamp), tz=timezone.utc).isoformat() if row.first_timestamp else 'N/A'
-                        last_date = datetime.fromtimestamp(int(row.last_timestamp), tz=timezone.utc).isoformat() if row.last_timestamp else 'N/A'
+                    for g in groups:
+                        ex, sym, tf, st = g.exchange, g.symbol, g.timeframe, g.source_type
+                        stats = session.execute(text("""
+                            SELECT
+                                (SELECT timestamp FROM candles
+                                 WHERE exchange=:ex AND symbol=:sym AND timeframe=:tf AND source_type=:st
+                                 ORDER BY timestamp ASC  LIMIT 1) AS first_ts,
+                                (SELECT timestamp FROM candles
+                                 WHERE exchange=:ex AND symbol=:sym AND timeframe=:tf AND source_type=:st
+                                 ORDER BY timestamp DESC LIMIT 1) AS last_ts,
+                                approximate_row_count('candles') AS approx_total
+                        """), dict(ex=ex, sym=sym, tf=tf, st=st)).fetchone()
+
+                        first_date = datetime.fromtimestamp(int(stats.first_ts), tz=timezone.utc).isoformat() if stats.first_ts else 'N/A'
+                        last_date  = datetime.fromtimestamp(int(stats.last_ts),  tz=timezone.utc).isoformat() if stats.last_ts  else 'N/A'
                         sources.append({
-                            'exchange': row.exchange, 'symbol': row.symbol,
-                            'timeframe': row.timeframe, 'source': row.source_type,
-                            'candles_count': row.candles_count,
+                            'exchange': ex, 'symbol': sym,
+                            'timeframe': tf, 'source': st,
+                            'candles_count': int(stats.approx_total or 0),
                             'first_datetime': first_date,
                             'last_datetime': last_date,
                             'status': 'online'
@@ -443,19 +456,25 @@ class TradingBotAPI:
             symbol = request.query.get('symbol', '').strip().upper()
             timeframe = request.query.get('timeframe', '').strip().lower()
             limit = int(request.query.get('limit', 100))
-            
+            raw_start = request.query.get('start_ts')
+            raw_end   = request.query.get('end_ts')
+            start_ts  = int(raw_start) if raw_start else None
+            end_ts    = int(raw_end)   if raw_end   else None
+
             if not all([indicator_name, exchange, symbol, timeframe]):
                 return web.json_response({
                     'error': 'Missing required parameters: indicator_name, exchange, symbol, timeframe'
                 }, status=400)
-            
+
             # Get indicators using DatabaseManager
             indicators = self.database_manager.get_indicator_values(
                 indicator_name=indicator_name,
                 exchange=exchange,
                 symbol=symbol,
                 timeframe=timeframe,
-                limit=limit
+                limit=limit,
+                start_ts=start_ts,
+                end_ts=end_ts,
             )
             
             return web.json_response({
@@ -520,7 +539,7 @@ class TradingBotAPI:
     async def get_indicators_status(self, request):
         """Get indicators status (for dashboard compatibility)"""
         try:
-            cached, hit = _get_cached('indicators_status', 30.0)
+            cached, hit = _get_cached('indicators_status', 300.0)
             if hit:
                 return web.json_response(cached)
 
@@ -1261,7 +1280,7 @@ class TradingBotAPI:
                 'error': str(e)
             }
     
-    @aiohttp_jinja2.template('strategies_chart.html') 
+    @aiohttp_jinja2.template('strategies_chart.html')
     async def strategies_chart(self, request):
         """Strategies chart page"""
         try:
@@ -1274,7 +1293,186 @@ class TradingBotAPI:
                 'title': 'Strategies Chart',
                 'error': str(e)
             }
-    
+
+    @aiohttp_jinja2.template('progress.html')
+    async def progress_page(self, request):
+        return {'title': 'Pipeline Progress'}
+
+    async def get_progress(self, request):
+        """Return pipeline progress for candles, aggregation, indicators and strategies."""
+        try:
+            cached, hit = _get_cached('progress', 120.0)
+            if hit:
+                return web.json_response(cached)
+
+            from sqlalchemy import text
+
+            connections_config = self.config_manager.get_config('connections').get('connections', {})
+            indicators_config = self.config_manager.get_config('indicators').get('indicators', {})
+            strategies_config = self.config_manager.get_config('strategies').get('strategies', {})
+            aggregation_config = self.config_manager.get_config('aggregation').get('aggregation', {})
+            source_mapping = aggregation_config.get('source_mapping', {})
+
+            with self.database_manager.get_session() as session:
+                # ── Candles ────────────────────────────────────────────────────
+                candle_rows = session.execute(text("""
+                    SELECT exchange, symbol, timeframe, source_type,
+                           COUNT(*) AS cnt,
+                           MIN(timestamp) AS first_ts,
+                           MAX(timestamp) AS last_ts
+                    FROM candles
+                    GROUP BY exchange, symbol, timeframe, source_type
+                    ORDER BY exchange, symbol, timeframe, source_type
+                """)).fetchall()
+
+                candle_map = {}   # (exchange, symbol, timeframe, source_type) → row
+                for r in candle_rows:
+                    candle_map[(r.exchange, r.symbol, r.timeframe, r.source_type)] = r
+
+                # ── Indicators ─────────────────────────────────────────────────
+                ind_rows = session.execute(text("""
+                    SELECT indicator_name, exchange, symbol, timeframe,
+                           COUNT(*) AS cnt,
+                           MIN(timestamp) AS first_ts,
+                           MAX(timestamp) AS last_ts
+                    FROM indicators
+                    GROUP BY indicator_name, exchange, symbol, timeframe
+                """)).fetchall()
+                ind_map = {r.indicator_name: r for r in ind_rows}
+
+                # ── Strategies ─────────────────────────────────────────────────
+                strat_rows = session.execute(text("""
+                    SELECT strategy_name, COUNT(*) AS cnt,
+                           MIN(timestamp) AS first_ts,
+                           MAX(timestamp) AS last_ts
+                    FROM strategy_signals
+                    GROUP BY strategy_name
+                """)).fetchall()
+                strat_map = {r.strategy_name: r for r in strat_rows}
+
+                # Base indicator timestamps (denominator for strategy progress)
+                base_ind_counts = {}
+                for name, cfg in strategies_config.items():
+                    base_ind = cfg.get('base_indicator') or (cfg.get('required_indicators') or [None])[0]
+                    if base_ind and base_ind not in base_ind_counts:
+                        row = session.execute(text(
+                            "SELECT COUNT(*) AS cnt FROM indicators WHERE indicator_name = :n"
+                        ), {'n': base_ind}).fetchone()
+                        base_ind_counts[base_ind] = row.cnt if row else 0
+
+            # ── Build pairs info ───────────────────────────────────────────────
+            pairs = []
+            for conn_name, cfg in connections_config.items():
+                ex, sym, tf = cfg['exchange'], cfg['symbol'], cfg['timeframe']
+                raw = candle_map.get((ex, sym, tf, 'exchange')) or candle_map.get((ex, sym, tf, 'realtime'))
+                hist_start = cfg.get('historical', {}).get('start_date', 'N/A')
+                pairs.append({
+                    'connection': conn_name,
+                    'exchange': ex,
+                    'symbol': sym,
+                    'timeframe': tf,
+                    'historical_start': hist_start,
+                    'candle_count': raw.cnt if raw else 0,
+                    'first_candle': datetime.fromtimestamp(raw.first_ts, tz=timezone.utc).strftime('%Y-%m-%d') if raw and raw.first_ts else None,
+                    'last_candle': datetime.fromtimestamp(raw.last_ts, tz=timezone.utc).strftime('%Y-%m-%d') if raw and raw.last_ts else None,
+                })
+
+            # ── Build aggregation progress ─────────────────────────────────────
+            tf_seconds = {'1m': 60, '5m': 300, '1h': 3600, '4h': 14400,
+                          '1d': 86400, '1w': 604800, '1M': 2592000}
+
+            aggregation = []
+            seen_agg = set()
+            for map_key, src_tf in source_mapping.items():
+                parts = map_key.split(':')
+                if len(parts) != 3:
+                    continue
+                ex, sym, tgt_tf = parts
+                agg_key = (ex, sym, tgt_tf)
+                if agg_key in seen_agg:
+                    continue
+                seen_agg.add(agg_key)
+
+                actual_row = candle_map.get((ex, sym, tgt_tf, 'aggregated'))
+                actual = actual_row.cnt if actual_row else 0
+
+                # Expected ≈ source candle count / ratio
+                src_row = (candle_map.get((ex, sym, src_tf, 'aggregated'))
+                           or candle_map.get((ex, sym, src_tf, 'exchange'))
+                           or candle_map.get((ex, sym, src_tf, 'realtime')))
+                ratio = tf_seconds.get(tgt_tf, 1) // tf_seconds.get(src_tf, 1) if tf_seconds.get(src_tf) else 1
+                expected = (src_row.cnt // ratio) if (src_row and ratio > 0) else 0
+
+                pct = round(actual / expected * 100, 1) if expected > 0 else (100.0 if actual > 0 else 0.0)
+                aggregation.append({
+                    'exchange': ex, 'symbol': sym,
+                    'source_tf': src_tf, 'target_tf': tgt_tf,
+                    'actual': actual, 'expected': expected, 'pct': pct,
+                    'first': datetime.fromtimestamp(actual_row.first_ts, tz=timezone.utc).strftime('%Y-%m-%d') if actual_row and actual_row.first_ts else None,
+                    'last':  datetime.fromtimestamp(actual_row.last_ts,  tz=timezone.utc).strftime('%Y-%m-%d') if actual_row and actual_row.last_ts  else None,
+                })
+            aggregation.sort(key=lambda x: (x['exchange'], x['symbol'], tf_seconds.get(x['target_tf'], 0)))
+
+            # ── Build indicator progress ───────────────────────────────────────
+            indicators_progress = []
+            for ind_name, cfg in indicators_config.items():
+                if not cfg.get('enabled', True):
+                    continue
+                ex = connections_config.get(cfg['connection'], {}).get('exchange', '')
+                sym = connections_config.get(cfg['connection'], {}).get('symbol', '')
+                src_tf = cfg.get('source_timeframe', '1m')
+
+                actual_row = ind_map.get(ind_name)
+                actual = actual_row.cnt if actual_row else 0
+
+                # Expected ≈ candles for that timeframe
+                src_candle = (candle_map.get((ex, sym, src_tf, 'aggregated'))
+                              or candle_map.get((ex, sym, src_tf, 'exchange'))
+                              or candle_map.get((ex, sym, src_tf, 'realtime')))
+                expected = src_candle.cnt if src_candle else 0
+                pct = round(actual / expected * 100, 1) if expected > 0 else (100.0 if actual > 0 else 0.0)
+
+                indicators_progress.append({
+                    'name': ind_name, 'symbol': sym, 'timeframe': src_tf,
+                    'plugin': cfg.get('plugin', ''),
+                    'actual': actual, 'expected': expected, 'pct': pct,
+                    'first': datetime.fromtimestamp(actual_row.first_ts, tz=timezone.utc).strftime('%Y-%m-%d') if actual_row and actual_row.first_ts else None,
+                    'last':  datetime.fromtimestamp(actual_row.last_ts,  tz=timezone.utc).strftime('%Y-%m-%d') if actual_row and actual_row.last_ts  else None,
+                })
+
+            # ── Build strategy progress ────────────────────────────────────────
+            strategies_progress = []
+            for strat_name, cfg in strategies_config.items():
+                if not cfg.get('enabled', True):
+                    continue
+                base_ind = cfg.get('base_indicator') or (cfg.get('required_indicators') or [None])[0]
+                actual_row = strat_map.get(strat_name)
+                actual = actual_row.cnt if actual_row else 0
+                expected = base_ind_counts.get(base_ind, 0) if base_ind else 0
+                pct = round(actual / expected * 100, 1) if expected > 0 else (100.0 if actual > 0 else 0.0)
+                conn = cfg.get('connection', '')
+                sym = connections_config.get(conn, {}).get('symbol', '')
+                strategies_progress.append({
+                    'name': strat_name, 'symbol': sym,
+                    'plugin': cfg.get('plugin', ''), 'base_indicator': base_ind,
+                    'actual': actual, 'expected': expected, 'pct': pct,
+                    'first': datetime.fromtimestamp(actual_row.first_ts, tz=timezone.utc).strftime('%Y-%m-%d') if actual_row and actual_row.first_ts else None,
+                    'last':  datetime.fromtimestamp(actual_row.last_ts,  tz=timezone.utc).strftime('%Y-%m-%d') if actual_row and actual_row.last_ts  else None,
+                })
+
+            result = {
+                'pairs': pairs,
+                'aggregation': aggregation,
+                'indicators': indicators_progress,
+                'strategies': strategies_progress,
+            }
+            _set_cached('progress', result)
+            return web.json_response(result)
+
+        except Exception as e:
+            self.logger.error(f"Error getting progress: {e}")
+            return web.json_response({'error': str(e)}, status=500)
+
     async def start_server(self, host='0.0.0.0', port=8080):
         """Start the API server"""
         self.logger.info(f"Starting API server on {host}:{port}")

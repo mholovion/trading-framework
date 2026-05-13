@@ -15,9 +15,9 @@ non-unique single column of a hypertable.
 
 from sqlalchemy import (
     BigInteger, Boolean, Column, DateTime, Index, Integer, Numeric,
-    PrimaryKeyConstraint, String, Table, Text, UniqueConstraint, create_engine,
+    PrimaryKeyConstraint, String, Text, UniqueConstraint, create_engine,
 )
-from sqlalchemy.orm import declarative_base, relationship, sessionmaker
+from sqlalchemy.orm import declarative_base, sessionmaker
 from sqlalchemy.sql import func
 
 Base = declarative_base()
@@ -179,143 +179,6 @@ class StrategySignal(Base):
         )
 
 
-class Strategy(Base):
-    """
-    Lightweight signal record used by DatabaseManager.
-    Mirrors StrategySignal with a simplified schema.
-    """
-
-    __tablename__ = "strategies"
-
-    id            = Column(BigInteger, autoincrement=True, nullable=False)
-    strategy_name = Column(String(100), nullable=False)
-    exchange      = Column(String(50),  nullable=False)
-    symbol        = Column(String(20),  nullable=False)
-    timeframe     = Column(String(10),  nullable=False)
-    timestamp     = Column(BigInteger,  nullable=False)   # Unix seconds
-    signal        = Column(String(20),  nullable=False)   # BUY | SELL | HOLD
-    confidence    = Column(Numeric(5, 4), nullable=False)
-    meta_data     = Column(Text, nullable=True)           # JSON
-    created_at    = Column(DateTime(timezone=True), server_default=func.now())
-    updated_at    = Column(DateTime(timezone=True), server_default=func.now(),
-                           onupdate=func.now())
-
-    __table_args__ = (
-        PrimaryKeyConstraint("id", "timestamp"),
-        Index("idx_strategies_lookup",
-              "strategy_name", "exchange", "symbol", "timeframe", "timestamp"),
-    )
-
-    def __repr__(self) -> str:
-        return (
-            f"<Strategy({self.strategy_name} {self.signal} "
-            f"ts={self.timestamp} conf={self.confidence})>"
-        )
-
-
-# ---------------------------------------------------------------------------
-# Association table — logical M2M between strategy signals and indicators.
-# No DB-level FK to hypertables; integrity enforced at application layer.
-# ---------------------------------------------------------------------------
-strategy_indicator_dependencies = Table(
-    "strategy_indicator_dependencies",
-    Base.metadata,
-    Column("strategy_signal_id", BigInteger, nullable=False, primary_key=True),
-    Column("indicator_id",       BigInteger, nullable=False, primary_key=True),
-    Column("created_at", DateTime(timezone=True), server_default=func.now()),
-)
-
-
-# ---------------------------------------------------------------------------
-# Regular (non-hypertable) models
-# ---------------------------------------------------------------------------
-
-class DependencyTrack(Base):
-    """Generic DAG edge: source row → target row for cascading recalculation."""
-
-    __tablename__ = "dependency_tracking"
-
-    id                   = Column(BigInteger, primary_key=True, autoincrement=True)
-    source_table         = Column(String(50),  nullable=False)
-    source_id            = Column(BigInteger,  nullable=False)
-    target_table         = Column(String(50),  nullable=False)
-    target_id            = Column(BigInteger,  nullable=False)
-    dependency_type      = Column(String(50),  nullable=False)
-    connection_name      = Column(String(100), nullable=True)
-    timeframe            = Column(String(10),  nullable=True)
-    calculation_priority = Column(Integer,     nullable=False, default=0)
-    created_at           = Column(DateTime(timezone=True), server_default=func.now())
-
-    __table_args__ = (
-        Index("idx_dep_source", "source_table", "source_id"),
-        Index("idx_dep_target", "target_table", "target_id"),
-        Index("idx_dep_type",   "dependency_type", "connection_name"),
-    )
-
-    def __repr__(self) -> str:
-        return (
-            f"<DependencyTrack({self.source_table}:{self.source_id} → "
-            f"{self.target_table}:{self.target_id} [{self.dependency_type}])>"
-        )
-
-
-class IndicatorDependency(Base):
-    """Configuration: which indicator listens to which candle stream."""
-
-    __tablename__ = "indicator_dependencies"
-
-    id               = Column(BigInteger, primary_key=True, autoincrement=True)
-    indicator_name   = Column(String(100), nullable=False)
-    exchange         = Column(String(50),  nullable=False)
-    symbol           = Column(String(20),  nullable=False)
-    timeframe        = Column(String(10),  nullable=False)
-    connection_name  = Column(String(100), nullable=False)
-    lookback_periods = Column(Integer,     nullable=False, default=1)
-    priority         = Column(Integer,     nullable=False, default=0)
-    created_at       = Column(DateTime(timezone=True), server_default=func.now())
-
-    __table_args__ = (
-        Index("idx_ind_dep_lookup",
-              "indicator_name", "exchange", "symbol", "timeframe"),
-        Index("idx_ind_dep_connection", "connection_name"),
-    )
-
-    def __repr__(self) -> str:
-        return (
-            f"<IndicatorDependency({self.indicator_name} "
-            f"{self.exchange}/{self.symbol} {self.timeframe})>"
-        )
-
-
-class StrategyDependency(Base):
-    """Configuration: which strategy requires which indicators."""
-
-    __tablename__ = "strategy_dependencies"
-
-    id              = Column(BigInteger, primary_key=True, autoincrement=True)
-    strategy_name   = Column(String(100), nullable=False)
-    indicator_name  = Column(String(100), nullable=False)
-    connection_name = Column(String(100), nullable=False)
-    required        = Column(Boolean,     nullable=False, default=True)
-    priority        = Column(Integer,     nullable=False, default=0)
-    created_at      = Column(DateTime(timezone=True), server_default=func.now())
-
-    __table_args__ = (
-        UniqueConstraint(
-            "strategy_name", "indicator_name", "connection_name",
-            name="uq_strategy_dep",
-        ),
-        Index("idx_strat_dep_strategy", "strategy_name"),
-        Index("idx_strat_dep_indicator", "indicator_name"),
-    )
-
-    def __repr__(self) -> str:
-        return (
-            f"<StrategyDependency({self.strategy_name} ← "
-            f"{self.indicator_name} required={self.required})>"
-        )
-
-
 # ---------------------------------------------------------------------------
 # ORM manager
 # ---------------------------------------------------------------------------
@@ -332,6 +195,7 @@ class DatabaseORM:
             pool_timeout=60,
             pool_recycle=3600,
             pool_pre_ping=True,
+            connect_args={"options": "-c jit=off"},
         )
         self.SessionLocal = sessionmaker(
             autocommit=False, autoflush=False, bind=self.engine

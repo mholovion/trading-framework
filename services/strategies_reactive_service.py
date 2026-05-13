@@ -19,7 +19,7 @@ from typing import Dict, Any, Optional, List, Set
 from datetime import datetime, timezone
 from core.universal_config_manager import UniversalConfigManager
 from rabbitmq.rabbitmq_client import RabbitMQClient, QueueMessage, MessagePublisher
-from models.base import StrategyDependency, Indicator, StrategySignal, Candle
+from models.base import Indicator, StrategySignal, Candle
 from sqlalchemy import and_
 from core.exceptions import ConfigurationError
 from core.logging_config import get_strategies_logger
@@ -271,12 +271,15 @@ class StrategiesReactiveService:
             else:
                 self.logger.info(f"Using individual calculations for {strategy_name} with {len(timestamps_to_calculate)} timestamps")
                 calculated_count = 0
-                for timestamp in timestamps_to_calculate:
+                for i, timestamp in enumerate(timestamps_to_calculate):
                     try:
                         await self._calculate_strategy(strategy_name, connection_name, timestamp)
                         calculated_count += 1
                     except Exception as e:
                         self.logger.error(f"Error calculating {strategy_name} for timestamp {timestamp}: {e}")
+                    # Yield to event loop every 50 iterations to allow network IO (aiohttp, etc.)
+                    if i % 50 == 49:
+                        await asyncio.sleep(0.001)
 
             self.logger.info(f"Strategy range calculation completed: {calculated_count} signals, {skipped_count} skipped")
 
@@ -573,7 +576,7 @@ class StrategiesReactiveService:
                 )
             ).order_by(Indicator.timestamp.asc()).limit(1).first()
             if not first:
-                return set()  # Required indicator has no data at all
+                return set()  # Required indicator has no data at all — wait until it's available
             earliest_required = max(earliest_required, first[0])
 
         return {ts for ts in trigger_ts if ts >= earliest_required}
@@ -724,8 +727,12 @@ class StrategiesReactiveService:
                 # Calculate strategy signal using the plugin's process method
                 result = await plugin.process(indicators_data, candle_price, timestamp)
                 
-                # Log strategy result for debugging
-                self.logger.info(f"Strategy {strategy_name} result for timestamp {timestamp}: {result}")
+                if result and hasattr(result, 'signal_type'):
+                    self.logger.info(
+                        f"Signal {result.signal_type.value:4s}  {strategy_name}"
+                        f"  price={result.price:.4f}"
+                        f"  conf={result.confidence:.2f}"
+                    )
                 
                 if result and hasattr(result, 'signal_type'):
                     # Publish strategy signal to database update service
@@ -756,57 +763,6 @@ class StrategiesReactiveService:
             self.stats['calculation_errors'] += 1
             raise
     
-    async def recalculate_strategy_range(self, strategy_name: str, connection_name: str, 
-                                       start_timestamp: int, end_timestamp: int):
-        """Recalculate strategy for a range of timestamps"""
-        try:
-            with self.database_manager.get_session() as session:
-                # Get all indicator updates in the range for this strategy's dependencies
-                dependencies = session.query(StrategyDependency).filter(
-                    and_(
-                        StrategyDependency.strategy_name == strategy_name,
-                        StrategyDependency.connection_name == connection_name
-                    )
-                ).all()
-                
-                if not dependencies:
-                    raise ValueError(f"No dependencies found for {strategy_name} on {connection_name}")
-                
-                # Get all unique timestamps where indicators were updated in the range
-                indicator_names = [dep.indicator_name for dep in dependencies]
-                
-                timestamps = set()
-                for indicator_name in indicator_names:
-                    indicators = session.query(Indicator.timestamp).filter(
-                        and_(
-                            Indicator.connection_name == connection_name,
-                            Indicator.indicator_name == indicator_name,
-                            Indicator.timestamp >= start_timestamp,
-                            Indicator.timestamp <= end_timestamp
-                        )
-                    ).distinct().all()
-                    
-                    for indicator in indicators:
-                        timestamps.add(indicator.timestamp)
-                
-                # Sort timestamps chronologically
-                sorted_timestamps = sorted(timestamps)
-                
-                self.logger.info(f"Recalculating {strategy_name} for {len(sorted_timestamps)} timestamps")
-                
-                # Calculate for each timestamp
-                for timestamp in sorted_timestamps:
-                    await self._calculate_strategy(strategy_name, connection_name, timestamp)
-                    
-                    # Small delay to prevent overwhelming the system
-                    await asyncio.sleep(0.001)
-                
-                self.logger.info(f"Completed range recalculation for {strategy_name}")
-                
-        except Exception as e:
-            self.logger.error(f"Error in range recalculation for {strategy_name}: {e}")
-            raise
-    
     async def get_strategy_status(self) -> Dict[str, Any]:
         """Get status of all strategies"""
         status = {}
@@ -818,14 +774,8 @@ class StrategiesReactiveService:
                     StrategySignal.strategy_name == strategy_name
                 ).order_by(StrategySignal.timestamp.desc()).limit(5).all()
                 
-                # Get dependencies count
-                dependencies_count = session.query(StrategyDependency).filter(
-                    StrategyDependency.strategy_name == strategy_name
-                ).count()
-                
                 status[strategy_name] = {
                     'plugin_loaded': True,
-                    'dependencies_count': dependencies_count,
                     'latest_signals': [
                         {
                             'signal_type': signal.signal_type,

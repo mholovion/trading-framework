@@ -33,16 +33,47 @@ class AggregationConfig:
         if not config or 'aggregation' not in config:
             raise ValueError("Invalid aggregation config: missing 'aggregation' section")
         
-        # Load source mappings
-        self._source_mapping = config['aggregation'].get('source_mapping', {})
+        agg = config['aggregation']
+
+        if 'source_mapping' in agg:
+            # Legacy format: explicit per-symbol keys
+            self._source_mapping = agg['source_mapping']
+        elif 'timeframe_rules' in agg:
+            # New format: expand rules × enabled connections from connections.yaml
+            self._source_mapping = self._expand_timeframe_rules(agg['timeframe_rules'])
+        else:
+            raise ValueError("Invalid aggregation config: need 'source_mapping' or 'timeframe_rules'")
+
         if not self._source_mapping:
-            raise ValueError("Invalid aggregation config: empty source_mapping")
-        
-        # Load settings
-        self._settings = config.get('settings', {})
+            raise ValueError("Invalid aggregation config: empty source_mapping after expansion")
+
+        # Load settings (top-level 'settings' key or nested inside 'aggregation')
+        self._settings = config.get('settings', agg.get('settings', {}))
         
         self.logger.info(f"Loaded aggregation config with {len(self._source_mapping)} mappings")
     
+    def _expand_timeframe_rules(self, rules: list) -> Dict[str, str]:
+        """Expand timeframe_rules × enabled connections into source_mapping."""
+        connections_path = self.config_path.parent / 'connections.yaml'
+        if not connections_path.exists():
+            raise FileNotFoundError(f"connections.yaml not found at {connections_path}")
+
+        with open(connections_path, 'r', encoding='utf-8') as f:
+            connections_cfg = yaml.safe_load(f)
+
+        mapping: Dict[str, str] = {}
+        for conn in connections_cfg.get('connections', {}).values():
+            if not conn.get('enabled'):
+                continue
+            exchange = conn['exchange']
+            symbol = conn['symbol']
+            for rule in rules:
+                source = rule['source']
+                for target in rule.get('targets', []):
+                    mapping[f"{exchange}:{symbol}:{target}"] = source
+
+        return mapping
+
     def get_source_timeframe(self, exchange: str, symbol: str, target_timeframe: str) -> Optional[str]:
         """
         Get source timeframe for given target from configuration

@@ -47,9 +47,10 @@ class AggregationService:
         if not self.database_manager:
             raise ValueError("DatabaseManager is required")
         
-        # Simple semaphore to control concurrent aggregations
-        self.processing_semaphore = asyncio.Semaphore(5)  # Max 5 concurrent aggregations
-        
+        # Global concurrency cap and per-(symbol+tf) locks to prevent overlapping writes
+        self.processing_semaphore = asyncio.Semaphore(20)
+        self._agg_locks: Dict[str, asyncio.Lock] = {}
+
         from core.logging_config import setup_service_logging
         self.logger = setup_service_logging('aggregation')
         
@@ -77,16 +78,18 @@ class AggregationService:
         self.logger.info("Simplified Aggregation Service initialized")
     
     async def _handle_aggregation_request(self, message: QueueMessage):
-        """Handle incoming aggregation request"""
+        """ACK immediately and process in a background task so the consumer stays free."""
+        if message.type != 'aggregation_request':
+            return
+        asyncio.create_task(self._process_aggregation(message))
+
+    async def _process_aggregation(self, message: QueueMessage):
+        """Process a single aggregation request, serialised per output timeframe."""
         async with self.processing_semaphore:
             try:
-                if message.type != 'aggregation_request':
-                    return
-                
                 data = message.data
                 self.stats['aggregation_requests_received'] += 1
-                
-                # Extract request parameters
+
                 connection_name = data.get('connection_name')
                 exchange = data.get('exchange')
                 symbol = data.get('symbol')
@@ -95,38 +98,44 @@ class AggregationService:
                 start_timestamp = data.get('start_timestamp')
                 end_timestamp = data.get('end_timestamp')
                 batch_id = data.get('batch_id', f"agg_{int(time.time())}")
-                
+
+                # Serialize writes per (exchange, symbol, target_timeframe)
+                lock_key = f"{exchange}/{symbol}/{target_timeframe}"
+                lock = self._agg_locks.setdefault(lock_key, asyncio.Lock())
+
                 # Get source timeframe from config if not provided
                 if not source_timeframe:
                     source_timeframe = self.aggregation_config.get_source_timeframe(exchange, symbol, target_timeframe)
                     if not source_timeframe:
                         self.logger.error(f"No source timeframe configured for {exchange}/{symbol}/{target_timeframe}")
                         return
-                
+
                 # Validate required parameters
                 if not all([exchange, symbol, source_timeframe, target_timeframe, start_timestamp, end_timestamp]):
                     self.logger.error(f"Missing required parameters in aggregation request: {data}")
                     return
-                
-                source_info = f" (from config)" if not data.get('source_timeframe') else ""
-                self.logger.info(f"Processing aggregation request {batch_id}: "
-                               f"{exchange}/{symbol} {source_timeframe}→{target_timeframe}{source_info} "
-                               f"from {datetime.fromtimestamp(start_timestamp, tz=timezone.utc)} "
-                               f"to {datetime.fromtimestamp(end_timestamp, tz=timezone.utc)}")
-                
-                # Perform aggregation
-                result = await self._aggregate_timeframe_range(
-                    connection_name, exchange, symbol, source_timeframe, 
-                    target_timeframe, start_timestamp, end_timestamp, batch_id
+
+                source_info = " (from config)" if not data.get('source_timeframe') else ""
+                self.logger.info(
+                    f"Processing aggregation request {batch_id}: "
+                    f"{exchange}/{symbol} {source_timeframe}→{target_timeframe}{source_info} "
+                    f"from {datetime.fromtimestamp(start_timestamp, tz=timezone.utc)} "
+                    f"to {datetime.fromtimestamp(end_timestamp, tz=timezone.utc)}"
                 )
-                
+
+                async with lock:
+                    result = await self._aggregate_timeframe_range(
+                        connection_name, exchange, symbol, source_timeframe,
+                        target_timeframe, start_timestamp, end_timestamp, batch_id
+                    )
+
                 if result:
                     self.stats['aggregations_completed'] += 1
                     self.logger.info(f"Aggregation completed: {batch_id}")
                 else:
                     self.stats['aggregations_skipped_incomplete_data'] += 1
                     self.logger.warning(f"Aggregation skipped due to incomplete data: {batch_id}")
-                
+
             except Exception as e:
                 self.stats['aggregations_failed'] += 1
                 self.logger.error(f"Aggregation request failed: {e}")

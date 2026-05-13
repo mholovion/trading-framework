@@ -183,127 +183,86 @@ class IndicatorsGapService:
                 await asyncio.sleep(self.gap_check_interval)
     
     async def _check_indicator_gaps(self, indicator_name: str):
-        """Check for gaps in specific indicator"""
+        """Check for gaps in indicator using MIN/MAX aggregates — one request covers the full missing range."""
         try:
             indicator_config = self.enabled_indicators[indicator_name]
             source_timeframe = indicator_config['source_timeframe']
-            
-            # Get connection info
+
             connection_name = indicator_config['connection']
             connections_config = self.config_manager.get_config('connections')
             connection_config = connections_config.get('connections', {}).get(connection_name, {})
-            
+
             if not connection_config:
                 self.logger.warning(f"Connection {connection_name} not found for indicator {indicator_name}")
                 return
-            
+
             exchange = connection_config['exchange']
             symbol = connection_config['symbol']
-            
-            self.logger.debug(f"Checking gaps for indicator {indicator_name}: {exchange}/{symbol}/{source_timeframe}")
-            
-            # Use single database session for all operations to avoid connection pool exhaustion
-            try:
-                with self.database_manager.get_session() as session:
-                    # Get available candles count for this timeframe
-                    candles_count = session.query(func.count(Candle.id)).filter(
-                        and_(
-                            Candle.exchange == exchange,
-                            Candle.symbol == symbol,
-                            Candle.timeframe == source_timeframe
-                        )
-                    ).scalar() or 0
-                    
-                    # Find specific missing timestamps (proper gap detection)
-                    from models.base import Indicator
-                    
-                    # Get all candle timestamps  
-                    self.logger.info(f"Querying candles: exchange='{exchange}', symbol='{symbol}', timeframe='{source_timeframe}'")
-                    
-                    candle_timestamps = session.query(Candle.timestamp).filter(
-                        and_(
-                            Candle.exchange == exchange,
-                            Candle.symbol == symbol,
-                            Candle.timeframe == source_timeframe
-                        )
-                    ).all()
-                    candle_timestamps_set = {ts[0] for ts in candle_timestamps}
-                    
-                    self.logger.info(f"Candles query result: {len(candle_timestamps)} rows")
-                    
-                    # Get all existing indicator timestamps
-                    self.logger.info(f"Querying indicators: indicator_name='{indicator_name}', exchange='{exchange}', symbol='{symbol}', timeframe='{source_timeframe}'")
-                    
-                    indicator_timestamps = session.query(Indicator.timestamp).filter(
-                        and_(
-                            Indicator.indicator_name == indicator_name,
-                            Indicator.exchange == exchange,
-                            Indicator.symbol == symbol,
-                            Indicator.timeframe == source_timeframe
-                        )
-                    ).all()
-                    indicator_timestamps_set = {ts[0] for ts in indicator_timestamps}
-                    
-                    self.logger.info(f"Raw query result: {len(indicator_timestamps)} rows, first 3: {indicator_timestamps[:3]}")
-                    
-                    # Find missing timestamps (real gaps)
-                    missing_timestamps = candle_timestamps_set - indicator_timestamps_set
-                    missing_count = len(missing_timestamps)
-                    
-                    # Debug the calculation
-                    self.logger.info(f"Set operations debug:")
-                    self.logger.info(f"Candles set size: {len(candle_timestamps_set)}")
-                    self.logger.info(f"Indicators set size: {len(indicator_timestamps_set)}")
-                    self.logger.info(f"Missing = Candles - Indicators = {missing_count}")
-                    
-                    if len(candle_timestamps_set) > 0 and len(indicator_timestamps_set) > 0:
-                        candles_sample = sorted(list(candle_timestamps_set))[:3]
-                        indicators_sample = sorted(list(indicator_timestamps_set))[:3]
-                        self.logger.info(f"Candles sample: {candles_sample}")
-                        self.logger.info(f"Indicators sample: {indicators_sample}")
-                    
-                    # Enhanced debugging
-                    self.logger.info(f"GAP DEBUG for {indicator_name}:")
-                    self.logger.info(f"Candles query: exchange={exchange}, symbol={symbol}, timeframe={source_timeframe}")
-                    self.logger.info(f"Indicators query: indicator_name={indicator_name}, exchange={exchange}, symbol={symbol}, timeframe={source_timeframe}")
-                    self.logger.info(f"Found: {len(candle_timestamps_set)} candles, {len(indicator_timestamps_set)} indicators")
-                    self.logger.info(f"Missing: {missing_count} gaps")
-                    
-                    if len(candle_timestamps_set) > 0 and len(indicator_timestamps_set) > 0:
-                        # Sample timestamps for comparison
-                        sample_candle_ts = sorted(list(candle_timestamps_set))[:3]
-                        sample_indicator_ts = sorted(list(indicator_timestamps_set))[:3]
-                        
-                        self.logger.info(f"Sample candle timestamps: {[datetime.fromtimestamp(ts, tz=timezone.utc) for ts in sample_candle_ts]}")
-                        self.logger.info(f"Sample indicator timestamps: {[datetime.fromtimestamp(ts, tz=timezone.utc) for ts in sample_indicator_ts]}")
-                        
-                        # Check if timestamps match
-                        common_timestamps = candle_timestamps_set & indicator_timestamps_set
-                        self.logger.info(f"Common timestamps: {len(common_timestamps)}")
-                        
-                        if missing_count > 0 and missing_count < 10:
-                            missing_sample = sorted(list(missing_timestamps))[:5]
-                            self.logger.info(f"Sample missing timestamps: {[datetime.fromtimestamp(ts, tz=timezone.utc) for ts in missing_sample]}")
-                    
-                    if missing_count > 0:
-                        self.logger.info(f"Found {missing_count} missing indicators for {indicator_name}")
-                        
-                        # Send calculation requests for specific missing timestamps
-                        await self._send_gap_calculation_requests(indicator_name, exchange, symbol,
-                                                                source_timeframe, connection_name,
-                                                                missing_timestamps)
-                        
-                        self.stats['gaps_detected'] += missing_count
-                        self.logger.info(f"Sent gap requests for {indicator_name}: {missing_count} missing timestamps")
-                    else:
-                        self.logger.debug(f"No gaps found for indicator {indicator_name}")
-                    
-            except Exception as db_e:
-                self.logger.error(f"Database error for {indicator_name}: {db_e}")
+
+            from models.base import Indicator
+
+            with self.database_manager.get_session() as session:
+                # Two fast aggregate queries — no full table scans into Python memory
+                candle_agg = session.query(
+                    func.min(Candle.timestamp),
+                    func.max(Candle.timestamp),
+                    func.count(Candle.id),
+                ).filter(
+                    Candle.exchange == exchange,
+                    Candle.symbol == symbol,
+                    Candle.timeframe == source_timeframe,
+                ).first()
+
+                if not candle_agg or not candle_agg[2]:
+                    self.logger.debug(f"No candles for {indicator_name}")
+                    return
+
+                candle_min, candle_max, candle_count = candle_agg
+
+                ind_agg = session.query(
+                    func.max(Indicator.timestamp),
+                    func.count(Indicator.timestamp),
+                ).filter(
+                    Indicator.indicator_name == indicator_name,
+                    Indicator.exchange == exchange,
+                    Indicator.symbol == symbol,
+                    Indicator.timeframe == source_timeframe,
+                ).first()
+
+                ind_max   = ind_agg[0] if ind_agg else None
+                ind_count = ind_agg[1] if ind_agg else 0
+
+            if ind_count >= candle_count:
+                self.logger.debug(f"No gaps for {indicator_name}: {ind_count}/{candle_count}")
+                self.stats['indicators_checked'] += 1
                 return
-            
+
+            missing_count = candle_count - ind_count
+            # Start from the last calculated timestamp so warmup is covered by _calculate_indicator_range
+            start_ts = candle_min if ind_max is None else ind_max
+
+            self.logger.info(
+                f"Gap detected for {indicator_name}: {ind_count}/{candle_count} calculated, "
+                f"sending bulk request from {datetime.fromtimestamp(start_ts, tz=timezone.utc)} "
+                f"to {datetime.fromtimestamp(candle_max, tz=timezone.utc)}"
+            )
+
+            range_info = {
+                'indicator_name': indicator_name,
+                'exchange': exchange,
+                'symbol': symbol,
+                'timeframe': source_timeframe,
+                'start_timestamp': start_ts,
+                'end_timestamp': candle_max,
+                'missing_candles': missing_count,
+                'connection_name': connection_name,
+                'batch_id': f"bulk_{indicator_name}_{int(time.time())}",
+            }
+            await self._send_indicator_calculation_request(indicator_name, range_info)
+
+            self.stats['gaps_detected'] += missing_count
             self.stats['indicators_checked'] += 1
-            
+
         except Exception as e:
             self.logger.error(f"Error checking indicator gaps for {indicator_name}: {e}")
     

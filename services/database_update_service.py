@@ -23,7 +23,7 @@ from core.universal_config_manager import UniversalConfigManager
 from core.database import DatabaseManager
 from core.logging_config import get_database_logger
 from rabbitmq.rabbitmq_client import RabbitMQClient, QueueMessage, MessagePublisher
-from models.base import DatabaseORM, Candle, Indicator, StrategySignal, DependencyTrack
+from models.base import DatabaseORM, Candle, Indicator, StrategySignal
 from core.exceptions import DatabaseError
 
 
@@ -56,7 +56,6 @@ class DatabaseUpdateService:
             'strategy_signals_processed': 0,
             'database_errors': 0,
             'queue_processing_errors': 0,
-            'dependency_updates': 0,
             'start_time': datetime.now(timezone.utc)
         }
         
@@ -89,9 +88,6 @@ class DatabaseUpdateService:
         
         # Consumer for strategy signals
         await self.queue_client.consume_messages('strategy_updates', self._process_strategy_signal)
-        
-        # Consumer for database operations (dependencies, etc.)
-        await self.queue_client.consume_messages('database_updates', self._process_database_operation)
         
         self.logger.info("Queue consumers setup completed")
     
@@ -150,10 +146,6 @@ class DatabaseUpdateService:
                 session.commit()
             
             self.stats['candles_processed'] += 1
-            
-            # Trigger dependency chain only for closed candles
-            if data.get('is_closed', False):
-                await self._trigger_indicator_calculations(data)
             
         except SQLAlchemyError as e:
             self.logger.error(f"Database error processing candle update: {e}")
@@ -232,11 +224,6 @@ class DatabaseUpdateService:
                 self.logger.info(f"Bulk processed {inserted_count} new + {updated_count} updated = {total_stored} candles stored")
                 self.stats['candles_processed'] += len(candles_list)
                 
-                # Trigger indicator calculations for closed candles
-                for candle_data in candles_list:
-                    if candle_data.get('is_closed', False):
-                        await self._trigger_indicator_calculations(candle_data)
-                
         except SQLAlchemyError as e:
             self.logger.error(f"Database error processing bulk candles: {e}")
             self.stats['database_errors'] += 1
@@ -308,22 +295,6 @@ class DatabaseUpdateService:
                     )
                     
                     session.add(indicator)
-                    session.flush()  # Get the ID
-                    
-                    # Create dependency tracking record
-                    if source_candle:
-                        dependency = DependencyTrack(
-                            source_table='candles',
-                            source_id=source_candle.id,
-                            target_table='indicators',
-                            target_id=indicator.id,
-                            dependency_type='indicator_source',
-                            connection_name=data['connection_name'],
-                            timeframe=data.get('timeframe')
-                        )
-                        session.add(dependency)
-                        self.stats['dependency_updates'] += 1
-                    
                     self.logger.debug(f"Created indicator: {data['indicator_name']} @ {data['timestamp']}")
                 
                 session.commit()
@@ -458,21 +429,6 @@ class DatabaseUpdateService:
                 )
                 
                 session.add(strategy_signal)
-                session.flush()  # Get the ID
-                
-                # Create dependency tracking records for source indicators
-                for indicator_id in source_indicator_ids:
-                    dependency = DependencyTrack(
-                        source_table='indicators',
-                        source_id=indicator_id,
-                        target_table='strategy_signals',
-                        target_id=strategy_signal.id,
-                        dependency_type='strategy_source',
-                        connection_name=data['connection_name']
-                    )
-                    session.add(dependency)
-                    self.stats['dependency_updates'] += 1
-                
                 session.commit()
             
             self.stats['strategy_signals_processed'] += 1
@@ -496,52 +452,6 @@ class DatabaseUpdateService:
         except Exception as e:
             self.logger.error(f"Error processing strategy signal: {e}")
             self.stats['queue_processing_errors'] += 1
-    
-    async def _trigger_indicator_calculations(self, candle_data: Dict[str, Any]):
-        """Trigger indicator calculations for affected indicators"""
-        try:
-            # Find indicators that depend on this candle data
-            with self.database_manager.get_session() as session:
-                # Get the candle record
-                candle = session.query(Candle).filter_by(
-                    exchange=candle_data['exchange'],
-                    symbol=candle_data['symbol'],
-                    timeframe=candle_data['timeframe'],
-                    timestamp=candle_data['timestamp']
-                ).first()
-                
-                if not candle:
-                    self.logger.warning(f"Candle not found for indicator trigger: {candle_data}")
-                    return
-                
-                # Find dependent indicators from indicator dependencies
-                from models.base import IndicatorDependency
-                dependent_indicators = session.query(IndicatorDependency).filter_by(
-                    exchange=candle_data['exchange'],
-                    symbol=candle_data['symbol'],
-                    timeframe=candle_data['timeframe']
-                ).all()
-                
-                # Publish indicator recalculation requests
-                for dep in dependent_indicators:
-                    await self.message_publisher.publish_indicator_recalc_request({
-                        'indicator_name': dep.indicator_name,
-                        'connection_name': dep.connection_name,
-                        'timestamp': candle_data['timestamp'],
-                        'source_candle': {
-                            'id': candle.id,
-                            'exchange': candle_data['exchange'],
-                            'symbol': candle_data['symbol'],
-                            'timeframe': candle_data['timeframe'],
-                            'timestamp': candle_data['timestamp']
-                        },
-                        'trigger_reason': 'candle_update'
-                    })
-                
-                self.logger.debug(f"Triggered {len(dependent_indicators)} indicator calculations for candle update")
-                
-        except Exception as e:
-            self.logger.error(f"Error triggering indicator calculations: {e}")
     
     async def _trigger_strategy_calculations(self, indicator_data: Dict[str, Any]):
         """Trigger strategy calculations that might depend on this indicator (single indicator)"""
@@ -653,7 +563,6 @@ class DatabaseUpdateService:
         self.logger.info(f"Candles processed: {self.stats['candles_processed']}")
         self.logger.info(f"Indicators processed: {self.stats['indicators_processed']}")
         self.logger.info(f"Strategy signals processed: {self.stats['strategy_signals_processed']}")
-        self.logger.info(f"Dependency updates: {self.stats['dependency_updates']}")
         self.logger.info(f"Database errors: {self.stats['database_errors']}")
         self.logger.info(f"Queue processing errors: {self.stats['queue_processing_errors']}")
     
@@ -666,7 +575,6 @@ class DatabaseUpdateService:
             'candles_processed': self.stats['candles_processed'],
             'indicators_processed': self.stats['indicators_processed'],
             'strategy_signals_processed': self.stats['strategy_signals_processed'],
-            'dependency_updates': self.stats['dependency_updates'],
             'database_errors': self.stats['database_errors'],
             'queue_processing_errors': self.stats['queue_processing_errors'],
             'processing_rate': {
@@ -675,65 +583,6 @@ class DatabaseUpdateService:
                 'signals_per_hour': self.stats['strategy_signals_processed'] / max(uptime.total_seconds() / 3600, 1)
             }
         }
-    
-    async def _process_database_operation(self, message: QueueMessage):
-        """Process database operation messages (dependencies, etc.)"""
-        try:
-            data = message.data
-            action = data.get('action')
-            
-            if action == 'create_indicator_dependency':
-                await self._create_indicator_dependency(data['data'])
-            elif action == 'create_strategy_dependency':
-                await self._create_strategy_dependency(data['data'])
-            else:
-                self.logger.warning(f"Unknown database action: {action}")
-                
-        except Exception as e:
-            self.logger.error(f"Error processing database operation: {e}")
-            self.stats['queue_processing_errors'] += 1
-    
-    async def _create_indicator_dependency(self, data: Dict[str, Any]):
-        """Create indicator dependency record"""
-        try:
-            with self.database_manager.get_session() as session:
-                from models.base import IndicatorDependency
-                dependency = IndicatorDependency(
-                    indicator_name=data['indicator_name'],
-                    exchange=data['exchange'],
-                    symbol=data['symbol'],
-                    timeframe=data['timeframe'],
-                    connection_name=data['connection_name'],
-                    lookback_periods=data['lookback_periods'],
-                    priority=data['priority']
-                )
-                session.add(dependency)
-                session.commit()
-                
-            self.logger.debug(f"Created indicator dependency: {data['indicator_name']}")
-            
-        except Exception as e:
-            self.logger.error(f"Error creating indicator dependency: {e}")
-    
-    async def _create_strategy_dependency(self, data: Dict[str, Any]):
-        """Create strategy dependency record"""
-        try:
-            with self.database_manager.get_session() as session:
-                from models.base import StrategyDependency
-                dependency = StrategyDependency(
-                    strategy_name=data['strategy_name'],
-                    indicator_name=data['indicator_name'],
-                    connection_name=data['connection_name'],
-                    required=data['required'],
-                    priority=data['priority']
-                )
-                session.add(dependency)
-                session.commit()
-                
-            self.logger.debug(f"Created strategy dependency: {data['strategy_name']} -> {data['indicator_name']}")
-            
-        except Exception as e:
-            self.logger.error(f"Error creating strategy dependency: {e}")
     
     async def cleanup(self):
         """Cleanup database update service"""

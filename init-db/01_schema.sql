@@ -9,8 +9,14 @@
 --   candles_realtime — 1 day    (rolling window, small table)
 --   indicators       — 1 week   (mirrors candles cadence)
 --   strategy_signals — 4 weeks  (sparse; one signal per bar at most)
---   strategies       — 4 weeks
 -- =============================================================================
+
+-- Drop legacy tables that are no longer used
+DROP TABLE IF EXISTS strategy_indicator_dependencies CASCADE;
+DROP TABLE IF EXISTS strategy_dependencies CASCADE;
+DROP TABLE IF EXISTS indicator_dependencies CASCADE;
+DROP TABLE IF EXISTS dependency_tracking CASCADE;
+DROP TABLE IF EXISTS strategies CASCADE;
 
 CREATE EXTENSION IF NOT EXISTS timescaledb CASCADE;
 
@@ -194,119 +200,6 @@ CREATE INDEX IF NOT EXISTS idx_strategy_signals_lookup
 
 CREATE INDEX IF NOT EXISTS idx_strategy_signals_type
     ON strategy_signals (signal_type, timestamp DESC);
-
--- ---------------------------------------------------------------------------
--- STRATEGIES
--- Simplified signal table used by DatabaseManager (subset of strategy_signals).
--- ---------------------------------------------------------------------------
-CREATE TABLE IF NOT EXISTS strategies (
-    id            BIGSERIAL       NOT NULL,
-    strategy_name VARCHAR(100)    NOT NULL,
-    exchange      VARCHAR(50)     NOT NULL,
-    symbol        VARCHAR(20)     NOT NULL,
-    timeframe     VARCHAR(10)     NOT NULL,
-    timestamp     BIGINT          NOT NULL,   -- Unix seconds
-    signal        VARCHAR(20)     NOT NULL,   -- BUY | SELL | HOLD
-    confidence    NUMERIC(5, 4)   NOT NULL,
-    meta_data     TEXT,                       -- JSON
-    created_at    TIMESTAMPTZ     NOT NULL DEFAULT NOW(),
-    updated_at    TIMESTAMPTZ     NOT NULL DEFAULT NOW(),
-    PRIMARY KEY (id, timestamp)
-);
-
-SELECT create_hypertable(
-    'strategies',
-    'timestamp',
-    chunk_time_interval => 2419200,
-    if_not_exists       => TRUE
-);
-
-CREATE INDEX IF NOT EXISTS idx_strategies_lookup
-    ON strategies (strategy_name, exchange, symbol, timeframe, timestamp DESC);
-
--- ---------------------------------------------------------------------------
--- STRATEGY_INDICATOR_DEPENDENCIES
--- Many-to-many link between strategy signals and the indicators they used.
--- Logical references only — no DB-level FK to hypertables.
--- ---------------------------------------------------------------------------
-CREATE TABLE IF NOT EXISTS strategy_indicator_dependencies (
-    strategy_signal_id  BIGINT      NOT NULL,
-    indicator_id        BIGINT      NOT NULL,
-    created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    PRIMARY KEY (strategy_signal_id, indicator_id)
-);
-
-CREATE INDEX IF NOT EXISTS idx_sid_indicator
-    ON strategy_indicator_dependencies (indicator_id);
-
--- ---------------------------------------------------------------------------
--- DEPENDENCY_TRACKING
--- Generic DAG edge table: source row → target row with dependency type.
--- Used for cascading recalculation (candle → indicator → strategy).
--- ---------------------------------------------------------------------------
-CREATE TABLE IF NOT EXISTS dependency_tracking (
-    id                   BIGSERIAL       NOT NULL PRIMARY KEY,
-    source_table         VARCHAR(50)     NOT NULL,
-    source_id            BIGINT          NOT NULL,
-    target_table         VARCHAR(50)     NOT NULL,
-    target_id            BIGINT          NOT NULL,
-    dependency_type      VARCHAR(50)     NOT NULL,  -- 'indicator_source' | 'strategy_source'
-    connection_name      VARCHAR(100),
-    timeframe            VARCHAR(10),
-    calculation_priority INTEGER         NOT NULL DEFAULT 0,
-    created_at           TIMESTAMPTZ     NOT NULL DEFAULT NOW()
-);
-
-CREATE INDEX IF NOT EXISTS idx_dep_source
-    ON dependency_tracking (source_table, source_id);
-
-CREATE INDEX IF NOT EXISTS idx_dep_target
-    ON dependency_tracking (target_table, target_id);
-
-CREATE INDEX IF NOT EXISTS idx_dep_type
-    ON dependency_tracking (dependency_type, connection_name);
-
--- ---------------------------------------------------------------------------
--- INDICATOR_DEPENDENCIES
--- Configuration table: which indicator listens to which candle stream.
--- ---------------------------------------------------------------------------
-CREATE TABLE IF NOT EXISTS indicator_dependencies (
-    id               BIGSERIAL       NOT NULL PRIMARY KEY,
-    indicator_name   VARCHAR(100)    NOT NULL,
-    exchange         VARCHAR(50)     NOT NULL,
-    symbol           VARCHAR(20)     NOT NULL,
-    timeframe        VARCHAR(10)     NOT NULL,
-    connection_name  VARCHAR(100)    NOT NULL,
-    lookback_periods INTEGER         NOT NULL DEFAULT 1,
-    priority         INTEGER         NOT NULL DEFAULT 0,
-    created_at       TIMESTAMPTZ     NOT NULL DEFAULT NOW()
-);
-
-CREATE INDEX IF NOT EXISTS idx_ind_dep_lookup
-    ON indicator_dependencies (indicator_name, exchange, symbol, timeframe);
-
-CREATE INDEX IF NOT EXISTS idx_ind_dep_connection
-    ON indicator_dependencies (connection_name);
-
--- ---------------------------------------------------------------------------
--- STRATEGY_DEPENDENCIES
--- Configuration table: which strategy requires which indicators.
--- ---------------------------------------------------------------------------
-CREATE TABLE IF NOT EXISTS strategy_dependencies (
-    id             BIGSERIAL       NOT NULL PRIMARY KEY,
-    strategy_name  VARCHAR(100)    NOT NULL,
-    indicator_name VARCHAR(100)    NOT NULL,
-    connection_name VARCHAR(100)   NOT NULL,
-    required       BOOLEAN         NOT NULL DEFAULT TRUE,
-    priority       INTEGER         NOT NULL DEFAULT 0,
-    created_at     TIMESTAMPTZ     NOT NULL DEFAULT NOW()
-);
-
-CREATE UNIQUE INDEX IF NOT EXISTS uq_strategy_dep
-    ON strategy_dependencies (strategy_name, indicator_name, connection_name);
-
-CREATE INDEX IF NOT EXISTS idx_strat_dep_strategy
-    ON strategy_dependencies (strategy_name);
 
 -- ---------------------------------------------------------------------------
 -- SERVER_TIME_SYNC

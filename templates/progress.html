@@ -1,0 +1,227 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Pipeline Progress</title>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: 'Segoe UI', Arial, sans-serif; background: #131722; color: #d1d4dc; line-height: 1.5; }
+        .container { max-width: 1200px; margin: 0 auto; padding: 20px; }
+
+        .header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 24px; padding-bottom: 16px; border-bottom: 2px solid #2a2e39; }
+        .header h1 { color: #d1d4dc; font-size: 24px; font-weight: 600; }
+        .nav-links { display: flex; gap: 12px; }
+        .nav-link { color: #868b94; text-decoration: none; padding: 8px 16px; border: 1px solid #2a2e39; border-radius: 6px; font-size: 13px; transition: all 0.2s; }
+        .nav-link:hover, .nav-link.active { color: #d1d4dc; border-color: #4a90d9; background: #1e2a3a; }
+
+        .refresh-bar { display: flex; align-items: center; gap: 12px; margin-bottom: 20px; font-size: 13px; color: #868b94; }
+        .refresh-btn { background: #2a2e39; border: 1px solid #363c4e; color: #d1d4dc; padding: 6px 14px; border-radius: 5px; cursor: pointer; font-size: 13px; }
+        .refresh-btn:hover { background: #363c4e; }
+
+        .section { margin-bottom: 28px; }
+        .section-title { font-size: 14px; font-weight: 600; color: #868b94; text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: 12px; }
+
+        /* Pairs table */
+        .pairs-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); gap: 12px; }
+        .pair-card { background: #1e222d; border: 1px solid #2a2e39; border-radius: 8px; padding: 14px 16px; }
+        .pair-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
+        .pair-name { font-size: 15px; font-weight: 600; color: #d1d4dc; }
+        .pair-exchange { font-size: 12px; color: #868b94; background: #2a2e39; padding: 2px 8px; border-radius: 3px; }
+        .pair-meta { display: grid; grid-template-columns: 1fr 1fr; gap: 4px 16px; font-size: 12px; }
+        .pair-meta-label { color: #868b94; }
+        .pair-meta-value { color: #d1d4dc; font-weight: 500; }
+        .candle-count { font-size: 18px; font-weight: 700; color: #26a69a; }
+
+        /* Progress rows */
+        .progress-table { width: 100%; border-collapse: collapse; }
+        .progress-table th { font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; color: #868b94; text-align: left; padding: 6px 10px; border-bottom: 1px solid #2a2e39; }
+        .progress-table td { padding: 7px 10px; border-bottom: 1px solid #1e222d; font-size: 13px; vertical-align: middle; }
+        .progress-table tr:hover td { background: #1e222d; }
+
+        .pct-cell { white-space: nowrap; }
+        .bar-wrap { display: flex; align-items: center; gap: 8px; }
+        .bar-bg { flex: 1; height: 6px; background: #2a2e39; border-radius: 3px; min-width: 80px; }
+        .bar-fill { height: 6px; border-radius: 3px; transition: width 0.4s; }
+        .bar-green  { background: #26a69a; }
+        .bar-yellow { background: #f0b429; }
+        .bar-red    { background: #ef5350; }
+        .pct-label  { font-size: 12px; font-weight: 600; width: 42px; text-align: right; }
+        .pct-green  { color: #26a69a; }
+        .pct-yellow { color: #f0b429; }
+        .pct-red    { color: #ef5350; }
+
+        .tf-badge { display: inline-block; font-size: 11px; background: #2a2e39; color: #868b94; border-radius: 3px; padding: 1px 6px; font-weight: 600; }
+        .count-cell { font-variant-numeric: tabular-nums; }
+        .date-cell  { color: #868b94; font-size: 12px; white-space: nowrap; }
+
+        .loading { color: #868b94; padding: 20px; text-align: center; }
+        .error   { color: #ef5350; padding: 10px; }
+    </style>
+</head>
+<body>
+<div class="container">
+    <div class="header">
+        <h1>📊 Pipeline Progress</h1>
+        <div class="nav-links">
+            <a href="/" class="nav-link">Dashboard</a>
+            <a href="/progress" class="nav-link active">Progress</a>
+        </div>
+    </div>
+
+    <div class="refresh-bar">
+        <span id="lastRefresh">Loading…</span>
+        <button class="refresh-btn" onclick="load()">↻ Refresh</button>
+        <span id="countdown"></span>
+    </div>
+
+    <!-- Pairs -->
+    <div class="section">
+        <div class="section-title">Pairs</div>
+        <div class="pairs-grid" id="pairsGrid"><div class="loading">Loading…</div></div>
+    </div>
+
+    <!-- Aggregation -->
+    <div class="section">
+        <div class="section-title">Candle Aggregation</div>
+        <div id="aggContainer"><div class="loading">Loading…</div></div>
+    </div>
+
+    <!-- Indicators -->
+    <div class="section">
+        <div class="section-title">Indicators</div>
+        <div id="indContainer"><div class="loading">Loading…</div></div>
+    </div>
+
+    <!-- Strategies -->
+    <div class="section">
+        <div class="section-title">Strategies</div>
+        <div id="stratContainer"><div class="loading">Loading…</div></div>
+    </div>
+</div>
+
+<script>
+let countdownSec = 30;
+let countdownTimer;
+
+function pctColor(p) {
+    if (p >= 95) return 'green';
+    if (p >= 50) return 'yellow';
+    return 'red';
+}
+
+function bar(pct) {
+    const c = pctColor(pct);
+    const w = Math.min(pct, 100).toFixed(1);
+    return `<div class="bar-wrap">
+        <div class="bar-bg"><div class="bar-fill bar-${c}" style="width:${w}%"></div></div>
+        <span class="pct-label pct-${c}">${pct}%</span>
+    </div>`;
+}
+
+function fmt(n) {
+    if (n == null) return '—';
+    return Number(n).toLocaleString();
+}
+
+function dateRange(first, last) {
+    if (!first && !last) return '—';
+    if (!last) return first;
+    return `${first} → ${last}`;
+}
+
+function renderPairs(pairs) {
+    if (!pairs.length) { document.getElementById('pairsGrid').innerHTML = '<div class="loading">No pairs configured</div>'; return; }
+    document.getElementById('pairsGrid').innerHTML = pairs.map(p => `
+        <div class="pair-card">
+            <div class="pair-header">
+                <span class="pair-name">${p.symbol}</span>
+                <span class="pair-exchange">${p.exchange}</span>
+            </div>
+            <div class="candle-count">${fmt(p.candle_count)} candles</div>
+            <div class="pair-meta" style="margin-top:8px">
+                <span class="pair-meta-label">Connection</span><span class="pair-meta-value">${p.connection}</span>
+                <span class="pair-meta-label">Timeframe</span><span class="pair-meta-value"><span class="tf-badge">${p.timeframe}</span></span>
+                <span class="pair-meta-label">History start</span><span class="pair-meta-value">${p.historical_start || '—'}</span>
+                <span class="pair-meta-label">Data range</span><span class="pair-meta-value">${dateRange(p.first_candle, p.last_candle)}</span>
+            </div>
+        </div>
+    `).join('');
+}
+
+function renderTable(rows, cols, containerId) {
+    const el = document.getElementById(containerId);
+    if (!rows.length) { el.innerHTML = '<div class="loading">No data yet</div>'; return; }
+    const thead = `<tr>${cols.map(c => `<th>${c.label}</th>`).join('')}</tr>`;
+    const tbody = rows.map(r => `<tr>${cols.map(c => `<td class="${c.cls||''}">${c.render(r)}</td>`).join('')}</tr>`).join('');
+    el.innerHTML = `<table class="progress-table"><thead>${thead}</thead><tbody>${tbody}</tbody></table>`;
+}
+
+function renderAgg(agg) {
+    renderTable(agg, [
+        { label: 'Symbol',   cls: '',           render: r => r.symbol },
+        { label: 'Pipeline', cls: '',           render: r => `<span class="tf-badge">${r.source_tf}</span> → <span class="tf-badge">${r.target_tf}</span>` },
+        { label: 'Progress', cls: 'pct-cell',   render: r => bar(r.pct) },
+        { label: 'Built',    cls: 'count-cell', render: r => fmt(r.actual) },
+        { label: 'Expected', cls: 'count-cell', render: r => fmt(r.expected) },
+        { label: 'Range',    cls: 'date-cell',  render: r => dateRange(r.first, r.last) },
+    ], 'aggContainer');
+}
+
+function renderIndicators(inds) {
+    renderTable(inds, [
+        { label: 'Indicator', cls: '',           render: r => r.name },
+        { label: 'Symbol',    cls: '',           render: r => r.symbol },
+        { label: 'TF',        cls: '',           render: r => `<span class="tf-badge">${r.timeframe}</span>` },
+        { label: 'Plugin',    cls: 'date-cell',  render: r => r.plugin },
+        { label: 'Progress',  cls: 'pct-cell',   render: r => bar(r.pct) },
+        { label: 'Calculated',cls: 'count-cell', render: r => fmt(r.actual) },
+        { label: 'Expected',  cls: 'count-cell', render: r => fmt(r.expected) },
+        { label: 'Range',     cls: 'date-cell',  render: r => dateRange(r.first, r.last) },
+    ], 'indContainer');
+}
+
+function renderStrategies(strats) {
+    renderTable(strats, [
+        { label: 'Strategy',     cls: '',           render: r => r.name },
+        { label: 'Symbol',       cls: '',           render: r => r.symbol },
+        { label: 'Plugin',       cls: 'date-cell',  render: r => r.plugin },
+        { label: 'Base indicator',cls:'date-cell',  render: r => r.base_indicator || '—' },
+        { label: 'Progress',     cls: 'pct-cell',   render: r => bar(r.pct) },
+        { label: 'Evaluated',    cls: 'count-cell', render: r => fmt(r.actual) },
+        { label: 'Expected',     cls: 'count-cell', render: r => fmt(r.expected) },
+        { label: 'Range',        cls: 'date-cell',  render: r => dateRange(r.first, r.last) },
+    ], 'stratContainer');
+}
+
+async function load() {
+    try {
+        const res = await fetch('/api/progress');
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const d = await res.json();
+        if (d.error) throw new Error(d.error);
+        renderPairs(d.pairs || []);
+        renderAgg(d.aggregation || []);
+        renderIndicators(d.indicators || []);
+        renderStrategies(d.strategies || []);
+        document.getElementById('lastRefresh').textContent = 'Updated ' + new Date().toLocaleTimeString();
+        resetCountdown();
+    } catch(e) {
+        document.getElementById('lastRefresh').textContent = 'Error: ' + e.message;
+    }
+}
+
+function resetCountdown() {
+    countdownSec = 30;
+    clearInterval(countdownTimer);
+    countdownTimer = setInterval(() => {
+        countdownSec--;
+        document.getElementById('countdown').textContent = `auto-refresh in ${countdownSec}s`;
+        if (countdownSec <= 0) { load(); }
+    }, 1000);
+}
+
+document.addEventListener('DOMContentLoaded', load);
+</script>
+</body>
+</html>

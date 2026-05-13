@@ -111,7 +111,7 @@ class GapRecoveryService:
         
         # Background tasks
         self.gap_check_task: Optional[asyncio.Task] = None
-        self.processing_semaphore = asyncio.Semaphore(3)  # Max 3 concurrent batches
+        self.processing_semaphore = asyncio.Semaphore(10)
         
         from core.logging_config import setup_service_logging
         self.logger = setup_service_logging('gap_recovery')
@@ -278,27 +278,26 @@ class GapRecoveryService:
             self.logger.error(f"Error getting timeframes from config: {e}")
             return []
     
-    async def _check_timeframe_gaps(self, connection_name: str, exchange: str, 
+    async def _check_timeframe_gaps(self, connection_name: str, exchange: str,
                                    symbol: str, timeframe: str):
         """Check for gaps in specific timeframe starting from start_date"""
         try:
+            self.logger.info(f"Checking {exchange}/{symbol}/{timeframe} gaps...")
+
             # Get start_date from config
             expected_start_timestamp = await self._get_expected_start_timestamp(connection_name, timeframe)
             if not expected_start_timestamp:
                 self.logger.warning(f"No valid start_date for {connection_name}, skipping gap check")
                 return
-            
-            # Get server time for trailing gap detection
-            server_time = await self._get_server_time(connection_name)
-            if not server_time:
-                import time as _time
-                server_time = int(_time.time())
-                self.logger.info(f"No server time for {connection_name}, using local time: {datetime.fromtimestamp(server_time, tz=timezone.utc)}")
-            else:
-                self.logger.debug(f"Server time for {connection_name}: {server_time} ({datetime.fromtimestamp(server_time, tz=timezone.utc)})")
 
+            # Use local time for safe_end_time calculation — avoids blocking plugin call
+            import time as _time
+            server_time = int(_time.time())
+
+            self.logger.info(f"Running gap query for {exchange}/{symbol}/{timeframe}...")
             # Use efficient gap detection that doesn't load all candles into memory
             gaps = await self._find_actual_gaps(exchange, symbol, timeframe, expected_start_timestamp, server_time)
+            self.logger.info(f"Gap query done for {exchange}/{symbol}/{timeframe}, found {len(gaps)} gaps")
             
             if gaps:
                 self.logger.info(f"Found {len(gaps)} gaps in {exchange}/{symbol}/{timeframe}")
@@ -669,7 +668,7 @@ class GapRecoveryService:
         try:
             if connection_name in self.exchange_plugins:
                 plugin = self.exchange_plugins[connection_name]
-                server_time = await plugin.get_server_time()
+                server_time = await asyncio.wait_for(plugin.get_server_time(), timeout=15)
                 if server_time:
                     self._server_time_cache[connection_name] = (int(server_time), _time_mod.monotonic())
                     return int(server_time)
@@ -690,12 +689,10 @@ class GapRecoveryService:
                                    symbol: str, timeframe: str):
         """Trigger full recovery for timeframe with no candles"""
         try:
-            # Get server time
-            server_time = await self._get_server_time(connection_name)
-            if not server_time:
-                self.logger.warning(f"Cannot trigger full recovery: no server time for {connection_name}")
-                return
-            
+            # Use local time for safe_end_time boundary calculation
+            import time as _time
+            server_time = int(_time.time())
+
             # Get start_date from connections config
             connections_config = self.config_manager.get_config('connections')
             connection_config = connections_config.get('connections', {}).get(connection_name, {})
@@ -814,12 +811,10 @@ class GapRecoveryService:
                     # Round start to beginning of target period
                     period_start = TimeframeUtils.get_period_start(batch['start_timestamp'], timeframe)
                     
-                    # Get server time to limit end period to current time
-                    server_time = await self._get_server_time(connection_name)
-                    if not server_time:
-                        self.logger.warning(f"No server time available for {connection_name}, skipping aggregation")
-                        return
-                    
+                    # Use local time to limit end period to current time
+                    import time as _time
+                    server_time = int(_time.time())
+
                     # Use safe end time (like in gap detection) to avoid future periods
                     safe_end_time = self._get_safe_trailing_end(server_time, timeframe)
                     limited_end = min(batch['end_timestamp'], safe_end_time)

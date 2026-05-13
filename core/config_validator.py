@@ -235,6 +235,18 @@ class ConfigValidator:
         
         # Define required parameters for each strategy plugin
         strategy_requirements = {
+            'ema_deviation_strategy': {
+                'required_params': ['ema_indicator', 'min_dev_pct', 'max_dev_pct'],
+                'param_types': {
+                    'ema_indicator': str,
+                    'min_dev_pct': (int, float),
+                    'max_dev_pct': (int, float),
+                },
+                'param_ranges': {
+                    'min_dev_pct': (0, 10),
+                    'max_dev_pct': (0, 10),
+                }
+            },
             'rsi_multi_timeframe_strategy': {
                 'required_params': [
                     'rsi_4h_upper', 'rsi_4h_lower',
