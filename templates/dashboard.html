@@ -62,11 +62,11 @@
   }
   .add-ind-btn:hover { color: var(--text); border-color: var(--text); }
 
-  /* indicator dropdown */
+  /* indicator dropdown — fixed so overflow:hidden on topbar doesn't clip it */
   .ind-dropdown {
-    position: absolute; top: 40px; left: 0; min-width: 280px; max-height: 320px;
+    position: fixed; top: 44px; left: 0; min-width: 280px; max-height: 320px;
     background: var(--surface); border: 1px solid var(--border); border-radius: 6px;
-    overflow-y: auto; z-index: 100; box-shadow: 0 4px 20px rgba(0,0,0,.5);
+    overflow-y: auto; z-index: 200; box-shadow: 0 4px 20px rgba(0,0,0,.5);
     display: none;
   }
   .ind-dropdown.open { display: block; }
@@ -263,6 +263,7 @@ const S = {
   loadingMore: false,
   fitting: false,       // true while fitContent() is running — blocks lazy load
   oldestTs: null,
+  chartGen: 0,          // incremented on each loadChart() to cancel stale continuations
 };
 
 // ═══ Boot ════════════════════════════════════════════════════════════
@@ -371,9 +372,9 @@ function relayout() {
   const W = g('chartArea').clientWidth, H = g('chartArea').clientHeight;
   const volH = (S.layers.volume && !g('chartVolume').classList.contains('h')) ? 80  : 0;
   const rsiH = (hasRsi()        && !g('chartRsi').classList.contains('h'))    ? 110 : 0;
-  S.charts.main.resize(W, Math.max(H - volH - rsiH, 100));
-  if (volH) S.charts.vol.resize(W, volH);
-  if (rsiH) S.charts.rsi.resize(W, rsiH);
+  try { S.charts.main.resize(W, Math.max(H - volH - rsiH, 100)); } catch (_) {}
+  if (volH) { try { S.charts.vol.resize(W, volH); } catch (_) {} }
+  if (rsiH) { try { S.charts.rsi.resize(W, rsiH); } catch (_) {} }
 }
 function hasRsi() { return [...S.activeInds.entries()].some(([n, v]) => v.on && n.includes('rsi')); }
 
@@ -390,19 +391,24 @@ function smartLimit() {
 async function loadChart() {
   S.ex = val('selEx'); S.sym = val('selSym'); S.tf = val('selTf');
   if (!S.ex || !S.sym || !S.tf) return;
+  const gen = ++S.chartGen;
   try {
     load(true, `Loading ${S.sym} ${S.tf}…`);
 
     const lim = smartLimit();
     const cRes = await api(`/api/chart?exchange=${S.ex}&symbol=${S.sym}&timeframe=${S.tf}&limit=${lim}`);
-    S.candles  = cRes.data || [];
+    if (gen !== S.chartGen) return; // superseded by a newer loadChart() call
+
+    S.candles  = (cRes.data || []).sort((a, b) => a.timestamp - b.timestamp);
     S.oldestTs = S.candles.length ? S.candles[0].timestamp : null;
 
     // Clear only after data arrives — avoids blank chart during network wait
     clearMainSeries();
     renderCandles();
     renderVolume();
-    await refreshActiveIndicators();
+    await refreshActiveIndicators(gen);
+    if (gen !== S.chartGen) return; // superseded during indicator fetch
+
     renderSignals();
     relayout();
     // Guard: prevent fitContent from triggering the lazy-load scroll handler
@@ -416,7 +422,7 @@ async function loadChart() {
     // Load signals in background — don't block chart render
     fetchSignals();
   } catch (e) { showErr(e.message); }
-  finally { load(false); }
+  finally { if (gen === S.chartGen) load(false); }
 }
 
 async function fetchSignals() {
@@ -438,8 +444,10 @@ async function loadMore() {
     const more = (res.data || []).filter(c => c.timestamp < S.oldestTs);
     if (!more.length) { S.loadingMore = false; return; }
 
-    S.candles = [...more, ...S.candles];
-    S.oldestTs = more[0].timestamp;
+    // Merge, sort ascending, deduplicate — prevents duplicate-timestamp crash in lightweight-charts
+    const merged = [...more, ...S.candles].sort((a, b) => a.timestamp - b.timestamp);
+    S.candles = merged.filter((c, i) => i === 0 || c.timestamp !== merged[i - 1].timestamp);
+    S.oldestTs = S.candles[0].timestamp;
 
     // Save visible range before setData — prepending data shifts logical indices
     const visRange = S.charts.main.timeScale().getVisibleLogicalRange();
@@ -502,7 +510,10 @@ function renderVolume() {
     // Update existing series (faster than recreate)
     S.series.vol.setData(volData());
   } else {
-    S.series.vol = S.charts.vol.addHistogramSeries({ priceFormat: { type: 'volume' } });
+    S.series.vol = S.charts.vol.addHistogramSeries({
+      priceFormat: { type: 'volume' },
+      scaleMargins: { top: 0.1, bottom: 0 },
+    });
     S.series.vol.setData(volData());
   }
 }
@@ -568,7 +579,10 @@ function buildIndDropdown() {
 function toggleIndMenu(e) {
   e.stopPropagation();
   const el = g('indDropdown');
-  el.classList.toggle('open');
+  if (el.classList.toggle('open')) {
+    const rect = e.currentTarget.getBoundingClientRect();
+    el.style.left = Math.min(rect.left, window.innerWidth - 290) + 'px';
+  }
 }
 
 document.addEventListener('click', () => { g('indDropdown').classList.remove('open'); });
@@ -669,7 +683,7 @@ function indTsParams() {
   return `&start_ts=${st}&end_ts=${et}`;
 }
 
-async function refreshActiveIndicators() {
+async function refreshActiveIndicators(gen) {
   // Re-fetch data for all active indicators when chart params change
   const tsParams = indTsParams();
   await Promise.all([...S.activeInds.entries()].map(async ([name, entry]) => {
@@ -677,6 +691,7 @@ async function refreshActiveIndicators() {
     entry.series = null; entry.rsiRefLines = []; entry.data = [];
     try {
       const r = await api(`/api/indicators?indicator_name=${name}&exchange=${entry.meta.exchange}&symbol=${entry.meta.symbol}&timeframe=${entry.meta.tf}${tsParams}`);
+      if (gen !== undefined && gen !== S.chartGen) return; // superseded
       entry.data = (r.data?.indicators || [])
         .map(p => ({ time: p.timestamp, value: parseFloat(p.value) }))
         .filter(p => p.value > 0)

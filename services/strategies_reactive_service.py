@@ -20,7 +20,7 @@ from datetime import datetime, timezone
 from core.universal_config_manager import UniversalConfigManager
 from rabbitmq.rabbitmq_client import RabbitMQClient, QueueMessage, MessagePublisher
 from models.base import Indicator, StrategySignal, Candle
-from sqlalchemy import and_
+from sqlalchemy import and_, select, text
 from core.exceptions import ConfigurationError
 from core.logging_config import get_strategies_logger
 
@@ -230,8 +230,8 @@ class StrategiesReactiveService:
                 self.logger.warning(f"Strategy {strategy_name} has no required indicators")
                 return
 
-            with self.database_manager.get_session() as session:
-                complete_timestamps = self._find_complete_indicator_timestamps_in_range(
+            async with self.database_manager.get_session() as session:
+                complete_timestamps = await self._find_complete_indicator_timestamps_in_range(
                     session, connection_name, required_indicators, start_timestamp, end_timestamp,
                     base_indicator=base_indicator
                 )
@@ -243,16 +243,17 @@ class StrategiesReactiveService:
                 self.logger.info(f"Found {len(complete_timestamps)} complete indicator sets for {strategy_name}")
 
                 # Single query to get all already-evaluated timestamps in range
-                existing_ts_in_range = {
-                    row[0] for row in session.query(StrategySignal.timestamp).filter(
+                _r = await session.execute(
+                    select(StrategySignal.timestamp).where(
                         and_(
                             StrategySignal.strategy_name == strategy_name,
                             StrategySignal.connection_name == connection_name,
                             StrategySignal.timestamp >= start_timestamp,
                             StrategySignal.timestamp <= end_timestamp
                         )
-                    ).all()
-                }
+                    )
+                )
+                existing_ts_in_range = {row[0] for row in _r.all()}
 
             timestamps_to_calculate = sorted(complete_timestamps - existing_ts_in_range)
             skipped_count = len(complete_timestamps) - len(timestamps_to_calculate)
@@ -308,77 +309,82 @@ class StrategiesReactiveService:
         conn_cfg = connections_config.get('connections', {}).get(connection_name, {})
         source_timeframe = indicators_config.get(base_indicator, {}).get('source_timeframe', '4h')
 
-        def _fetch():
-            with self.database_manager.get_session() as session:
-                # One query per indicator — full sorted history
-                all_rows: Dict[str, list] = {}
-                for ind_name in required_indicators:
-                    rows = session.query(
+        async with self.database_manager.get_session() as session:
+            # One query per indicator — full sorted history
+            all_rows: Dict[str, list] = {}
+            for ind_name in required_indicators:
+                _r = await session.execute(
+                    select(
                         Indicator.timestamp, Indicator.value, Indicator.meta_data
-                    ).filter(
+                    ).where(
                         and_(
                             Indicator.connection_name == connection_name,
                             Indicator.indicator_name == ind_name,
                         )
-                    ).order_by(Indicator.timestamp.asc()).all()
-                    all_rows[ind_name] = list(rows)
+                    ).order_by(Indicator.timestamp.asc())
+                )
+                all_rows[ind_name] = list(_r.all())
 
-                # One IN query for all candle close prices
-                candle_prices: Dict[int, float] = {}
-                if conn_cfg:
-                    candle_rows = session.query(Candle.timestamp, Candle.close_price).filter(
-                        and_(
-                            Candle.exchange == conn_cfg.get('exchange', ''),
-                            Candle.symbol == conn_cfg.get('symbol', ''),
-                            Candle.timeframe == source_timeframe,
-                            Candle.timestamp.in_(timestamps),
-                        )
-                    ).all()
-                    candle_prices = {r[0]: float(r[1]) for r in candle_rows}
-
-            # Pre-build sorted timestamp index per indicator for bisect
-            ts_index: Dict[str, list] = {
-                ind_name: [r[0] for r in rows]
-                for ind_name, rows in all_rows.items()
-            }
-
-            batch_data = []
-            for ts in sorted(timestamps):
-                indicators_data: Dict[str, Any] = {}
-                missing = False
-
-                for ind_name in required_indicators:
-                    ind_tf = indicators_config.get(ind_name, {}).get('source_timeframe', '4h')
-                    if ind_tf == '1d':
-                        cutoff = (ts // 86400) * 86400
-                    elif ind_tf == '1w':
-                        cutoff = (ts // 604800) * 604800
-                    else:
-                        cutoff = ts + 1  # 4H exact match: timestamp < ts+1 ≡ timestamp <= ts
-
-                    idx = bisect.bisect_left(ts_index[ind_name], cutoff) - 1
-                    if idx < 0:
-                        missing = True
-                        break
-
-                    row = all_rows[ind_name][idx]
-                    indicators_data[ind_name] = {
-                        'value': float(row[1]) if row[1] is not None else None,
-                        'timestamp': row[0],
-                        'metadata': json.loads(row[2]) if row[2] else {},
+            # One IN query for all candle close prices
+            candle_prices: Dict[int, float] = {}
+            if conn_cfg:
+                src_table = self.database_manager.candle_source_table(source_timeframe)
+                tf_filter = f"AND timeframe = '{source_timeframe}'" if src_table == 'candles' else ""
+                ts_list = ','.join(str(t) for t in timestamps)
+                _r = await session.execute(
+                    text(f"""
+                        SELECT timestamp, close_price
+                        FROM {src_table}
+                        WHERE exchange = :ex AND symbol = :sym {tf_filter}
+                        AND timestamp = ANY(:ts_arr)
+                    """), {
+                        'ex': conn_cfg.get('exchange', ''),
+                        'sym': conn_cfg.get('symbol', ''),
+                        'ts_arr': list(timestamps),
                     }
+                )
+                candle_prices = {r[0]: float(r[1]) for r in _r.fetchall()}
 
-                if not missing:
-                    batch_data.append({
-                        'timestamp': ts,
-                        'indicators_data': indicators_data,
-                        'current_price': candle_prices.get(ts, 0.0),
-                    })
+        # Pre-build sorted timestamp index per indicator for bisect
+        ts_index: Dict[str, list] = {
+            ind_name: [r[0] for r in rows]
+            for ind_name, rows in all_rows.items()
+        }
 
-            return batch_data
+        batch_data = []
+        for ts in sorted(timestamps):
+            indicators_data: Dict[str, Any] = {}
+            missing = False
 
-        loop = asyncio.get_event_loop()
-        return await loop.run_in_executor(None, _fetch)
+            for ind_name in required_indicators:
+                ind_tf = indicators_config.get(ind_name, {}).get('source_timeframe', '4h')
+                if ind_tf == '1d':
+                    cutoff = (ts // 86400) * 86400
+                elif ind_tf == '1w':
+                    cutoff = (ts // 604800) * 604800
+                else:
+                    cutoff = ts + 1  # 4H exact match: timestamp < ts+1 ≡ timestamp <= ts
+
+                idx = bisect.bisect_left(ts_index[ind_name], cutoff) - 1
+                if idx < 0:
+                    missing = True
+                    break
+
+                row = all_rows[ind_name][idx]
+                indicators_data[ind_name] = {
+                    'value': float(row[1]) if row[1] is not None else None,
+                    'timestamp': row[0],
+                    'metadata': json.loads(row[2]) if row[2] else {},
+                }
+
+            if not missing:
+                batch_data.append({
+                    'timestamp': ts,
+                    'indicators_data': indicators_data,
+                    'current_price': candle_prices.get(ts, 0.0),
+                })
+
+        return batch_data
 
     async def _calculate_strategy_batch(self, strategy_name: str, connection_name: str, timestamps: List[int]) -> int:
         """Calculate strategy for batch of timestamps using process_batch method"""
@@ -449,7 +455,7 @@ class StrategiesReactiveService:
 
             indicators_config = self.config_manager.get_config('indicators').get('indicators', {})
 
-            with self.database_manager.get_session() as session:
+            async with self.database_manager.get_session() as session:
                 for indicator_name in required_indicators:
                     ind_cfg = indicators_config.get(indicator_name, {})
                     ind_timeframe = ind_cfg.get('source_timeframe', '4h')
@@ -467,13 +473,15 @@ class StrategiesReactiveService:
                     else:
                         cutoff = timestamp + 1  # 4H: include exact match (<=)
 
-                    indicator = session.query(Indicator).filter(
-                        and_(
-                            Indicator.connection_name == connection_name,
-                            Indicator.indicator_name == indicator_name,
-                            Indicator.timestamp < cutoff
-                        )
-                    ).order_by(Indicator.timestamp.desc()).first()
+                    indicator = (await session.execute(
+                        select(Indicator).where(
+                            and_(
+                                Indicator.connection_name == connection_name,
+                                Indicator.indicator_name == indicator_name,
+                                Indicator.timestamp < cutoff
+                            )
+                        ).order_by(Indicator.timestamp.desc()).limit(1)
+                    )).scalars().first()
 
                     if indicator:
                         indicators_data[indicator_name] = {
@@ -491,16 +499,16 @@ class StrategiesReactiveService:
                 connections_config = self.config_manager.get_config('connections')
                 conn_cfg = connections_config.get('connections', {}).get(connection_name, {})
                 if conn_cfg:
-                    candle = session.query(Candle).filter(
-                        and_(
-                            Candle.exchange == conn_cfg.get('exchange', ''),
-                            Candle.symbol == conn_cfg.get('symbol', ''),
-                            Candle.timeframe == source_timeframe,
-                            Candle.timestamp == timestamp
-                        )
-                    ).first()
-                    if candle:
-                        close_price = float(candle.close_price)
+                    src_table = self.database_manager.candle_source_table(source_timeframe)
+                    tf_filter = f"AND timeframe = '{source_timeframe}'" if src_table == 'candles' else ""
+                    _r = await session.execute(text(f"""
+                        SELECT close_price FROM {src_table}
+                        WHERE exchange = :ex AND symbol = :sym {tf_filter}
+                        AND timestamp = :ts LIMIT 1
+                    """), {'ex': conn_cfg.get('exchange', ''), 'sym': conn_cfg.get('symbol', ''), 'ts': timestamp})
+                    row = _r.first()
+                    if row:
+                        close_price = float(row[0])
 
             return {'indicators': indicators_data, 'close_price': close_price}
 
@@ -533,7 +541,7 @@ class StrategiesReactiveService:
         except Exception as e:
             self.logger.error(f"Error saving strategy signal: {e}")
     
-    def _find_complete_indicator_timestamps_in_range(self, session, connection_name: str,
+    async def _find_complete_indicator_timestamps_in_range(self, session, connection_name: str,
                                                    required_indicators: List[str],
                                                    start_timestamp: int, end_timestamp: int,
                                                    base_indicator: str = None) -> Set[int]:
@@ -548,15 +556,17 @@ class StrategiesReactiveService:
 
         trigger = base_indicator or required_indicators[0]
 
-        rows = session.query(Indicator.timestamp).filter(
-            and_(
-                Indicator.connection_name == connection_name,
-                Indicator.indicator_name == trigger,
-                Indicator.timestamp >= start_timestamp,
-                Indicator.timestamp <= end_timestamp
+        _r = await session.execute(
+            select(Indicator.timestamp).where(
+                and_(
+                    Indicator.connection_name == connection_name,
+                    Indicator.indicator_name == trigger,
+                    Indicator.timestamp >= start_timestamp,
+                    Indicator.timestamp <= end_timestamp
+                )
             )
-        ).all()
-        trigger_ts = {r[0] for r in rows}
+        )
+        trigger_ts = {r[0] for r in _r.all()}
 
         if not trigger_ts:
             return set()
@@ -569,12 +579,15 @@ class StrategiesReactiveService:
 
         earliest_required = 0
         for ind_name in other_indicators:
-            first = session.query(Indicator.timestamp).filter(
-                and_(
-                    Indicator.connection_name == connection_name,
-                    Indicator.indicator_name == ind_name
-                )
-            ).order_by(Indicator.timestamp.asc()).limit(1).first()
+            _r = await session.execute(
+                select(Indicator.timestamp).where(
+                    and_(
+                        Indicator.connection_name == connection_name,
+                        Indicator.indicator_name == ind_name
+                    )
+                ).order_by(Indicator.timestamp.asc()).limit(1)
+            )
+            first = _r.first()
             if not first:
                 return set()  # Required indicator has no data at all — wait until it's available
             earliest_required = max(earliest_required, first[0])
@@ -587,31 +600,28 @@ class StrategiesReactiveService:
         if not signals_data:
             return
         try:
-            loop = asyncio.get_event_loop()
-
-            def _insert():
-                with self.database_manager.get_session() as session:
-                    for item in signals_data:
-                        existing = session.query(StrategySignal.id).filter(
+            async with self.database_manager.get_session() as session:
+                for item in signals_data:
+                    existing = (await session.execute(
+                        select(StrategySignal.id).where(
                             and_(
                                 StrategySignal.strategy_name == strategy_name,
                                 StrategySignal.connection_name == connection_name,
                                 StrategySignal.timestamp == item['timestamp']
                             )
-                        ).limit(1).first()
-                        if existing:
-                            continue
-                        session.add(StrategySignal(
-                            strategy_name=strategy_name,
-                            connection_name=connection_name,
-                            signal_type=item['signal_type'],
-                            timestamp=item['timestamp'],
-                            confidence=item['confidence'],
-                            price=item['price'],
-                        ))
-                    session.commit()
-
-            await loop.run_in_executor(None, _insert)
+                        ).limit(1)
+                    )).first()
+                    if existing:
+                        continue
+                    session.add(StrategySignal(
+                        strategy_name=strategy_name,
+                        connection_name=connection_name,
+                        signal_type=item['signal_type'],
+                        timestamp=item['timestamp'],
+                        confidence=item['confidence'],
+                        price=item['price'],
+                    ))
+                await session.commit()
             self.logger.info(f"Saved {len(signals_data)} strategy signals to DB for {strategy_name}")
         except Exception as e:
             self.logger.error(f"Error bulk saving strategy signals for {strategy_name}: {e}")
@@ -626,31 +636,28 @@ class StrategiesReactiveService:
         if not timestamps:
             return
         try:
-            loop = asyncio.get_event_loop()
-
-            def _insert():
-                with self.database_manager.get_session() as session:
-                    for ts in timestamps:
-                        existing = session.query(StrategySignal.id).filter(
+            async with self.database_manager.get_session() as session:
+                for ts in timestamps:
+                    existing = (await session.execute(
+                        select(StrategySignal.id).where(
                             and_(
                                 StrategySignal.strategy_name == strategy_name,
                                 StrategySignal.connection_name == connection_name,
                                 StrategySignal.timestamp == ts
                             )
-                        ).limit(1).first()
-                        if existing:
-                            continue
-                        session.add(StrategySignal(
-                            strategy_name=strategy_name,
-                            connection_name=connection_name,
-                            signal_type='HOLD',
-                            timestamp=ts,
-                            confidence=0.0,
-                            price=0.0,
-                        ))
-                    session.commit()
-
-            await loop.run_in_executor(None, _insert)
+                        ).limit(1)
+                    )).first()
+                    if existing:
+                        continue
+                    session.add(StrategySignal(
+                        strategy_name=strategy_name,
+                        connection_name=connection_name,
+                        signal_type='HOLD',
+                        timestamp=ts,
+                        confidence=0.0,
+                        price=0.0,
+                    ))
+                await session.commit()
             self.logger.info(f"Saved {len(timestamps)} HOLD markers for {strategy_name}")
         except Exception as e:
             self.logger.error(f"Error saving HOLD markers for {strategy_name}: {e}")
@@ -660,7 +667,7 @@ class StrategiesReactiveService:
         try:
             plugin = self.strategy_plugins[strategy_name]
             
-            with self.database_manager.get_session() as session:
+            async with self.database_manager.get_session() as session:
                 # Get strategy configuration to know required indicators
                 strategies_config = self.config_manager.get_config('strategies')
                 strategy_config = strategies_config['strategies'][strategy_name]
@@ -681,13 +688,15 @@ class StrategiesReactiveService:
                     else:
                         cutoff = timestamp + 1
 
-                    indicator = session.query(Indicator).filter(
-                        and_(
-                            Indicator.connection_name == connection_name,
-                            Indicator.indicator_name == indicator_name,
-                            Indicator.timestamp < cutoff
-                        )
-                    ).order_by(Indicator.timestamp.desc()).first()
+                    indicator = (await session.execute(
+                        select(Indicator).where(
+                            and_(
+                                Indicator.connection_name == connection_name,
+                                Indicator.indicator_name == indicator_name,
+                                Indicator.timestamp < cutoff
+                            )
+                        ).order_by(Indicator.timestamp.desc()).limit(1)
+                    )).scalars().first()
                     
                     if indicator:
                         indicators_data[indicator_name] = {
@@ -713,16 +722,16 @@ class StrategiesReactiveService:
                 connections_config = self.config_manager.get_config('connections')
                 conn_cfg = connections_config.get('connections', {}).get(connection_name, {})
                 if conn_cfg:
-                    candle = session.query(Candle).filter(
-                        and_(
-                            Candle.exchange == conn_cfg.get('exchange', ''),
-                            Candle.symbol == conn_cfg.get('symbol', ''),
-                            Candle.timeframe == source_timeframe,
-                            Candle.timestamp == timestamp
-                        )
-                    ).first()
-                    if candle:
-                        candle_price = float(candle.close_price)
+                    src_table = self.database_manager.candle_source_table(source_timeframe)
+                    tf_filter = f"AND timeframe = '{source_timeframe}'" if src_table == 'candles' else ""
+                    _r = await session.execute(text(f"""
+                        SELECT close_price FROM {src_table}
+                        WHERE exchange = :ex AND symbol = :sym {tf_filter}
+                        AND timestamp = :ts LIMIT 1
+                    """), {'ex': conn_cfg.get('exchange', ''), 'sym': conn_cfg.get('symbol', ''), 'ts': timestamp})
+                    row = _r.first()
+                    if row:
+                        candle_price = float(row[0])
 
                 # Calculate strategy signal using the plugin's process method
                 result = await plugin.process(indicators_data, candle_price, timestamp)
@@ -767,12 +776,14 @@ class StrategiesReactiveService:
         """Get status of all strategies"""
         status = {}
         
-        with self.database_manager.get_session() as session:
+        async with self.database_manager.get_session() as session:
             for strategy_name in self.strategy_plugins.keys():
                 # Get latest signals for this strategy
-                latest_signals = session.query(StrategySignal).filter(
-                    StrategySignal.strategy_name == strategy_name
-                ).order_by(StrategySignal.timestamp.desc()).limit(5).all()
+                latest_signals = (await session.execute(
+                    select(StrategySignal).where(
+                        StrategySignal.strategy_name == strategy_name
+                    ).order_by(StrategySignal.timestamp.desc()).limit(5)
+                )).scalars().all()
                 
                 status[strategy_name] = {
                     'plugin_loaded': True,

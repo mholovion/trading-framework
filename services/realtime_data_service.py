@@ -244,7 +244,7 @@ class RealtimeDataService:
             if candle_data['timestamp'] > last_candle_timestamp and last_candle_timestamp > 0:
                 # Get the previous closed candle from database and publish it
                 try:
-                    previous_candle = self.database_manager.get_latest_candle(
+                    previous_candle = await self.database_manager.get_latest_candle(
                         config['exchange'], 
                         config['symbol'], 
                         config['source_timeframe'],

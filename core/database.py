@@ -1,123 +1,289 @@
 #!/usr/bin/env python3
 """
-Database Manager - SQLAlchemy ORM
-=================================
+Database Manager - SQLAlchemy 2.0 async (asyncpg driver)
+=========================================================
 
-Production-ready database manager using SQLAlchemy ORM exclusively.
-Replaced asyncpg with SQLAlchemy for unified ORM approach across all services.
+All public methods are async. Session context manager is async.
+Engine uses postgresql+asyncpg:// — no blocking calls on the event loop.
 """
 
+import asyncio
 import logging
 import os
 from typing import Dict, Any, Optional, List
 from datetime import datetime, timezone, timedelta
-from contextlib import contextmanager
+from contextlib import asynccontextmanager
 
-from sqlalchemy import create_engine, text, func, and_, or_, desc, asc
-from sqlalchemy.orm import sessionmaker, Session
-from sqlalchemy.pool import QueuePool
-from sqlalchemy.exc import SQLAlchemyError, IntegrityError
+from sqlalchemy import select, text, func, and_, or_, desc, asc, update
+from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncSession
 from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.exc import SQLAlchemyError
 
 from core.exceptions import DatabaseError
 from models.base import Base, Candle, RealtimeCandle, Indicator, StrategySignal
 
 
+_TF_SECONDS: Dict[str, int] = {
+    '1m': 60, '3m': 180, '5m': 300, '15m': 900, '30m': 1800,
+    '1h': 3600, '2h': 7200, '4h': 14400, '6h': 21600, '8h': 28800, '12h': 43200,
+    '1d': 86400, '3d': 259200, '1w': 604800,
+}
+
+
+def _seconds_to_pg_interval(seconds: int) -> str:
+    if seconds % 604800 == 0:
+        return f"{seconds // 604800} weeks"
+    if seconds % 86400 == 0:
+        return f"{seconds // 86400} days"
+    if seconds % 3600 == 0:
+        return f"{seconds // 3600} hours"
+    return f"{seconds // 60} minutes"
+
+
 class DatabaseManager:
     """
-    Production database manager using SQLAlchemy ORM exclusively
+    Async database manager using SQLAlchemy 2.0 + asyncpg driver.
+    All public methods are coroutines — use `await` at call sites.
     """
-    
-    def __init__(self, config: Dict[str, Any]):
+
+    def __init__(self, config: Dict[str, Any], aggregation_rules: Optional[List] = None):
         self.config = config['database']
+        self._aggregation_rules = aggregation_rules or []
         self.engine = None
-        self.SessionLocal = None
+        self._session_factory = None
         self.logger = logging.getLogger(__name__)
         self._initialized = False
-    
+        self._init_lock = asyncio.Lock()
+
     async def initialize(self):
-        """Initialize SQLAlchemy engine and session factory"""
+        """Create async engine, session factory, tables, and continuous aggregates."""
+        if self._initialized:
+            return
+        async with self._init_lock:
+            if self._initialized:  # double-checked locking
+                return
+            try:
+                connection_url = (
+                    f"postgresql+asyncpg://{self.config['user']}:{self.config['password']}"
+                    f"@{self.config['host']}:{self.config['port']}/{self.config['name']}"
+                )
+
+                # jit=off: PostgreSQL JIT adds 10-30 s overhead for aggregate queries
+                # on small-to-medium tables with no measurable benefit.
+                self.engine = create_async_engine(
+                    connection_url,
+                    pool_size=self.config.get('connection_pool_size', 20),
+                    max_overflow=self.config.get('max_overflow', 10),
+                    pool_timeout=self.config.get('query_timeout', 30),
+                    pool_recycle=3600,
+                    echo=False,
+                    connect_args={"server_settings": {"jit": "off"}},
+                )
+
+                self._session_factory = async_sessionmaker(
+                    self.engine, expire_on_commit=False, class_=AsyncSession
+                )
+
+                # Create ORM-mapped tables
+                async with self.engine.begin() as conn:
+                    await conn.run_sync(Base.metadata.create_all)
+
+                # Create ml_features hypertable (raw SQL — JSONB + hypertable, not in ORM)
+                await self._ensure_ml_features_table()
+
+                # Apply continuous aggregates from config
+                if self._aggregation_rules:
+                    await self._apply_continuous_aggregates()
+
+                # Smoke test
+                async with self._session_factory() as session:
+                    await session.execute(text('SELECT 1'))
+
+                self._initialized = True
+                self.logger.info("Async database engine initialised (asyncpg)")
+
+            except Exception as e:
+                raise DatabaseError(f"Failed to initialise database: {e}")
+
+    async def _ensure_ml_features_table(self):
+        """Create ml_features hypertable if it doesn't exist.
+
+        Not in ORM models because it uses JSONB and requires create_hypertable().
+        All inserts/updates go through raw SQL anyway.
+        """
         try:
-            # Build connection string for SQLAlchemy
-            connection_url = (
-                f"postgresql://{self.config['user']}:{self.config['password']}"
-                f"@{self.config['host']}:{self.config['port']}/{self.config['name']}"
-            )
-            
-            # Create engine with connection pooling.
-            # jit=off: PostgreSQL JIT compilation adds 10-30s overhead for aggregate queries
-            # on small-to-medium tables — far exceeds any benefit it provides here.
-            self.engine = create_engine(
-                connection_url,
-                poolclass=QueuePool,
-                pool_size=self.config.get('connection_pool_size', 20),
-                max_overflow=self.config.get('max_overflow', 10),
-                pool_timeout=self.config.get('query_timeout', 30),
-                pool_recycle=3600,
-                echo=False,
-                connect_args={"options": "-c jit=off"},
-            )
-            
-            # Create session factory
-            self.SessionLocal = sessionmaker(bind=self.engine)
-            
-            # Set initialized before testing connection
-            self._initialized = True
-            
-            # Create tables if they don't exist
-            Base.metadata.create_all(bind=self.engine)
-            
-            # Test connection
-            with self.get_session() as session:
-                session.execute(text('SELECT 1'))
-                session.commit()
-            self.logger.info("SQLAlchemy database engine initialized successfully")
-            
+            async with self.engine.begin() as conn:
+                await conn.execute(text("""
+                    CREATE TABLE IF NOT EXISTS ml_features (
+                        timestamp     BIGINT NOT NULL,
+                        exchange      VARCHAR(50) NOT NULL,
+                        symbol        VARCHAR(20) NOT NULL,
+                        timeframe     VARCHAR(10) NOT NULL,
+                        open_price    FLOAT8,
+                        high_price    FLOAT8,
+                        low_price     FLOAT8,
+                        close_price   FLOAT8,
+                        volume        FLOAT8,
+                        features      JSONB NOT NULL DEFAULT '{}',
+                        trade_pnl_pct FLOAT8,
+                        trade_label   SMALLINT,
+                        created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                        updated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                        PRIMARY KEY (exchange, symbol, timeframe, timestamp)
+                    )
+                """))
+                await conn.execute(text("""
+                    SELECT create_hypertable('ml_features', 'timestamp',
+                        chunk_time_interval => 604800, if_not_exists => TRUE)
+                """))
+                await conn.execute(text("""
+                    CREATE INDEX IF NOT EXISTS idx_ml_features_lookup
+                    ON ml_features (exchange, symbol, timeframe, timestamp DESC)
+                """))
+            self.logger.info("ml_features hypertable ready")
         except Exception as e:
-            raise DatabaseError(f"Failed to initialize database: {e}")
-    
+            self.logger.warning(f"Could not ensure ml_features table: {e}")
+
+    async def _apply_continuous_aggregates(self):
+        """Create TimescaleDB continuous aggregate views from aggregation_rules config.
+
+        Rules are applied in topological order so every source view exists before
+        any view that depends on it. Safe to call on every startup — all DDL uses
+        IF NOT EXISTS / if_not_exists => TRUE.
+        """
+        # Build depth map for topological ordering
+        depths: Dict[str, int] = {}
+        source_for: Dict[str, str] = {}  # target_tf → source_tf
+
+        for rule in self._aggregation_rules:
+            src = rule['source']
+            src_depth = depths.get(src, 0)
+            for tgt in rule.get('targets', []):
+                source_for[tgt] = src
+                depths[tgt] = src_depth + 1
+
+        ordered = sorted(source_for.keys(), key=lambda t: depths.get(t, 0))
+
+        # Integer-based hypertables need a custom "now" function for continuous aggregates.
+        # Use PL/pgSQL DO block so concurrent calls from multiple processes don't race —
+        # the EXCEPTION handler silently absorbs "duplicate_object" and lock conflicts.
+        try:
+            autocommit_engine = self.engine.execution_options(isolation_level="AUTOCOMMIT")
+            async with autocommit_engine.connect() as conn:
+                await conn.execute(text("""
+                    DO $$
+                    BEGIN
+                        CREATE OR REPLACE FUNCTION unix_now() RETURNS BIGINT
+                            LANGUAGE SQL STABLE AS $f$ SELECT EXTRACT(epoch FROM NOW())::BIGINT $f$;
+                        PERFORM set_integer_now_func('candles', 'unix_now', replace_if_exists => TRUE);
+                    EXCEPTION WHEN others THEN
+                        NULL;  -- concurrent process already did this, ignore
+                    END
+                    $$
+                """))
+            self.logger.info("Integer now function registered on candles hypertable")
+        except Exception as e:
+            self.logger.warning(f"Could not register integer now function: {e}")
+
+        for tgt_tf in ordered:
+            src_tf = source_for[tgt_tf]
+            tgt_sec = _TF_SECONDS.get(tgt_tf)
+            if not tgt_sec:
+                self.logger.warning(f"Unknown timeframe '{tgt_tf}' in aggregation rules, skipping")
+                continue
+
+            view_name = f"candles_{tgt_tf}"
+            src_name = "candles" if src_tf == '1m' else f"candles_{src_tf}"
+            where = "\n                WHERE timeframe = '1m' AND source_type = 'exchange'" if src_tf == '1m' else ""
+
+            schedule = _seconds_to_pg_interval(tgt_sec)
+
+            create_sql = text(f"""
+                CREATE MATERIALIZED VIEW IF NOT EXISTS {view_name}
+                WITH (timescaledb.continuous, timescaledb.materialized_only = false) AS
+                SELECT
+                    time_bucket({tgt_sec}, timestamp) AS timestamp,
+                    exchange,
+                    symbol,
+                    first(open_price, timestamp) AS open_price,
+                    max(high_price)              AS high_price,
+                    min(low_price)               AS low_price,
+                    last(close_price, timestamp) AS close_price,
+                    sum(volume)                  AS volume
+                FROM {src_name}{where}
+                GROUP BY 1, 2, 3
+            """)
+
+            # Integer-based hypertables require BIGINT offsets (seconds), not INTERVAL
+            policy_sql = text(f"""
+                SELECT add_continuous_aggregate_policy('{view_name}',
+                    start_offset      => {tgt_sec * 4}::BIGINT,
+                    end_offset        => {tgt_sec}::BIGINT,
+                    schedule_interval => INTERVAL '{schedule}',
+                    if_not_exists     => TRUE)
+            """)
+
+            try:
+                # TimescaleDB continuous aggregates cannot run inside a transaction block
+                autocommit_engine = self.engine.execution_options(isolation_level="AUTOCOMMIT")
+                async with autocommit_engine.connect() as conn:
+                    await conn.execute(create_sql)
+                    await conn.execute(policy_sql)
+                self.logger.info(f"Continuous aggregate ready: {view_name} ← {src_name}")
+            except Exception as e:
+                self.logger.warning(f"Could not apply continuous aggregate '{view_name}': {e}")
+
     def close(self):
-        """Close database engine"""
+        """Dispose engine (sync entry point used by orchestrator teardown)."""
         if self.engine:
-            self.engine.dispose()
+            import asyncio
+            try:
+                loop = asyncio.get_event_loop()
+                if loop.is_running():
+                    loop.create_task(self.engine.dispose())
+                else:
+                    loop.run_until_complete(self.engine.dispose())
+            except Exception:
+                pass
             self.logger.info("Database engine closed")
-    
-    @contextmanager
-    def get_session(self) -> Session:
-        """Get database session with automatic cleanup"""
+
+    @asynccontextmanager
+    async def get_session(self) -> AsyncSession:
+        """Async session context manager with automatic rollback on error."""
         if not self._initialized:
-            raise DatabaseError("Database not initialized")
-        
-        session = self.SessionLocal()
+            raise DatabaseError("Database not initialised")
+        async with self._session_factory() as session:
+            try:
+                yield session
+            except Exception as e:
+                await session.rollback()
+                self.logger.error(f"Database session error: {e}")
+                raise DatabaseError(f"Database operation failed: {e}")
+
+    # ── Candle operations ────────────────────────────────────────────────────
+
+    async def store_candle(self, exchange: str, symbol: str, timeframe: str,
+                           candle_data: Dict, server_time: Optional[int] = None,
+                           source_type: str = 'exchange',
+                           source_timeframe: Optional[str] = None,
+                           aggregation_method: Optional[str] = None,
+                           source_candles_count: Optional[int] = None,
+                           data_completeness: Optional[float] = None) -> bool:
+        """Upsert single candle."""
         try:
-            yield session
-        except Exception as e:
-            session.rollback()
-            self.logger.error(f"Database session error: {e}")
-            raise DatabaseError(f"Database operation failed: {e}")
-        finally:
-            session.close()
-    
-    # Candle operations
-    def store_candle(self, exchange: str, symbol: str, timeframe: str, 
-                    candle_data: Dict, server_time: Optional[int] = None,
-                    source_type: str = 'exchange', source_timeframe: Optional[str] = None,
-                    aggregation_method: Optional[str] = None, source_candles_count: Optional[int] = None,
-                    data_completeness: Optional[float] = None) -> bool:
-        """Store single candle using ORM with source tracking"""
-        try:
-            with self.get_session() as session:
-                # Check if candle exists with same source
-                existing = session.query(Candle).filter(
-                    Candle.exchange == exchange,
-                    Candle.symbol == symbol,
-                    Candle.timeframe == timeframe,
-                    Candle.timestamp == candle_data['timestamp'],
-                    Candle.source_timeframe == source_timeframe
-                ).first()
-                
+            async with self.get_session() as session:
+                result = await session.execute(
+                    select(Candle).where(
+                        Candle.exchange == exchange,
+                        Candle.symbol == symbol,
+                        Candle.timeframe == timeframe,
+                        Candle.timestamp == candle_data['timestamp'],
+                        Candle.source_timeframe == source_timeframe,
+                    )
+                )
+                existing = result.scalar_one_or_none()
+
                 if existing:
-                    # Update existing
                     existing.open_price = float(candle_data['open'])
                     existing.high_price = float(candle_data['high'])
                     existing.low_price = float(candle_data['low'])
@@ -127,11 +293,8 @@ class DatabaseManager:
                     existing.data_completeness = data_completeness
                     existing.updated_at = datetime.now(timezone.utc)
                 else:
-                    # Create new
-                    candle = Candle(
-                        exchange=exchange,
-                        symbol=symbol,
-                        timeframe=timeframe,
+                    session.add(Candle(
+                        exchange=exchange, symbol=symbol, timeframe=timeframe,
                         timestamp=candle_data['timestamp'],
                         open_price=float(candle_data['open']),
                         high_price=float(candle_data['high']),
@@ -142,40 +305,36 @@ class DatabaseManager:
                         source_timeframe=source_timeframe,
                         aggregation_method=aggregation_method,
                         source_candles_count=source_candles_count,
-                        data_completeness=data_completeness
-                    )
-                    session.add(candle)
-                
-                session.commit()
+                        data_completeness=data_completeness,
+                    ))
+
+                await session.commit()
                 return True
-                
+
         except Exception as e:
             self.logger.error(f"Error storing candle: {e}")
             return False
-    
-    def store_candles_batch(self, exchange: str, symbol: str, timeframe: str,
-                           candles: List[Dict], server_time: Optional[int] = None,
-                           source_type: str = 'exchange', source_timeframe: Optional[str] = None,
-                           aggregation_method: Optional[str] = None, source_candles_count: Optional[int] = None,
-                           data_completeness: Optional[float] = None) -> int:
-        """Bulk-upsert candles using a single INSERT ... ON CONFLICT statement."""
+
+    async def store_candles_batch(self, exchange: str, symbol: str, timeframe: str,
+                                  candles: List[Dict], server_time: Optional[int] = None,
+                                  source_type: str = 'exchange',
+                                  source_timeframe: Optional[str] = None,
+                                  aggregation_method: Optional[str] = None,
+                                  source_candles_count: Optional[int] = None,
+                                  data_completeness: Optional[float] = None) -> int:
+        """Bulk-upsert candles via INSERT … ON CONFLICT."""
         if not candles:
             return 0
         try:
             now = datetime.now(timezone.utc)
             rows = [
                 {
-                    "exchange": exchange,
-                    "symbol": symbol,
-                    "timeframe": timeframe,
+                    "exchange": exchange, "symbol": symbol, "timeframe": timeframe,
                     "timestamp": int(c["timestamp"]),
-                    "open_price": float(c["open"]),
-                    "high_price": float(c["high"]),
-                    "low_price": float(c["low"]),
-                    "close_price": float(c["close"]),
+                    "open_price": float(c["open"]), "high_price": float(c["high"]),
+                    "low_price": float(c["low"]),   "close_price": float(c["close"]),
                     "volume": float(c["volume"]),
-                    "source_type": source_type,
-                    "source_timeframe": source_timeframe,
+                    "source_type": source_type, "source_timeframe": source_timeframe,
                     "aggregation_method": aggregation_method,
                     "source_candles_count": source_candles_count,
                     "data_completeness": data_completeness,
@@ -184,8 +343,6 @@ class DatabaseManager:
                 for c in candles
             ]
             stmt = pg_insert(Candle).values(rows)
-            # Use partial index for historical (source_timeframe IS NULL),
-            # full business-key constraint for aggregated data.
             if source_timeframe is None:
                 stmt = stmt.on_conflict_do_update(
                     index_elements=["exchange", "symbol", "timeframe", "timestamp"],
@@ -193,9 +350,9 @@ class DatabaseManager:
                     set_={
                         "open_price": stmt.excluded.open_price,
                         "high_price": stmt.excluded.high_price,
-                        "low_price": stmt.excluded.low_price,
+                        "low_price":  stmt.excluded.low_price,
                         "close_price": stmt.excluded.close_price,
-                        "volume": stmt.excluded.volume,
+                        "volume":     stmt.excluded.volume,
                         "updated_at": stmt.excluded.updated_at,
                     },
                 )
@@ -205,60 +362,52 @@ class DatabaseManager:
                     set_={
                         "open_price": stmt.excluded.open_price,
                         "high_price": stmt.excluded.high_price,
-                        "low_price": stmt.excluded.low_price,
+                        "low_price":  stmt.excluded.low_price,
                         "close_price": stmt.excluded.close_price,
-                        "volume": stmt.excluded.volume,
+                        "volume":     stmt.excluded.volume,
                         "updated_at": stmt.excluded.updated_at,
                     },
                 )
-            with self.get_session() as session:
-                session.execute(stmt)
-                session.commit()
+            async with self.get_session() as session:
+                await session.execute(stmt)
+                await session.commit()
             return len(rows)
         except Exception as e:
             self.logger.error(f"Error storing candles batch: {e}")
             return 0
-    
-    # Realtime candle operations
-    async def store_realtime_candle(self, exchange: str, symbol: str, timeframe: str, 
-                                   candle_data: Dict, is_closed: bool = False) -> bool:
-        """Store or update real-time candle data"""
+
+    async def store_realtime_candle(self, exchange: str, symbol: str, timeframe: str,
+                                    candle_data: Dict, is_closed: bool = False) -> bool:
+        """Store or update real-time (unclosed) candle."""
         try:
-            with self.get_session() as session:
-                # Check if realtime candle exists
-                existing = session.query(RealtimeCandle).filter(
-                    RealtimeCandle.exchange == exchange,
-                    RealtimeCandle.symbol == symbol,
-                    RealtimeCandle.timeframe == timeframe,
-                    RealtimeCandle.timestamp == candle_data['timestamp']
-                ).first()
-                
-                current_time = datetime.now(timezone.utc)
-                
+            async with self.get_session() as session:
+                result = await session.execute(
+                    select(RealtimeCandle).where(
+                        RealtimeCandle.exchange == exchange,
+                        RealtimeCandle.symbol == symbol,
+                        RealtimeCandle.timeframe == timeframe,
+                        RealtimeCandle.timestamp == candle_data['timestamp'],
+                    )
+                )
+                existing = result.scalar_one_or_none()
+                now = datetime.now(timezone.utc)
+
                 if existing:
-                    # Update existing realtime candle with new OHLCV data
-                    # Keep the original open price, update high/low/close/volume
                     if float(candle_data['high']) > existing.high_price:
                         existing.high_price = float(candle_data['high'])
                     if float(candle_data['low']) < existing.low_price:
                         existing.low_price = float(candle_data['low'])
-                    
                     existing.close_price = float(candle_data['close'])
                     existing.volume = float(candle_data['volume'])
                     existing.is_closed = is_closed
-                    existing.updated_at = current_time
-                    existing.last_update = current_time
-                    
-                    # If candle is now closed, move to historical data
+                    existing.updated_at = now
+                    existing.last_update = now
                     if is_closed and not existing.is_closed:
                         await self._move_to_historical(session, existing)
                         existing.is_active = False
                 else:
-                    # Create new realtime candle
-                    realtime_candle = RealtimeCandle(
-                        exchange=exchange,
-                        symbol=symbol,
-                        timeframe=timeframe,
+                    rt = RealtimeCandle(
+                        exchange=exchange, symbol=symbol, timeframe=timeframe,
                         timestamp=candle_data['timestamp'],
                         open_price=float(candle_data['open']),
                         high_price=float(candle_data['high']),
@@ -267,491 +416,472 @@ class DatabaseManager:
                         volume=float(candle_data['volume']),
                         is_closed=is_closed,
                         is_active=not is_closed,
-                        last_update=current_time
+                        last_update=now,
                     )
-                    
-                    session.add(realtime_candle)
-                    
-                    # If it's already closed, also move to historical
+                    session.add(rt)
                     if is_closed:
-                        session.flush()  # Get the ID
-                        await self._move_to_historical(session, realtime_candle)
-                        realtime_candle.is_active = False
-                
-                session.commit()
+                        await session.flush()
+                        await self._move_to_historical(session, rt)
+                        rt.is_active = False
+
+                await session.commit()
                 return True
-                
+
         except Exception as e:
             self.logger.error(f"Error storing realtime candle: {e}")
             return False
-    
-    async def _move_to_historical(self, session: Session, realtime_candle: RealtimeCandle):
-        """Move closed realtime candle to historical candles table"""
+
+    async def _move_to_historical(self, session: AsyncSession, rt: RealtimeCandle):
+        """Copy closed realtime candle to historical candles table."""
         try:
-            # Check if historical candle already exists
-            existing_historical = session.query(Candle).filter(
-                Candle.exchange == realtime_candle.exchange,
-                Candle.symbol == realtime_candle.symbol,
-                Candle.timeframe == realtime_candle.timeframe,
-                Candle.timestamp == realtime_candle.timestamp
-            ).first()
-            
-            if existing_historical:
-                # Update existing historical candle
-                existing_historical.open_price = realtime_candle.open_price
-                existing_historical.high_price = realtime_candle.high_price
-                existing_historical.low_price = realtime_candle.low_price
-                existing_historical.close_price = realtime_candle.close_price
-                existing_historical.volume = realtime_candle.volume
-                existing_historical.updated_at = datetime.now(timezone.utc)
-            else:
-                # Create new historical candle
-                historical_candle = Candle(
-                    exchange=realtime_candle.exchange,
-                    symbol=realtime_candle.symbol,
-                    timeframe=realtime_candle.timeframe,
-                    timestamp=realtime_candle.timestamp,
-                    open_price=realtime_candle.open_price,
-                    high_price=realtime_candle.high_price,
-                    low_price=realtime_candle.low_price,
-                    close_price=realtime_candle.close_price,
-                    volume=realtime_candle.volume
+            result = await session.execute(
+                select(Candle).where(
+                    Candle.exchange == rt.exchange,
+                    Candle.symbol == rt.symbol,
+                    Candle.timeframe == rt.timeframe,
+                    Candle.timestamp == rt.timestamp,
                 )
-                session.add(historical_candle)
-            
-            self.logger.info(f"Moved closed candle to historical: {realtime_candle.exchange} {realtime_candle.symbol} {realtime_candle.timeframe} {realtime_candle.timestamp}")
-            
+            )
+            existing = result.scalar_one_or_none()
+            if existing:
+                existing.open_price  = rt.open_price
+                existing.high_price  = rt.high_price
+                existing.low_price   = rt.low_price
+                existing.close_price = rt.close_price
+                existing.volume      = rt.volume
+                existing.updated_at  = datetime.now(timezone.utc)
+            else:
+                session.add(Candle(
+                    exchange=rt.exchange, symbol=rt.symbol, timeframe=rt.timeframe,
+                    timestamp=rt.timestamp,
+                    open_price=rt.open_price, high_price=rt.high_price,
+                    low_price=rt.low_price, close_price=rt.close_price,
+                    volume=rt.volume,
+                ))
+            self.logger.info(f"Moved closed candle to historical: {rt.exchange} {rt.symbol} {rt.timeframe} {rt.timestamp}")
         except Exception as e:
             self.logger.error(f"Error moving realtime candle to historical: {e}")
             raise
-    
-    def get_active_realtime_candles(self, exchange: str, symbol: str, timeframe: str) -> List[Dict]:
-        """Get active (unclosed) realtime candles"""
+
+    async def get_active_realtime_candles(self, exchange: str, symbol: str,
+                                           timeframe: str) -> List[Dict]:
         try:
-            with self.get_session() as session:
-                candles = session.query(RealtimeCandle).filter(
-                    RealtimeCandle.exchange == exchange,
-                    RealtimeCandle.symbol == symbol,
-                    RealtimeCandle.timeframe == timeframe,
-                    RealtimeCandle.is_active == True,
-                    RealtimeCandle.is_closed == False
-                ).order_by(RealtimeCandle.timestamp.desc()).all()
-                
-                return [{
-                    'id': candle.id,
-                    'timestamp': candle.timestamp,
-                    'open_price': float(candle.open_price),
-                    'high_price': float(candle.high_price),
-                    'low_price': float(candle.low_price),
-                    'close_price': float(candle.close_price),
-                    'volume': float(candle.volume),
-                    'is_closed': candle.is_closed,
-                    'created_at': candle.created_at,
-                    'updated_at': candle.updated_at
-                } for candle in candles]
-                
+            async with self.get_session() as session:
+                result = await session.execute(
+                    select(RealtimeCandle).where(
+                        RealtimeCandle.exchange == exchange,
+                        RealtimeCandle.symbol == symbol,
+                        RealtimeCandle.timeframe == timeframe,
+                        RealtimeCandle.is_active == True,
+                        RealtimeCandle.is_closed == False,
+                    ).order_by(desc(RealtimeCandle.timestamp))
+                )
+                return [
+                    {
+                        'id': c.id, 'timestamp': c.timestamp,
+                        'open_price': float(c.open_price), 'high_price': float(c.high_price),
+                        'low_price': float(c.low_price),   'close_price': float(c.close_price),
+                        'volume': float(c.volume), 'is_closed': c.is_closed,
+                        'created_at': c.created_at, 'updated_at': c.updated_at,
+                    }
+                    for c in result.scalars().all()
+                ]
         except Exception as e:
             self.logger.error(f"Error getting active realtime candles: {e}")
             return []
-    
-    def cleanup_old_realtime_candles(self, hours_old: int = 24) -> int:
-        """Clean up old inactive realtime candles"""
+
+    async def cleanup_old_realtime_candles(self, hours_old: int = 24) -> int:
         try:
-            with self.get_session() as session:
-                cutoff_time = datetime.now(timezone.utc) - timedelta(hours=hours_old)
-                
-                deleted = session.query(RealtimeCandle).filter(
-                    or_(
-                        RealtimeCandle.is_active == False,
-                        RealtimeCandle.updated_at < cutoff_time
+            cutoff = datetime.now(timezone.utc) - timedelta(hours=hours_old)
+            async with self.get_session() as session:
+                result = await session.execute(
+                    select(RealtimeCandle).where(
+                        or_(RealtimeCandle.is_active == False,
+                            RealtimeCandle.updated_at < cutoff)
                     )
-                ).delete()
-                
-                session.commit()
-                self.logger.info(f"Cleaned up {deleted} old realtime candles")
-                return deleted
-                
+                )
+                rows = result.scalars().all()
+                for row in rows:
+                    await session.delete(row)
+                await session.commit()
+                self.logger.info(f"Cleaned up {len(rows)} old realtime candles")
+                return len(rows)
         except Exception as e:
             self.logger.error(f"Error cleaning up realtime candles: {e}")
             return 0
-    
-    def get_candles_range(self, exchange: str, symbol: str, timeframe: str,
-                         start_timestamp: int, end_timestamp: int,
-                         limit: Optional[int] = None) -> List[Dict]:
-        """Get candles in timestamp range using ORM"""
+
+    async def get_candles_range(self, exchange: str, symbol: str, timeframe: str,
+                                start_timestamp: int, end_timestamp: int,
+                                limit: Optional[int] = None) -> List[Dict]:
         try:
-            with self.get_session() as session:
-                query = session.query(Candle).filter(
+            async with self.get_session() as session:
+                q = select(Candle).where(
                     Candle.exchange == exchange,
                     Candle.symbol == symbol,
                     Candle.timeframe == timeframe,
                     Candle.timestamp >= start_timestamp,
-                    Candle.timestamp <= end_timestamp
+                    Candle.timestamp <= end_timestamp,
                 ).order_by(asc(Candle.timestamp))
-                
                 if limit:
-                    query = query.limit(limit)
-                
-                candles = query.all()
-                
-                # Convert to dict format
-                result = []
-                for candle in candles:
-                    result.append({
-                        'timestamp': candle.timestamp,
-                        'open': float(candle.open_price),
-                        'high': float(candle.high_price),
-                        'low': float(candle.low_price),
-                        'close': float(candle.close_price),
-                        'volume': float(candle.volume)
-                    })
-                
-                return result
-                
+                    q = q.limit(limit)
+                result = await session.execute(q)
+                return [
+                    {
+                        'timestamp': c.timestamp,
+                        'open': float(c.open_price), 'high': float(c.high_price),
+                        'low':  float(c.low_price),  'close': float(c.close_price),
+                        'volume': float(c.volume),
+                    }
+                    for c in result.scalars().all()
+                ]
         except Exception as e:
             self.logger.error(f"Error getting candles range: {e}")
             return []
-    
-    def get_latest_candle(self, exchange: str, symbol: str, timeframe: str,
-                         source_type: str = None, source_timeframe: str = None) -> Optional[Dict]:
-        """Get latest candle using ORM with optional source filtering"""
+
+    async def get_latest_candle(self, exchange: str, symbol: str, timeframe: str,
+                                source_type: str = None,
+                                source_timeframe: str = None) -> Optional[Dict]:
         try:
-            with self.get_session() as session:
-                query = session.query(Candle).filter(
-                    Candle.exchange == exchange,
-                    Candle.symbol == symbol,
-                    Candle.timeframe == timeframe
-                )
-                
-                # Add source filtering if specified
-                if source_type:
-                    query = query.filter(Candle.source_type == source_type)
-                if source_timeframe:
-                    query = query.filter(Candle.source_timeframe == source_timeframe)
-                
-                candle = query.order_by(desc(Candle.timestamp)).first()
-                
-                if candle:
-                    return {
-                        'timestamp': candle.timestamp,
-                        'open': float(candle.open_price),
-                        'high': float(candle.high_price),
-                        'low': float(candle.low_price),
-                        'close': float(candle.close_price),
-                        'volume': float(candle.volume),
-                        'source_type': candle.source_type,
-                        'source_timeframe': candle.source_timeframe,
-                        'aggregation_method': candle.aggregation_method,
-                        'source_candles_count': candle.source_candles_count,
-                        'data_completeness': float(candle.data_completeness) if candle.data_completeness else None
-                    }
-                
-                return None
-                
-        except Exception as e:
-            self.logger.error(f"Error getting latest candle: {e}")
-            return None
-    
-    def get_candles(self, exchange: str, symbol: str, timeframe: str,
-                   limit: int = 100, offset: int = 0) -> List[Dict]:
-        """Get candles with pagination using ORM"""
-        try:
-            with self.get_session() as session:
-                candles = session.query(Candle).filter(
-                    Candle.exchange == exchange,
-                    Candle.symbol == symbol,
-                    Candle.timeframe == timeframe
-                ).order_by(desc(Candle.timestamp)).limit(limit).offset(offset).all()
-                
-                result = []
-                for candle in candles:
-                    result.append({
-                        'timestamp': candle.timestamp,
-                        'open': float(candle.open_price),
-                        'high': float(candle.high_price),
-                        'low': float(candle.low_price),
-                        'close': float(candle.close_price),
-                        'volume': float(candle.volume)
-                    })
-                
-                return result
-                
-        except Exception as e:
-            self.logger.error(f"Error getting candles: {e}")
-            return []
-    
-    # Indicator operations
-    def store_indicator_value(self, indicator_name: str, exchange: str, symbol: str,
-                            timeframe: str, timestamp: int, value: float,
-                            meta_data: Optional[Dict] = None) -> bool:
-        """Store indicator value using ORM"""
-        try:
-            with self.get_session() as session:
-                # Find source candle
-                source_candle = session.query(Candle).filter(
+            async with self.get_session() as session:
+                q = select(Candle).where(
                     Candle.exchange == exchange,
                     Candle.symbol == symbol,
                     Candle.timeframe == timeframe,
-                    Candle.timestamp == timestamp
-                ).first()
-                
-                if not source_candle:
-                    self.logger.warning(f"Source candle not found for indicator {indicator_name}")
+                )
+                if source_type:
+                    q = q.where(Candle.source_type == source_type)
+                if source_timeframe:
+                    q = q.where(Candle.source_timeframe == source_timeframe)
+                q = q.order_by(desc(Candle.timestamp))
+                result = await session.execute(q)
+                c = result.scalars().first()
+                if not c:
+                    return None
+                return {
+                    'timestamp': c.timestamp,
+                    'open': float(c.open_price), 'high': float(c.high_price),
+                    'low':  float(c.low_price),  'close': float(c.close_price),
+                    'volume': float(c.volume),
+                    'source_type': c.source_type,
+                    'source_timeframe': c.source_timeframe,
+                    'aggregation_method': c.aggregation_method,
+                    'source_candles_count': c.source_candles_count,
+                    'data_completeness': float(c.data_completeness) if c.data_completeness else None,
+                }
+        except Exception as e:
+            self.logger.error(f"Error getting latest candle: {e}")
+            return None
+
+    async def get_candles(self, exchange: str, symbol: str, timeframe: str,
+                          limit: int = 100, offset: int = 0) -> List[Dict]:
+        try:
+            async with self.get_session() as session:
+                result = await session.execute(
+                    select(Candle).where(
+                        Candle.exchange == exchange,
+                        Candle.symbol == symbol,
+                        Candle.timeframe == timeframe,
+                    ).order_by(desc(Candle.timestamp)).limit(limit).offset(offset)
+                )
+                return [
+                    {
+                        'timestamp': c.timestamp,
+                        'open': float(c.open_price), 'high': float(c.high_price),
+                        'low':  float(c.low_price),  'close': float(c.close_price),
+                        'volume': float(c.volume),
+                    }
+                    for c in result.scalars().all()
+                ]
+        except Exception as e:
+            self.logger.error(f"Error getting candles: {e}")
+            return []
+
+    # ── Indicator operations ─────────────────────────────────────────────────
+
+    async def store_indicator_value(self, indicator_name: str, exchange: str, symbol: str,
+                                    timeframe: str, timestamp: int, value: float,
+                                    meta_data: Optional[Dict] = None) -> bool:
+        try:
+            async with self.get_session() as session:
+                # Find source candle (logical ref)
+                src_result = await session.execute(
+                    select(Candle.id).where(
+                        Candle.exchange == exchange, Candle.symbol == symbol,
+                        Candle.timeframe == timeframe, Candle.timestamp == timestamp,
+                    )
+                )
+                src_id = src_result.scalar_one_or_none()
+                if src_id is None:
+                    self.logger.warning(f"Source candle not found for {indicator_name}@{timestamp}")
                     return False
-                
-                # Check if indicator value exists
-                existing = session.query(Indicator).filter(
-                    Indicator.indicator_name == indicator_name,
-                    Indicator.exchange == exchange,
-                    Indicator.symbol == symbol,
-                    Indicator.timeframe == timeframe,
-                    Indicator.timestamp == timestamp
-                ).first()
-                
+
+                result = await session.execute(
+                    select(Indicator).where(
+                        Indicator.indicator_name == indicator_name,
+                        Indicator.exchange == exchange,
+                        Indicator.symbol == symbol,
+                        Indicator.timeframe == timeframe,
+                        Indicator.timestamp == timestamp,
+                    )
+                )
+                existing = result.scalar_one_or_none()
                 if existing:
-                    # Update
                     existing.value = value
                     existing.meta_data = meta_data
                     existing.updated_at = datetime.now(timezone.utc)
                 else:
-                    # Create new
-                    indicator = Indicator(
-                        indicator_name=indicator_name,
-                        exchange=exchange,
-                        symbol=symbol,
-                        timeframe=timeframe,
-                        timestamp=timestamp,
-                        value=value,
-                        meta_data=meta_data,
-                        source_candle_id=source_candle.id
-                    )
-                    session.add(indicator)
-                
-                session.commit()
+                    session.add(Indicator(
+                        indicator_name=indicator_name, exchange=exchange,
+                        symbol=symbol, timeframe=timeframe, timestamp=timestamp,
+                        value=value, meta_data=meta_data, source_candle_id=src_id,
+                    ))
+                await session.commit()
                 return True
-                
         except Exception as e:
             self.logger.error(f"Error storing indicator value: {e}")
             return False
-    
-    def get_indicator_values(self, indicator_name: str, exchange: str, symbol: str,
-                           timeframe: str, limit: int = 100,
-                           start_ts: int = None, end_ts: int = None) -> List[Dict]:
-        """Get indicator values using ORM"""
+
+    async def get_indicator_values(self, indicator_name: str, exchange: str, symbol: str,
+                                   timeframe: str, limit: int = 100,
+                                   start_ts: int = None, end_ts: int = None) -> List[Dict]:
         try:
-            with self.get_session() as session:
-                q = session.query(Indicator).filter(
+            async with self.get_session() as session:
+                q = select(Indicator).where(
                     Indicator.indicator_name == indicator_name,
                     Indicator.exchange == exchange,
                     Indicator.symbol == symbol,
-                    Indicator.timeframe == timeframe
+                    Indicator.timeframe == timeframe,
                 )
                 if start_ts is not None:
-                    q = q.filter(Indicator.timestamp >= start_ts)
+                    q = q.where(Indicator.timestamp >= start_ts)
                 if end_ts is not None:
-                    q = q.filter(Indicator.timestamp <= end_ts)
+                    q = q.where(Indicator.timestamp <= end_ts)
 
                 if start_ts is not None or end_ts is not None:
-                    indicators = q.order_by(asc(Indicator.timestamp)).all()
+                    q = q.order_by(asc(Indicator.timestamp))
                 else:
-                    indicators = q.order_by(desc(Indicator.timestamp)).limit(limit).all()
-                    indicators = list(reversed(indicators))
+                    q = q.order_by(desc(Indicator.timestamp)).limit(limit)
 
+                result = await session.execute(q)
+                indicators = result.scalars().all()
+                if start_ts is None and end_ts is None:
+                    indicators = list(reversed(indicators))
                 return [
                     {'timestamp': i.timestamp, 'value': float(i.value), 'meta_data': i.meta_data}
                     for i in indicators
                 ]
-
         except Exception as e:
             self.logger.error(f"Error getting indicator values: {e}")
             return []
-    
-    def get_strategy_signals(self, strategy_name: str, exchange: str, symbol: str,
-                           timeframe: str, limit: int = 100) -> List[Dict]:
-        """Get strategy signals using ORM"""
+
+    # ── Strategy signals ─────────────────────────────────────────────────────
+
+    async def get_strategy_signals(self, strategy_name: str, exchange: str, symbol: str,
+                                   timeframe: str, limit: int = 100) -> List[Dict]:
         try:
-            # Build connection_name - format is symbol_exchange_timeframe (e.g. sol_usdt_1m)
-            # But API gets exchange=whitebit, symbol=SOL_USDT, so we need to parse correctly
             if '_' in symbol:
-                # symbol is like "SOL_USDT", split it
                 base, quote = symbol.split('_', 1)
                 connection_name = f"{base.lower()}_{quote.lower()}_{timeframe}"
             else:
-                # fallback format
                 connection_name = f"{symbol.lower()}_{exchange.lower()}_{timeframe}"
-            
-            self.logger.debug(f"Looking for strategy signals with connection_name: {connection_name}")
-            
-            with self.get_session() as session:
-                strategies = session.query(StrategySignal).filter(
-                    StrategySignal.strategy_name == strategy_name,
-                    StrategySignal.connection_name == connection_name
-                ).order_by(desc(StrategySignal.timestamp)).limit(limit).all()
-                
-                result = []
-                for strategy in strategies:
-                    result.append({
-                        'timestamp': strategy.timestamp,
-                        'signal': strategy.signal_type,
-                        'confidence': float(strategy.confidence),
-                        'price': float(strategy.price),
-                        'meta_data': strategy.meta_data,
-                        'created_at': strategy.created_at.isoformat() if strategy.created_at else None
-                    })
-                
-                return result
-                
+
+            async with self.get_session() as session:
+                result = await session.execute(
+                    select(StrategySignal).where(
+                        StrategySignal.strategy_name == strategy_name,
+                        StrategySignal.connection_name == connection_name,
+                    ).order_by(desc(StrategySignal.timestamp)).limit(limit)
+                )
+                return [
+                    {
+                        'timestamp': s.timestamp,
+                        'signal': s.signal_type,
+                        'confidence': float(s.confidence),
+                        'price': float(s.price),
+                        'meta_data': s.meta_data,
+                        'created_at': s.created_at.isoformat() if s.created_at else None,
+                    }
+                    for s in result.scalars().all()
+                ]
         except Exception as e:
             self.logger.error(f"Error getting strategy signals: {e}")
             return []
 
-    def get_all_strategy_signals(self, limit: int = 1000):
-        """Get all BUY/SELL strategy signals for chart display (HOLDs excluded)."""
+    async def get_all_strategy_signals(self, limit: int = 1000):
+        """Return ORM objects (used by chart display)."""
         try:
-            with self.get_session() as session:
-                signals = session.query(StrategySignal).filter(
-                    StrategySignal.signal_type.in_(['buy', 'sell', 'BUY', 'SELL'])
-                ).order_by(
-                    desc(StrategySignal.timestamp)
-                ).limit(limit).all()
-
-                return signals
-
+            async with self.get_session() as session:
+                result = await session.execute(
+                    select(StrategySignal).where(
+                        StrategySignal.signal_type.in_(['buy', 'sell', 'BUY', 'SELL'])
+                    ).order_by(desc(StrategySignal.timestamp)).limit(limit)
+                )
+                return result.scalars().all()
         except Exception as e:
             self.logger.error(f"Error getting all strategy signals: {e}")
             return None
-    
-    # Statistics and monitoring
-    def get_database_stats(self) -> Dict[str, Any]:
-        """Get database statistics using TimescaleDB approximate counts (fast)."""
+
+    # ── Source / stats ───────────────────────────────────────────────────────
+
+    async def get_candles_by_source(self, exchange: str, symbol: str, timeframe: str,
+                                    source_type: str = None, source_timeframe: str = None,
+                                    limit: int = 300,
+                                    before_timestamp: int = None) -> List[Dict]:
         try:
-            from sqlalchemy import text
-            with self.get_session() as session:
-                # approximate_row_count uses TimescaleDB chunk stats — sub-millisecond
-                row = session.execute(text("""
-                    SELECT
-                        approximate_row_count('candles') AS candles_count,
-                        approximate_row_count('indicators') AS indicators_count,
-                        approximate_row_count('strategy_signals') AS strategies_count
-                """)).fetchone()
-
-                # Restrict DISTINCT to latest chunk to avoid full scan
-                latest_ts = session.execute(text("""
-                    SELECT MAX(range_start_integer) FROM timescaledb_information.chunks
-                    WHERE hypertable_name = 'candles'
-                """)).scalar() or 0
-                timeframes = [r[0] for r in session.execute(
-                    text("SELECT DISTINCT timeframe FROM candles WHERE timestamp >= :ts ORDER BY timeframe"),
-                    {'ts': latest_ts}
-                ).fetchall()]
-                exchanges = [r[0] for r in session.execute(
-                    text("SELECT DISTINCT exchange FROM candles WHERE timestamp >= :ts ORDER BY exchange"),
-                    {'ts': latest_ts}
-                ).fetchall()]
-
-                return {
-                    'candles_count': int(row.candles_count or 0),
-                    'indicators_count': int(row.indicators_count or 0),
-                    'strategies_count': int(row.strategies_count or 0),
-                    'timeframes': timeframes,
-                    'exchanges': exchanges,
-                    'engine_pool_size': self.engine.pool.size() if self.engine.pool else 0,
-                    'engine_pool_checked_in': self.engine.pool.checkedin() if self.engine.pool else 0,
-                    'engine_pool_checked_out': self.engine.pool.checkedout() if self.engine.pool else 0
-                }
-
-        except Exception as e:
-            self.logger.error(f"Error getting database stats: {e}")
-            return {}
-    
-    # Enhanced methods for source tracking
-    def get_candles_by_source(self, exchange: str, symbol: str, timeframe: str,
-                             source_type: str = None, source_timeframe: str = None,
-                             limit: int = 300, before_timestamp: int = None) -> List[Dict]:
-        """Get candles filtered by source type and timeframe"""
-        try:
-            with self.get_session() as session:
-                query = session.query(Candle).filter(
+            async with self.get_session() as session:
+                q = select(Candle).where(
                     Candle.exchange == exchange,
                     Candle.symbol == symbol,
-                    Candle.timeframe == timeframe
+                    Candle.timeframe == timeframe,
                 )
-
                 if source_type:
-                    query = query.filter(Candle.source_type == source_type)
+                    q = q.where(Candle.source_type == source_type)
                 if source_timeframe:
-                    query = query.filter(Candle.source_timeframe == source_timeframe)
+                    q = q.where(Candle.source_timeframe == source_timeframe)
                 if before_timestamp is not None:
-                    query = query.filter(Candle.timestamp < before_timestamp)
-
-                candles = query.order_by(desc(Candle.timestamp)).limit(limit).all()
-                
-                result = []
-                for candle in candles:
-                    result.append({
-                        'timestamp': candle.timestamp,
-                        'open': float(candle.open_price),
-                        'high': float(candle.high_price),
-                        'low': float(candle.low_price),
-                        'close': float(candle.close_price),
-                        'volume': float(candle.volume),
-                        'source_type': candle.source_type,
-                        'source_timeframe': candle.source_timeframe,
-                        'aggregation_method': candle.aggregation_method,
-                        'source_candles_count': candle.source_candles_count,
-                        'data_completeness': float(candle.data_completeness) if candle.data_completeness else None
-                    })
-                
-                return result
-                
+                    q = q.where(Candle.timestamp < before_timestamp)
+                q = q.order_by(desc(Candle.timestamp)).limit(limit)
+                result = await session.execute(q)
+                return [
+                    {
+                        'timestamp': c.timestamp,
+                        'open': float(c.open_price), 'high': float(c.high_price),
+                        'low':  float(c.low_price),  'close': float(c.close_price),
+                        'volume': float(c.volume),
+                        'source_type': c.source_type,
+                        'source_timeframe': c.source_timeframe,
+                        'aggregation_method': c.aggregation_method,
+                        'source_candles_count': c.source_candles_count,
+                        'data_completeness': float(c.data_completeness) if c.data_completeness else None,
+                    }
+                    for c in result.scalars().all()
+                ]
         except Exception as e:
             self.logger.error(f"Error getting candles by source: {e}")
             return []
-    
-    def get_available_sources(self, exchange: str, symbol: str, timeframe: str) -> List[Dict]:
-        """Get all available data sources for a timeframe"""
+
+    async def get_available_sources(self, exchange: str, symbol: str,
+                                    timeframe: str) -> List[Dict]:
         try:
-            with self.get_session() as session:
-                sources = session.query(
-                    Candle.source_type,
-                    Candle.source_timeframe,
-                    Candle.aggregation_method,
-                    func.count(Candle.id).label('candles_count'),
-                    func.max(Candle.timestamp).label('latest_timestamp'),
-                    func.avg(Candle.data_completeness).label('avg_completeness')
-                ).filter(
-                    Candle.exchange == exchange,
-                    Candle.symbol == symbol,
-                    Candle.timeframe == timeframe
-                ).group_by(
-                    Candle.source_type,
-                    Candle.source_timeframe,
-                    Candle.aggregation_method
-                ).all()
-                
-                result = []
-                for source in sources:
-                    result.append({
-                        'source_type': source.source_type,
-                        'source_timeframe': source.source_timeframe,
-                        'aggregation_method': source.aggregation_method,
-                        'candles_count': source.candles_count,
-                        'latest_timestamp': source.latest_timestamp,
-                        'avg_completeness': float(source.avg_completeness) if source.avg_completeness else None
-                    })
-                
-                return result
-                
+            async with self.get_session() as session:
+                result = await session.execute(
+                    select(
+                        Candle.source_type, Candle.source_timeframe,
+                        Candle.aggregation_method,
+                        func.count(Candle.id).label('candles_count'),
+                        func.max(Candle.timestamp).label('latest_timestamp'),
+                        func.avg(Candle.data_completeness).label('avg_completeness'),
+                    ).where(
+                        Candle.exchange == exchange,
+                        Candle.symbol == symbol,
+                        Candle.timeframe == timeframe,
+                    ).group_by(
+                        Candle.source_type, Candle.source_timeframe, Candle.aggregation_method
+                    )
+                )
+                return [
+                    {
+                        'source_type': r.source_type,
+                        'source_timeframe': r.source_timeframe,
+                        'aggregation_method': r.aggregation_method,
+                        'candles_count': r.candles_count,
+                        'latest_timestamp': r.latest_timestamp,
+                        'avg_completeness': float(r.avg_completeness) if r.avg_completeness else None,
+                    }
+                    for r in result.all()
+                ]
         except Exception as e:
             self.logger.error(f"Error getting available sources: {e}")
             return []
 
-    # Health check
-    def health_check(self) -> bool:
-        """Check database health"""
+    async def get_database_stats(self) -> Dict[str, Any]:
+        """Fast stats via TimescaleDB approximate_row_count."""
         try:
-            with self.get_session() as session:
-                session.execute(text('SELECT 1'))
+            async with self.get_session() as session:
+                row = (await session.execute(text("""
+                    SELECT
+                        approximate_row_count('candles')          AS candles_count,
+                        approximate_row_count('indicators')       AS indicators_count,
+                        approximate_row_count('strategy_signals') AS strategies_count,
+                        approximate_row_count('ml_features')      AS ml_features_count
+                """))).fetchone()
+
+                latest_ts = (await session.execute(text("""
+                    SELECT MAX(range_start_integer) FROM timescaledb_information.chunks
+                    WHERE hypertable_name = 'candles'
+                """))).scalar() or 0
+
+                timeframes = [r[0] for r in (await session.execute(
+                    text("SELECT DISTINCT timeframe FROM candles WHERE timestamp >= :ts ORDER BY timeframe"),
+                    {'ts': latest_ts}
+                )).fetchall()]
+                exchanges = [r[0] for r in (await session.execute(
+                    text("SELECT DISTINCT exchange FROM candles WHERE timestamp >= :ts ORDER BY exchange"),
+                    {'ts': latest_ts}
+                )).fetchall()]
+
+                return {
+                    'candles_count':      int(row.candles_count or 0),
+                    'indicators_count':   int(row.indicators_count or 0),
+                    'strategies_count':   int(row.strategies_count or 0),
+                    'ml_features_count':  int(row.ml_features_count or 0),
+                    'timeframes': timeframes,
+                    'exchanges':  exchanges,
+                    'engine_pool_size':         self.engine.pool.size() if self.engine.pool else 0,
+                    'engine_pool_checked_in':   self.engine.pool.checkedin() if self.engine.pool else 0,
+                    'engine_pool_checked_out':  self.engine.pool.checkedout() if self.engine.pool else 0,
+                }
+        except Exception as e:
+            self.logger.error(f"Error getting database stats: {e}")
+            return {}
+
+    def candle_source_table(self, timeframe: str) -> str:
+        """Return the SQL table or view name for the given timeframe.
+
+        Timeframes configured as continuous aggregate targets read from their
+        materialized view (candles_4h, candles_1d, …).  Everything else — including
+        raw 1m exchange data — reads from the candles table.
+        """
+        configured = {t for rule in self._aggregation_rules for t in rule.get('targets', [])}
+        return f"candles_{timeframe}" if timeframe in configured else 'candles'
+
+    async def get_candles_from_source(self, exchange: str, symbol: str, timeframe: str,
+                                       limit: int = 300,
+                                       before_timestamp: int = None) -> List[Dict]:
+        """Query OHLCV from the correct source: TimescaleDB view for aggregate TFs, candles table for raw."""
+        try:
+            src_table = self.candle_source_table(timeframe)
+            tf_filter = "AND timeframe = :tf" if src_table == 'candles' else ""
+            before_filter = "AND timestamp < :before" if before_timestamp is not None else ""
+            params: Dict[str, Any] = {'ex': exchange, 'sym': symbol, 'tf': timeframe, 'lim': limit}
+            if before_timestamp is not None:
+                params['before'] = before_timestamp
+            async with self.get_session() as session:
+                result = await session.execute(text(f"""
+                    SELECT timestamp, open_price, high_price, low_price, close_price, volume
+                    FROM {src_table}
+                    WHERE exchange = :ex AND symbol = :sym {tf_filter} {before_filter}
+                    ORDER BY timestamp DESC LIMIT :lim
+                """), params)
+                return [
+                    {
+                        'timestamp': r[0],
+                        'open':   float(r[1]),
+                        'high':   float(r[2]),
+                        'low':    float(r[3]),
+                        'close':  float(r[4]),
+                        'volume': float(r[5]),
+                    }
+                    for r in result.fetchall()
+                ]
+        except Exception as e:
+            self.logger.error(f"Error in get_candles_from_source: {e}")
+            return []
+
+    async def health_check(self) -> bool:
+        try:
+            async with self.get_session() as session:
+                await session.execute(text('SELECT 1'))
                 return True
         except Exception as e:
             self.logger.error(f"Database health check failed: {e}")

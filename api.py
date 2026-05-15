@@ -134,6 +134,8 @@ class TradingBotAPI:
         # Data export
         self.app.router.add_get('/api/export/features', self.get_ml_features)
         self.app.router.add_get('/api/export/signals', self.get_signals_with_context)
+        self.app.router.add_get('/api/export/features.arrow', self.export_features_arrow)
+        self.app.router.add_get('/api/export/features.parquet', self.export_features_parquet)
 
         # Progress endpoint
         self.app.router.add_get('/api/progress', self.get_progress)
@@ -154,7 +156,7 @@ class TradingBotAPI:
     
     async def health_check(self, request):
         """Health check endpoint"""
-        is_healthy = self.database_manager.health_check() if self.database_manager else False
+        is_healthy = (await self.database_manager.health_check()) if self.database_manager else False
         status_code = 200 if is_healthy else 503
         
         return web.json_response({
@@ -166,7 +168,7 @@ class TradingBotAPI:
     async def get_stats(self, request):
         """Get database statistics"""
         try:
-            stats = self.database_manager.get_database_stats()
+            stats = await self.database_manager.get_database_stats()
             return web.json_response({
                 'status': 'success',
                 'data': convert_decimals(stats)
@@ -192,7 +194,7 @@ class TradingBotAPI:
                 }, status=400)
             
             # Get candles using DatabaseManager
-            candles = self.database_manager.get_candles_by_source(
+            candles = await self.database_manager.get_candles_by_source(
                 exchange=exchange,
                 symbol=symbol,
                 timeframe=timeframe,
@@ -236,17 +238,17 @@ class TradingBotAPI:
                 from sqlalchemy import text
                 # Use per-group index scans (DISTINCT ON) + approx count instead of
                 # full COUNT(*) GROUP BY which triggers a slow multi-chunk seq scan.
-                with self.database_manager.get_session() as session:
-                    groups = session.execute(text("""
+                async with self.database_manager.get_session() as session:
+                    groups = (await session.execute(text("""
                         SELECT DISTINCT exchange, symbol, timeframe, source_type
                         FROM candles
                         ORDER BY exchange, symbol, timeframe, source_type
-                    """)).fetchall()
+                    """))).fetchall()
 
                     sources = []
                     for g in groups:
                         ex, sym, tf, st = g.exchange, g.symbol, g.timeframe, g.source_type
-                        stats = session.execute(text("""
+                        stats = (await session.execute(text("""
                             SELECT
                                 (SELECT timestamp FROM candles
                                  WHERE exchange=:ex AND symbol=:sym AND timeframe=:tf AND source_type=:st
@@ -255,7 +257,7 @@ class TradingBotAPI:
                                  WHERE exchange=:ex AND symbol=:sym AND timeframe=:tf AND source_type=:st
                                  ORDER BY timestamp DESC LIMIT 1) AS last_ts,
                                 approximate_row_count('candles') AS approx_total
-                        """), dict(ex=ex, sym=sym, tf=tf, st=st)).fetchone()
+                        """), dict(ex=ex, sym=sym, tf=tf, st=st))).fetchone()
 
                         first_date = datetime.fromtimestamp(int(stats.first_ts), tz=timezone.utc).isoformat() if stats.first_ts else 'N/A'
                         last_date  = datetime.fromtimestamp(int(stats.last_ts),  tz=timezone.utc).isoformat() if stats.last_ts  else 'N/A'
@@ -278,7 +280,7 @@ class TradingBotAPI:
                 }, status=400)
             
             # Get available sources using DatabaseManager
-            sources = self.database_manager.get_available_sources(exchange, symbol, timeframe)
+            sources = await self.database_manager.get_available_sources(exchange, symbol, timeframe)
             
             return web.json_response({
                 'status': 'success',
@@ -310,7 +312,7 @@ class TradingBotAPI:
                 }, status=400)
             
             # Get latest candle using DatabaseManager
-            candle = self.database_manager.get_latest_candle(
+            candle = await self.database_manager.get_latest_candle(
                 exchange=exchange,
                 symbol=symbol,
                 timeframe=timeframe,
@@ -350,28 +352,13 @@ class TradingBotAPI:
                     'error': 'Missing required parameters: exchange, symbol, timeframe'
                 }, status=400)
 
-            # Get candles using DatabaseManager with source filtering
-            raw_candles = self.database_manager.get_candles_by_source(
+            candles = await self.database_manager.get_candles_from_source(
                 exchange=exchange,
                 symbol=symbol,
                 timeframe=timeframe,
-                source_type=source_type,
-                source_timeframe=source_timeframe,
                 limit=limit,
-                before_timestamp=before_timestamp
+                before_timestamp=before_timestamp,
             )
-
-            # Clean candles data - keep only OHLCV fields for chart compatibility
-            candles = []
-            for candle in raw_candles:
-                candles.append({
-                    'timestamp': candle['timestamp'],
-                    'open': candle['open'],
-                    'high': candle['high'],
-                    'low': candle['low'],
-                    'close': candle['close'],
-                    'volume': candle['volume']
-                })
 
             has_more = len(candles) == limit
 
@@ -383,8 +370,6 @@ class TradingBotAPI:
                 'exchange': exchange,
                 'symbol': symbol,
                 'timeframe': timeframe,
-                'source_type': source_type,
-                'source_timeframe': source_timeframe
             })
             
         except ValueError as e:
@@ -404,39 +389,54 @@ class TradingBotAPI:
                     'error': 'Missing required parameters: exchange, symbol'
                 }, status=400)
             
-            # Get ALL timeframes with source information
+            # Get timeframes — deduplicated, skipping old 'aggregated' entries that
+            # are now served by TimescaleDB continuous aggregate views.
             from sqlalchemy import text
-            
+
             query = text("""
-                SELECT DISTINCT 
+                SELECT
                     timeframe,
                     source_type,
-                    source_timeframe,
                     COUNT(*) as candles_count
-                FROM candles 
+                FROM candles
                 WHERE exchange = :exchange AND symbol = :symbol
-                GROUP BY timeframe, source_type, source_timeframe
-                ORDER BY timeframe, source_type, source_timeframe
+                  AND source_type = 'exchange'
+                GROUP BY timeframe, source_type
+                ORDER BY timeframe
             """)
-            
-            with self.database_manager.get_session() as session:
-                result = session.execute(query, {'exchange': exchange, 'symbol': symbol})
+
+            async with self.database_manager.get_session() as session:
+                result = (await session.execute(query, {'exchange': exchange, 'symbol': symbol}))
                 rows = result.fetchall()
-            
-            # Create timeframes as array of objects with timeframe and source info
+
+            # Build deduplicated timeframe list.
+            # For configured aggregate TFs (served by TimescaleDB views), add them even
+            # if there are no 'exchange' rows for that timeframe in candles.
+            seen = set()
             timeframes = []
             for row in rows:
-                source_label = row.source_type
-                if row.source_type == 'aggregated' and row.source_timeframe:
-                    source_label = f"agg from {row.source_timeframe}"
-                
+                tf = row.timeframe
+                if tf in seen:
+                    continue
+                seen.add(tf)
+                src_table = self.database_manager.candle_source_table(tf)
+                source = 'timescaledb' if src_table != 'candles' else 'exchange'
                 timeframes.append({
-                    'timeframe': row.timeframe,
-                    'source': row.source_type,
-                    'source_timeframe': row.source_timeframe,
-                    'source_label': source_label,
-                    'candles_count': row.candles_count
+                    'timeframe': tf,
+                    'source': source,
+                    'candles_count': row.candles_count,
                 })
+
+            # Add configured aggregate timeframes not yet in list
+            for rule in self.database_manager._aggregation_rules:
+                for tf in rule.get('targets', []):
+                    if tf not in seen:
+                        seen.add(tf)
+                        timeframes.append({
+                            'timeframe': tf,
+                            'source': 'timescaledb',
+                            'candles_count': None,
+                        })
             
             return web.json_response({
                 'timeframes': timeframes,  # Array of objects with timeframe and source info
@@ -467,7 +467,7 @@ class TradingBotAPI:
                 }, status=400)
 
             # Get indicators using DatabaseManager
-            indicators = self.database_manager.get_indicator_values(
+            indicators = await self.database_manager.get_indicator_values(
                 indicator_name=indicator_name,
                 exchange=exchange,
                 symbol=symbol,
@@ -510,7 +510,7 @@ class TradingBotAPI:
                 }, status=400)
             
             # Get strategies using DatabaseManager
-            strategies = self.database_manager.get_strategy_signals(
+            strategies = await self.database_manager.get_strategy_signals(
                 strategy_name=strategy_name,
                 exchange=exchange,
                 symbol=symbol,
@@ -557,8 +557,8 @@ class TradingBotAPI:
                 ORDER BY indicator_name, exchange, symbol, timeframe
             """)
 
-            with self.database_manager.get_session() as session:
-                rows = session.execute(query).fetchall()
+            async with self.database_manager.get_session() as session:
+                rows = (await session.execute(query)).fetchall()
 
             indicators = []
             for row in rows:
@@ -621,9 +621,9 @@ class TradingBotAPI:
                 ORDER BY strategy_name, timestamp DESC
             """)
 
-            with self.database_manager.get_session() as session:
-                counts = {r.strategy_name: r for r in session.execute(query).fetchall()}
-                latests = {r.strategy_name: r for r in session.execute(latest_query).fetchall()}
+            async with self.database_manager.get_session() as session:
+                counts = {r.strategy_name: r for r in (await session.execute(query)).fetchall()}
+                latests = {r.strategy_name: r for r in (await session.execute(latest_query)).fetchall()}
 
             for name, row in counts.items():
                 if name not in strategies_data:
@@ -681,14 +681,14 @@ class TradingBotAPI:
 
             from sqlalchemy import text
 
-            with self.database_manager.get_session() as session:
+            async with self.database_manager.get_session() as session:
                 # All indicator names for this exchange+symbol
-                indicator_rows = session.execute(text("""
+                indicator_rows = (await session.execute(text("""
                     SELECT DISTINCT indicator_name
                     FROM indicators
                     WHERE exchange = :ex AND symbol = :sym
                     ORDER BY indicator_name
-                """), {'ex': exchange, 'sym': symbol}).fetchall()
+                """), {'ex': exchange, 'sym': symbol})).fetchall()
 
                 indicator_names = [r.indicator_name for r in indicator_rows]
                 if not indicator_names:
@@ -707,10 +707,12 @@ class TradingBotAPI:
                 ])
                 ind_params = {f'ind_{i}': name for i, name in enumerate(indicator_names)}
 
-                where_clauses = [
-                    "c.exchange = :ex", "c.symbol = :sym",
-                    "c.timeframe = :tf", "c.source_type = 'aggregated'"
-                ]
+                src_table = self.database_manager.candle_source_table(timeframe)
+                tf_filter = f"AND c.timeframe = :tf" if src_table == 'candles' else ""
+
+                where_clauses = ["c.exchange = :ex", "c.symbol = :sym"]
+                if tf_filter:
+                    where_clauses.append("c.timeframe = :tf")
                 if start_ts:
                     where_clauses.append("c.timestamp >= :start_ts")
                     ind_params['start_ts'] = start_ts
@@ -726,13 +728,13 @@ class TradingBotAPI:
                         c.open_price AS open, c.high_price AS high,
                         c.low_price AS low, c.close_price AS close, c.volume,
                         {indicator_selects}
-                    FROM candles c
+                    FROM {src_table} c
                     {indicator_joins}
                     WHERE {" AND ".join(where_clauses)}
                     ORDER BY c.timestamp ASC
                 """)
 
-                rows = session.execute(query, ind_params).fetchall()
+                rows = (await session.execute(query, ind_params)).fetchall()
 
             columns = ['timestamp', 'open', 'high', 'low', 'close', 'volume'] + indicator_names
 
@@ -805,7 +807,7 @@ class TradingBotAPI:
 
             from sqlalchemy import text
 
-            with self.database_manager.get_session() as session:
+            async with self.database_manager.get_session() as session:
                 where, params = [], {}
                 if connection:
                     where.append("s.connection_name = :conn"); params['conn'] = connection
@@ -820,13 +822,13 @@ class TradingBotAPI:
 
                 where_sql = ("WHERE " + " AND ".join(where)) if where else ""
 
-                signals = session.execute(text(f"""
+                signals = (await session.execute(text(f"""
                     SELECT id, strategy_name, connection_name,
                            signal_type, timestamp, price, confidence
                     FROM strategy_signals s
                     {where_sql}
                     ORDER BY timestamp ASC
-                """), params).fetchall()
+                """), params)).fetchall()
 
                 if not signals:
                     return web.json_response({'signals': [], 'count': 0})
@@ -841,19 +843,19 @@ class TradingBotAPI:
                 indicator_names = []
                 ind_map: dict = {}
                 if ex_q and sym_q:
-                    indicator_names = [r.indicator_name for r in session.execute(text("""
+                    indicator_names = [r.indicator_name for r in (await session.execute(text("""
                         SELECT DISTINCT indicator_name FROM indicators
                         WHERE exchange = :ex AND symbol = :sym ORDER BY indicator_name
-                    """), {'ex': ex_q, 'sym': sym_q}).fetchall()]
+                    """), {'ex': ex_q, 'sym': sym_q})).fetchall()]
 
                     if indicator_names:
                         signal_timestamps = list({int(s.timestamp) for s in signals})
-                        for row in session.execute(text("""
+                        for row in (await session.execute(text("""
                             SELECT indicator_name, timestamp, value
                             FROM indicators
                             WHERE exchange = :ex AND symbol = :sym
                               AND timestamp = ANY(:ts)
-                        """), {'ex': ex_q, 'sym': sym_q, 'ts': signal_timestamps}).fetchall():
+                        """), {'ex': ex_q, 'sym': sym_q, 'ts': signal_timestamps})).fetchall():
                             ind_map.setdefault(int(row.timestamp), {})[row.indicator_name] = (
                                 float(row.value) if row.value is not None else None
                             )
@@ -900,13 +902,169 @@ class TradingBotAPI:
             self.logger.error(f"Error getting signals with context: {e}", exc_info=True)
             return web.json_response({'error': str(e)}, status=500)
 
+    async def export_features_arrow(self, request):
+        """
+        Export ml_features as Apache Arrow IPC stream.
+
+        Query params: exchange, symbol, timeframe (default 4h), start, end (ISO dates)
+
+        Response: application/vnd.apache.arrow.stream
+        Usage in Python:
+            import pyarrow.ipc as ipc, requests, io
+            r = requests.get(url)
+            df = ipc.open_stream(io.BytesIO(r.content)).read_all().to_pandas()
+        """
+        try:
+            import pyarrow as pa
+            import pyarrow.ipc as ipc
+        except ImportError:
+            return web.json_response({'error': 'pyarrow not installed'}, status=500)
+
+        try:
+            exchange, symbol, timeframe, start_ts, end_ts, err = self._parse_export_params(request)
+            if err:
+                return web.json_response({'error': err}, status=400)
+
+            rows = await self._query_ml_features(exchange, symbol, timeframe, start_ts, end_ts)
+            if rows is None:
+                return web.json_response(
+                    {'error': 'No ml_features data. Run indicators first.'}, status=404
+                )
+
+            table = self._ml_features_to_arrow(rows)
+            buf = pa.BufferOutputStream()
+            with ipc.new_stream(buf, table.schema) as writer:
+                writer.write_table(table)
+
+            return web.Response(
+                body=buf.getvalue().to_pybytes(),
+                content_type='application/vnd.apache.arrow.stream',
+                headers={'Content-Disposition': f'attachment; filename="{symbol}_{timeframe}.arrow"'},
+            )
+        except Exception as e:
+            self.logger.error(f"Arrow export error: {e}", exc_info=True)
+            return web.json_response({'error': str(e)}, status=500)
+
+    async def export_features_parquet(self, request):
+        """
+        Export ml_features as Parquet file (compressed, universally compatible).
+
+        Query params: exchange, symbol, timeframe (default 4h), start, end (ISO dates)
+        """
+        try:
+            import pyarrow.parquet as pq
+            import pyarrow as pa
+            import io
+        except ImportError:
+            return web.json_response({'error': 'pyarrow not installed'}, status=500)
+
+        try:
+            exchange, symbol, timeframe, start_ts, end_ts, err = self._parse_export_params(request)
+            if err:
+                return web.json_response({'error': err}, status=400)
+
+            rows = await self._query_ml_features(exchange, symbol, timeframe, start_ts, end_ts)
+            if rows is None:
+                return web.json_response(
+                    {'error': 'No ml_features data. Run indicators first.'}, status=404
+                )
+
+            table = self._ml_features_to_arrow(rows)
+            buf = io.BytesIO()
+            pq.write_table(table, buf, compression='snappy')
+
+            return web.Response(
+                body=buf.getvalue(),
+                content_type='application/octet-stream',
+                headers={'Content-Disposition': f'attachment; filename="{symbol}_{timeframe}.parquet"'},
+            )
+        except Exception as e:
+            self.logger.error(f"Parquet export error: {e}", exc_info=True)
+            return web.json_response({'error': str(e)}, status=500)
+
+    # ── Export helpers ──────────────────────────────────────────────────────
+
+    def _parse_export_params(self, request):
+        """Parse common query params for export endpoints. Returns (exchange, symbol, tf, start, end, err)."""
+        exchange  = request.query.get('exchange', '').strip().lower()
+        symbol    = request.query.get('symbol', '').strip().upper()
+        timeframe = request.query.get('timeframe', '4h').strip().lower()
+        if not exchange or not symbol:
+            return None, None, None, None, None, 'exchange and symbol are required'
+        start_ts = end_ts = None
+        try:
+            if request.query.get('start'):
+                start_ts = int(datetime.fromisoformat(request.query['start']).replace(tzinfo=timezone.utc).timestamp())
+            if request.query.get('end'):
+                end_ts = int(datetime.fromisoformat(request.query['end']).replace(tzinfo=timezone.utc).timestamp())
+        except ValueError as e:
+            return None, None, None, None, None, f'Invalid date: {e}'
+        return exchange, symbol, timeframe, start_ts, end_ts, None
+
+    async def _query_ml_features(self, exchange, symbol, timeframe, start_ts, end_ts):
+        """Query ml_features table and return raw rows (or None if empty)."""
+        from sqlalchemy import text as _text
+        where = ["exchange = :ex", "symbol = :sym", "timeframe = :tf"]
+        params = {'ex': exchange, 'sym': symbol, 'tf': timeframe}
+        if start_ts:
+            where.append("timestamp >= :start_ts"); params['start_ts'] = start_ts
+        if end_ts:
+            where.append("timestamp <= :end_ts"); params['end_ts'] = end_ts
+
+        async with self.database_manager.get_session() as session:
+            rows = (await session.execute(_text(
+                f"SELECT * FROM ml_features WHERE {' AND '.join(where)} ORDER BY timestamp ASC"
+            ), params)).fetchall()
+
+        return rows if rows else None
+
+    def _ml_features_to_arrow(self, rows):
+        """Convert ml_features query rows to a pyarrow Table with OHLCV + flat indicator columns."""
+        import pyarrow as pa
+        import json as _json
+
+        timestamps, opens, highs, lows, closes, volumes = [], [], [], [], [], []
+        features_list, labels, pnls = [], [], []
+
+        for r in rows:
+            timestamps.append(int(r.timestamp))
+            opens.append(float(r.open_price) if r.open_price is not None else None)
+            highs.append(float(r.high_price) if r.high_price is not None else None)
+            lows.append(float(r.low_price) if r.low_price is not None else None)
+            closes.append(float(r.close_price) if r.close_price is not None else None)
+            volumes.append(float(r.volume) if r.volume is not None else None)
+            features_list.append(r.features if isinstance(r.features, dict) else _json.loads(r.features or '{}'))
+            labels.append(int(r.trade_label) if r.trade_label is not None else None)
+            pnls.append(float(r.trade_pnl_pct) if r.trade_pnl_pct is not None else None)
+
+        # Collect all indicator keys across all rows
+        all_keys = sorted({k for f in features_list for k in f})
+
+        arrays = {
+            'timestamp':    pa.array(timestamps, type=pa.int64()),
+            'open_price':   pa.array(opens,      type=pa.float64()),
+            'high_price':   pa.array(highs,      type=pa.float64()),
+            'low_price':    pa.array(lows,        type=pa.float64()),
+            'close_price':  pa.array(closes,     type=pa.float64()),
+            'volume':       pa.array(volumes,    type=pa.float64()),
+            'trade_label':  pa.array(labels,     type=pa.int16()),
+            'trade_pnl_pct': pa.array(pnls,      type=pa.float64()),
+        }
+        for key in all_keys:
+            arrays[key] = pa.array(
+                [f.get(key) for f in features_list],
+                type=pa.float64(),
+            )
+
+        return pa.table(arrays)
+
     async def get_strategies_signals(self, request):
         """Get all strategy signals for chart display"""
         try:
             limit = int(request.query.get('limit', 1000))
             
             # Get all strategy signals from database
-            signals = self.database_manager.get_all_strategy_signals(limit=limit)
+            signals = await self.database_manager.get_all_strategy_signals(limit=limit)
             
             if signals is None:
                 return web.json_response({'error': 'Failed to fetch signals'}, status=500)
@@ -969,7 +1127,7 @@ class TradingBotAPI:
             connections_config = self.config_manager.get_config('connections')
             conn_cfg = connections_config.get('connections', {}).get(connection_name, {})
 
-            with self.database_manager.get_session() as session:
+            async with self.database_manager.get_session() as session:
                 signals = session.query(StrategySignal).filter(
                     and_(
                         StrategySignal.strategy_name == strategy_name,
@@ -1184,7 +1342,7 @@ class TradingBotAPI:
             updated = 0
             skipped = 0
 
-            with self.database_manager.get_session() as session:
+            async with self.database_manager.get_session() as session:
                 signals = session.query(StrategySignal).filter(
                     StrategySignal.price == 0
                 ).all()
@@ -1237,7 +1395,7 @@ class TradingBotAPI:
         """Dashboard page"""
         try:
             # Get basic stats for dashboard
-            stats = self.database_manager.get_database_stats()
+            stats = await self.database_manager.get_database_stats()
             
             return {
                 'title': 'Trading Bot Dashboard',
@@ -1313,9 +1471,9 @@ class TradingBotAPI:
             aggregation_config = self.config_manager.get_config('aggregation').get('aggregation', {})
             source_mapping = aggregation_config.get('source_mapping', {})
 
-            with self.database_manager.get_session() as session:
+            async with self.database_manager.get_session() as session:
                 # ── Candles ────────────────────────────────────────────────────
-                candle_rows = session.execute(text("""
+                candle_rows = (await session.execute(text("""
                     SELECT exchange, symbol, timeframe, source_type,
                            COUNT(*) AS cnt,
                            MIN(timestamp) AS first_ts,
@@ -1323,31 +1481,31 @@ class TradingBotAPI:
                     FROM candles
                     GROUP BY exchange, symbol, timeframe, source_type
                     ORDER BY exchange, symbol, timeframe, source_type
-                """)).fetchall()
+                """))).fetchall()
 
                 candle_map = {}   # (exchange, symbol, timeframe, source_type) → row
                 for r in candle_rows:
                     candle_map[(r.exchange, r.symbol, r.timeframe, r.source_type)] = r
 
                 # ── Indicators ─────────────────────────────────────────────────
-                ind_rows = session.execute(text("""
+                ind_rows = (await session.execute(text("""
                     SELECT indicator_name, exchange, symbol, timeframe,
                            COUNT(*) AS cnt,
                            MIN(timestamp) AS first_ts,
                            MAX(timestamp) AS last_ts
                     FROM indicators
                     GROUP BY indicator_name, exchange, symbol, timeframe
-                """)).fetchall()
+                """))).fetchall()
                 ind_map = {r.indicator_name: r for r in ind_rows}
 
                 # ── Strategies ─────────────────────────────────────────────────
-                strat_rows = session.execute(text("""
+                strat_rows = (await session.execute(text("""
                     SELECT strategy_name, COUNT(*) AS cnt,
                            MIN(timestamp) AS first_ts,
                            MAX(timestamp) AS last_ts
                     FROM strategy_signals
                     GROUP BY strategy_name
-                """)).fetchall()
+                """))).fetchall()
                 strat_map = {r.strategy_name: r for r in strat_rows}
 
                 # Base indicator timestamps (denominator for strategy progress)
@@ -1355,9 +1513,9 @@ class TradingBotAPI:
                 for name, cfg in strategies_config.items():
                     base_ind = cfg.get('base_indicator') or (cfg.get('required_indicators') or [None])[0]
                     if base_ind and base_ind not in base_ind_counts:
-                        row = session.execute(text(
+                        row = (await session.execute(text(
                             "SELECT COUNT(*) AS cnt FROM indicators WHERE indicator_name = :n"
-                        ), {'n': base_ind}).fetchone()
+                        ), {'n': base_ind})).fetchone()
                         base_ind_counts[base_ind] = row.cnt if row else 0
 
             # ── Build pairs info ───────────────────────────────────────────────

@@ -17,7 +17,7 @@ import asyncio
 import logging
 from datetime import datetime, timezone
 from typing import Dict, Any, Optional, List, Set
-from sqlalchemy import and_, asc, desc
+from sqlalchemy import and_, asc, desc, select
 from core.universal_config_manager import UniversalConfigManager
 from rabbitmq.rabbitmq_client import RabbitMQClient, MessagePublisher
 from models.base import Indicator, StrategySignal
@@ -163,8 +163,8 @@ class StrategiesGapService:
                 return
 
             try:
-                with self.database_manager.get_session() as session:
-                    gaps = self._find_strategy_gaps_efficiently(
+                async with self.database_manager.get_session() as session:
+                    gaps = await self._find_strategy_gaps_efficiently(
                         session, strategy_name, connection_name, required_indicators, base_indicator
                     )
                     
@@ -208,8 +208,8 @@ class StrategiesGapService:
         except Exception as e:
             self.logger.error(f"Error sending gap calculation requests for {strategy_name}: {e}")
     
-    def _find_strategy_gaps_efficiently(self, session, strategy_name: str, connection_name: str,
-                                       required_indicators: List[str], base_indicator: str) -> List[Dict]:
+    async def _find_strategy_gaps_efficiently(self, session, strategy_name: str, connection_name: str,
+                                             required_indicators: List[str], base_indicator: str) -> List[Dict]:
         """Find all unevaluated base_indicator timestamps for the strategy.
 
         Uses HOLD/BUY/SELL signals as the 'evaluated' marker.  Any base_indicator
@@ -217,12 +217,15 @@ class StrategiesGapService:
         Splits large gaps into week-sized batches to avoid overwhelming the queue.
         """
         # Get all base indicator timestamps (full history)
-        base_rows = session.query(Indicator.timestamp).filter(
-            and_(
-                Indicator.connection_name == connection_name,
-                Indicator.indicator_name == base_indicator
-            )
-        ).order_by(asc(Indicator.timestamp)).all()
+        _r = await session.execute(
+            select(Indicator.timestamp).where(
+                and_(
+                    Indicator.connection_name == connection_name,
+                    Indicator.indicator_name == base_indicator
+                )
+            ).order_by(asc(Indicator.timestamp))
+        )
+        base_rows = _r.all()
 
         if not base_rows:
             self.logger.debug(f"No base indicator data for {strategy_name}")
@@ -239,12 +242,15 @@ class StrategiesGapService:
         period_seconds = {'1d': 86400, '1w': 604800}
         valid_from_ts = 0
         for ind_name in other_indicators:
-            first = session.query(Indicator.timestamp).filter(
-                and_(
-                    Indicator.connection_name == connection_name,
-                    Indicator.indicator_name == ind_name
-                )
-            ).order_by(asc(Indicator.timestamp)).limit(1).first()
+            _r = await session.execute(
+                select(Indicator.timestamp).where(
+                    and_(
+                        Indicator.connection_name == connection_name,
+                        Indicator.indicator_name == ind_name
+                    )
+                ).order_by(asc(Indicator.timestamp)).limit(1)
+            )
+            first = _r.first()
             if not first:
                 self.logger.debug(f"No data for required indicator {ind_name}, skipping {strategy_name}")
                 return []
@@ -268,13 +274,15 @@ class StrategiesGapService:
         )
 
         # Get all existing signal timestamps (BUY, SELL, or HOLD = already evaluated)
-        signal_rows = session.query(StrategySignal.timestamp).filter(
-            and_(
-                StrategySignal.strategy_name == strategy_name,
-                StrategySignal.connection_name == connection_name
+        _r = await session.execute(
+            select(StrategySignal.timestamp).where(
+                and_(
+                    StrategySignal.strategy_name == strategy_name,
+                    StrategySignal.connection_name == connection_name
+                )
             )
-        ).all()
-        existing_ts = {r[0] for r in signal_rows}
+        )
+        existing_ts = {r[0] for r in _r.all()}
 
         missing_ts = [ts for ts in valid_base_ts if ts not in existing_ts]
         if not missing_ts:

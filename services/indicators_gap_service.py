@@ -15,7 +15,7 @@ from datetime import datetime, timezone
 
 from core.universal_config_manager import UniversalConfigManager
 from rabbitmq.rabbitmq_client import RabbitMQClient, MessagePublisher
-from sqlalchemy import and_, func, distinct
+from sqlalchemy import and_, func, distinct, select, text
 from models.base import Candle
 
 
@@ -201,17 +201,18 @@ class IndicatorsGapService:
 
             from models.base import Indicator
 
-            with self.database_manager.get_session() as session:
+            async with self.database_manager.get_session() as session:
                 # Two fast aggregate queries — no full table scans into Python memory
-                candle_agg = session.query(
-                    func.min(Candle.timestamp),
-                    func.max(Candle.timestamp),
-                    func.count(Candle.id),
-                ).filter(
-                    Candle.exchange == exchange,
-                    Candle.symbol == symbol,
-                    Candle.timeframe == source_timeframe,
-                ).first()
+                src_table = self.database_manager.candle_source_table(source_timeframe)
+                tf_filter = f"AND timeframe = '{source_timeframe}'" if src_table == 'candles' else ""
+                _r = await session.execute(
+                    text(f"""
+                        SELECT MIN(timestamp), MAX(timestamp), COUNT(*)
+                        FROM {src_table}
+                        WHERE exchange = :ex AND symbol = :sym {tf_filter}
+                    """), {'ex': exchange, 'sym': symbol}
+                )
+                candle_agg = _r.first()
 
                 if not candle_agg or not candle_agg[2]:
                     self.logger.debug(f"No candles for {indicator_name}")
@@ -219,15 +220,18 @@ class IndicatorsGapService:
 
                 candle_min, candle_max, candle_count = candle_agg
 
-                ind_agg = session.query(
-                    func.max(Indicator.timestamp),
-                    func.count(Indicator.timestamp),
-                ).filter(
-                    Indicator.indicator_name == indicator_name,
-                    Indicator.exchange == exchange,
-                    Indicator.symbol == symbol,
-                    Indicator.timeframe == source_timeframe,
-                ).first()
+                _r = await session.execute(
+                    select(
+                        func.max(Indicator.timestamp),
+                        func.count(Indicator.timestamp),
+                    ).where(
+                        Indicator.indicator_name == indicator_name,
+                        Indicator.exchange == exchange,
+                        Indicator.symbol == symbol,
+                        Indicator.timeframe == source_timeframe,
+                    )
+                )
+                ind_agg = _r.first()
 
                 ind_max   = ind_agg[0] if ind_agg else None
                 ind_count = ind_agg[1] if ind_agg else 0

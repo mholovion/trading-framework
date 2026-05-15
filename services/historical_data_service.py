@@ -316,36 +316,28 @@ class HistoricalDataService:
             self.logger.error(f"Error in large request processing: {e}")
             raise
     
-    def _batch_already_complete_sync(self, exchange: str, symbol: str, timeframe: str,
-                                     start_timestamp: int, end_timestamp: int) -> bool:
-        """Synchronous check — run via executor to avoid blocking event loop."""
+    async def _batch_already_complete(self, exchange: str, symbol: str, timeframe: str,
+                                      start_timestamp: int, end_timestamp: int) -> bool:
+        """Return True if the DB already has all candles for this batch window."""
         try:
-            from sqlalchemy import func, and_
+            from sqlalchemy import func, select as _select
             from models.base import Candle
-            with self.database_manager.get_session() as session:
-                actual = session.query(func.count(Candle.id)).filter(
-                    and_(
+            async with self.database_manager.get_session() as session:
+                result = await session.execute(
+                    _select(func.count(Candle.id)).where(
                         Candle.exchange == exchange,
                         Candle.symbol == symbol,
                         Candle.timeframe == timeframe,
                         Candle.timestamp >= start_timestamp,
                         Candle.timestamp <= end_timestamp,
                     )
-                ).scalar() or 0
+                )
+                actual = result.scalar() or 0
             tf_seconds = end_timestamp - start_timestamp
             expected = max(1, tf_seconds // 60) if timeframe == '1m' else 1
             return actual >= expected * 0.95
         except Exception:
             return False
-
-    async def _batch_already_complete(self, exchange: str, symbol: str, timeframe: str,
-                                      start_timestamp: int, end_timestamp: int) -> bool:
-        """Return True if the DB already has all candles for this batch window."""
-        loop = asyncio.get_event_loop()
-        return await loop.run_in_executor(
-            None, self._batch_already_complete_sync,
-            exchange, symbol, timeframe, start_timestamp, end_timestamp
-        )
 
     async def _process_single_batch(self, plugin, connection_name, config,
                                   exchange, symbol, timeframe,
@@ -372,10 +364,7 @@ class HistoricalDataService:
             
             stored_count = 0
             if candles:
-                # Store candles in thread pool to avoid blocking event loop
-                loop = asyncio.get_event_loop()
-                stored_count = await loop.run_in_executor(
-                    None, self.database_manager.store_candles_batch,
+                stored_count = await self.database_manager.store_candles_batch(
                     exchange, symbol, timeframe, candles, int(time.time())
                 )
                 

@@ -18,7 +18,7 @@ from core.universal_config_manager import UniversalConfigManager
 from core.timeframe_utils import TimeframeUtils
 from rabbitmq.rabbitmq_client import RabbitMQClient, MessagePublisher
 from models.base import Candle
-from sqlalchemy import and_, func, text
+from sqlalchemy import and_, func, text, select as _sa_select
 
 
 class GapBatcher:
@@ -122,7 +122,7 @@ class GapRecoveryService:
             'gaps_processed': 0,
             'batches_sent': 0,
             'historical_requests_sent': 0,
-            'aggregation_requests_sent': 0,
+            'aggregation_requests_sent': 0,  # deprecated — timescaledb handles aggregation
             'last_gap_check': None,
             'start_time': datetime.now(timezone.utc)
         }
@@ -353,32 +353,27 @@ class GapRecoveryService:
 
     async def _find_actual_gaps(self, exchange: str, symbol: str, timeframe: str,
                                expected_start: int, server_time: int) -> List[Dict]:
-        """Find ALL gaps using SQL LAG-based detection (runs in thread pool)."""
-        import asyncio as _asyncio
-        loop = _asyncio.get_event_loop()
-        return await loop.run_in_executor(
-            None, self._find_actual_gaps_sync,
-            exchange, symbol, timeframe, expected_start, server_time
-        )
+        """Find ALL gaps using SQL LAG-based detection."""
+        return await self._find_actual_gaps_sync(exchange, symbol, timeframe, expected_start, server_time)
 
-    def _find_actual_gaps_sync(self, exchange: str, symbol: str, timeframe: str,
-                               expected_start: int, server_time: int) -> List[Dict]:
+    async def _find_actual_gaps_sync(self, exchange: str, symbol: str, timeframe: str,
+                                    expected_start: int, server_time: int) -> List[Dict]:
         try:
             gaps = []
             timeframe_seconds = TimeframeUtils.get_timeframe_seconds(timeframe)
             safe_end_time = self._get_safe_trailing_end(server_time, timeframe)
 
-            with self.database_manager.get_session() as session:
-                # Fast existence check
-                first_ts = session.query(func.min(Candle.timestamp)).filter(
-                    and_(
-                        Candle.exchange == exchange,
-                        Candle.symbol == symbol,
-                        Candle.timeframe == timeframe,
-                        Candle.timestamp >= expected_start,
-                        Candle.timestamp <= safe_end_time,
-                    )
-                ).scalar()
+            candle_filter = and_(
+                Candle.exchange == exchange, Candle.symbol == symbol,
+                Candle.timeframe == timeframe,
+                Candle.timestamp >= expected_start,
+                Candle.timestamp <= safe_end_time,
+            )
+
+            async with self.database_manager.get_session() as session:
+                first_ts = (await session.execute(
+                    _sa_select(func.min(Candle.timestamp)).where(candle_filter)
+                )).scalar()
 
                 if first_ts is None:
                     missing = (safe_end_time - expected_start) // timeframe_seconds
@@ -395,15 +390,9 @@ class GapRecoveryService:
                         )
                     return gaps
 
-                last_ts = session.query(func.max(Candle.timestamp)).filter(
-                    and_(
-                        Candle.exchange == exchange,
-                        Candle.symbol == symbol,
-                        Candle.timeframe == timeframe,
-                        Candle.timestamp >= expected_start,
-                        Candle.timestamp <= safe_end_time,
-                    )
-                ).scalar()
+                last_ts = (await session.execute(
+                    _sa_select(func.max(Candle.timestamp)).where(candle_filter)
+                )).scalar()
 
                 self.logger.info(
                     f"Data range: "
@@ -426,9 +415,8 @@ class GapRecoveryService:
                             f"{datetime.fromtimestamp(first_ts - timeframe_seconds, tz=timezone.utc)}"
                         )
 
-                # Middle gaps via SQL LAG — only rows where the jump > 1 period
-                # We look for gaps > 2× timeframe (i.e., at least one missing candle).
-                middle_gaps = session.execute(
+                # Middle gaps via SQL LAG
+                middle_gaps = (await session.execute(
                     text("""
                         SELECT gap_start, gap_end,
                                (gap_end - gap_start) / :tf_sec AS missing_count
@@ -446,14 +434,11 @@ class GapRecoveryService:
                         ORDER BY gap_start
                     """),
                     {
-                        'exchange': exchange,
-                        'symbol': symbol,
-                        'timeframe': timeframe,
-                        'start_ts': expected_start,
-                        'end_ts': safe_end_time,
+                        'exchange': exchange, 'symbol': symbol, 'timeframe': timeframe,
+                        'start_ts': expected_start, 'end_ts': safe_end_time,
                         'tf_sec': timeframe_seconds,
                     },
-                ).fetchall()
+                )).fetchall()
 
                 for row in middle_gaps:
                     missing = int(row.missing_count)
@@ -804,51 +789,9 @@ class GapRecoveryService:
                                    f"{batch['total_candles']} candles (batch: {batch['batch_id']})")
                 
                 else:
-                    # Aggregation request for higher timeframes
-                    # Round timestamps to complete target timeframe periods
-                    from core.timeframe_utils import TimeframeUtils
-                    
-                    # Round start to beginning of target period
-                    period_start = TimeframeUtils.get_period_start(batch['start_timestamp'], timeframe)
-                    
-                    # Use local time to limit end period to current time
-                    import time as _time
-                    server_time = int(_time.time())
-
-                    # Use safe end time (like in gap detection) to avoid future periods
-                    safe_end_time = self._get_safe_trailing_end(server_time, timeframe)
-                    limited_end = min(batch['end_timestamp'], safe_end_time)
-                    
-                    # For completed periods, period_end should not exceed safe_end_time
-                    period_end = limited_end
-                    
-                    # Only send request if we have complete periods
-                    if period_start < period_end:
-                        request_data = {
-                            'connection_name': connection_name,
-                            'exchange': exchange,
-                            'symbol': symbol,
-                            'target_timeframe': timeframe,
-                            'start_timestamp': period_start,
-                            'end_timestamp': period_end,
-                            'batch_id': batch['batch_id']
-                        }
-                        
-                        message = self.message_publisher._create_message(
-                            'aggregation_request',
-                            request_data
-                        )
-                        
-                        await self.queue_client.publish_message('aggregation_requests', message)
-                        
-                        self.stats['aggregation_requests_sent'] += 1
-                        start_dt = datetime.fromtimestamp(period_start, tz=timezone.utc)
-                        end_dt = datetime.fromtimestamp(period_end, tz=timezone.utc)
-                        self.logger.info(f"Aggregation request sent for {exchange}/{symbol}/{timeframe}: "
-                                       f"from {start_dt} to {end_dt} (batch: {batch['batch_id']}) - complete periods only")
-                    else:
-                        self.logger.debug(f"Skipping aggregation request for {exchange}/{symbol}/{timeframe}: "
-                                        f"no complete periods in range {datetime.fromtimestamp(batch['start_timestamp'], tz=timezone.utc)} to {datetime.fromtimestamp(batch['end_timestamp'], tz=timezone.utc)}")
+                    # Higher timeframes are handled by TimescaleDB continuous aggregates — skip
+                    self.logger.debug(f"Skipping gap fill for {exchange}/{symbol}/{timeframe}: "
+                                      f"handled by TimescaleDB continuous aggregates")
                 
             except Exception as e:
                 self.logger.error(f"Error sending gap fill request: {e}")

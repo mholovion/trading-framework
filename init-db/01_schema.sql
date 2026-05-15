@@ -217,3 +217,40 @@ CREATE TABLE IF NOT EXISTS server_time_sync (
 
 CREATE INDEX IF NOT EXISTS idx_time_sync_exchange
     ON server_time_sync (exchange, created_at DESC);
+
+-- ---------------------------------------------------------------------------
+-- ML_FEATURES
+-- Pre-computed wide-format feature table for ML training.
+-- One row per (exchange, symbol, timeframe, timestamp).
+-- OHLCV stored as float8 (faster for bulk ML ops than NUMERIC).
+-- `features` JSONB stores all indicator values — merge-on-upsert keeps
+-- updates for different indicators independent (no ALTER TABLE per indicator).
+-- `trade_label` and `trade_pnl_pct` are filled post-factum after trade closes.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS ml_features (
+    timestamp       BIGINT          NOT NULL,
+    exchange        VARCHAR(50)     NOT NULL,
+    symbol          VARCHAR(20)     NOT NULL,
+    timeframe       VARCHAR(10)     NOT NULL,
+    open_price      FLOAT8,
+    high_price      FLOAT8,
+    low_price       FLOAT8,
+    close_price     FLOAT8,
+    volume          FLOAT8,
+    features        JSONB           NOT NULL DEFAULT '{}',
+    trade_pnl_pct   FLOAT8,
+    trade_label     SMALLINT,
+    created_at      TIMESTAMPTZ     NOT NULL DEFAULT NOW(),
+    updated_at      TIMESTAMPTZ     NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (exchange, symbol, timeframe, timestamp)
+);
+
+SELECT create_hypertable(
+    'ml_features',
+    'timestamp',
+    chunk_time_interval => 604800,
+    if_not_exists       => TRUE
+);
+
+CREATE INDEX IF NOT EXISTS idx_ml_features_lookup
+    ON ml_features (exchange, symbol, timeframe, timestamp DESC);

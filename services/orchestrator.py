@@ -27,7 +27,6 @@ from services.database_update_service import DatabaseUpdateService
 from services.indicators_reactive_service import IndicatorsReactiveService
 from services.strategies_reactive_service import StrategiesReactiveService
 from services.gap_recovery_service import GapRecoveryService
-from services.aggregation_service import AggregationService
 from services.indicators_gap_service import IndicatorsGapService
 from services.strategies_gap_service import StrategiesGapService
 
@@ -126,7 +125,12 @@ class MicroservicesOrchestratorV2:
             }
         }
         
-        self.database_manager = DatabaseManager(db_config)
+        agg_rules = (
+            self.config_manager.get_config('aggregation')
+            .get('aggregation', {})
+            .get('timeframe_rules', [])
+        )
+        self.database_manager = DatabaseManager(db_config, aggregation_rules=agg_rules)
         self.logger.info("Database manager initialized successfully")
     
     async def _initialize_queue(self):
@@ -231,14 +235,7 @@ class MicroservicesOrchestratorV2:
         for connection_name, plugin in self.exchange_plugins.items():
             gap_recovery_service.register_exchange_plugin(connection_name, plugin)
         self.services['gap_recovery'] = gap_recovery_service
-        
-        # Aggregation Service
-        self.services['aggregation'] = AggregationService(
-            self.config_manager,
-            self.database_manager,
-            self.queue_client
-        )
-        
+
         # Indicators Gap Service
         self.services['indicators_gap'] = IndicatorsGapService(
             self.config_manager,
@@ -282,10 +279,7 @@ class MicroservicesOrchestratorV2:
         
         # Start Gap Recovery Service (monitors and fills data gaps)
         await self._start_service('gap_recovery')
-        
-        # Start Aggregation Service (processes aggregation requests on-demand)
-        await self._start_service('aggregation')
-        
+
         # Start data collection services
         main_config = self.config_manager.get_config('main')
         execution_mode = main_config.get('execution', {}).get('mode', 'full')
@@ -431,9 +425,6 @@ class MicroservicesOrchestratorV2:
             indicators_cfg  = self.config_manager.get_config('indicators').get('indicators', {})
             strategies_cfg  = self.config_manager.get_config('strategies').get('strategies', {})
             connections_cfg = self.config_manager.get_config('connections').get('connections', {})
-            aggregation_cfg = self.config_manager.get_config('aggregation').get('aggregation', {})
-            source_mapping  = aggregation_cfg.get('source_mapping', {})
-
             tf_sec = {'1m': 60, '5m': 300, '1h': 3600, '4h': 14400,
                       '1d': 86400, '1w': 604800}
 
@@ -444,46 +435,27 @@ class MicroservicesOrchestratorV2:
             def _fmt(n: int) -> str:
                 return f'{n:,}'
 
-            with self.database_manager.get_session() as session:
+            async with self.database_manager.get_session() as session:
                 # ── Candle counts per (exchange, symbol, timeframe, source) ──
-                candle_rows = session.execute(text("""
+                candle_rows = (await session.execute(text("""
                     SELECT exchange, symbol, timeframe, source_type, COUNT(*) AS cnt
                     FROM candles GROUP BY exchange, symbol, timeframe, source_type
-                """)).fetchall()
+                """))).fetchall()
                 cmap = {(r.exchange, r.symbol, r.timeframe, r.source_type): r.cnt for r in candle_rows}
 
                 # ── Indicator counts ──
-                ind_rows = session.execute(text(
+                ind_rows = (await session.execute(text(
                     "SELECT indicator_name, COUNT(*) AS cnt FROM indicators GROUP BY indicator_name"
-                )).fetchall()
+                ))).fetchall()
                 imap = {r.indicator_name: r.cnt for r in ind_rows}
 
                 # ── Strategy signal counts ──
-                strat_rows = session.execute(text(
+                strat_rows = (await session.execute(text(
                     "SELECT strategy_name, COUNT(*) AS cnt FROM strategy_signals GROUP BY strategy_name"
-                )).fetchall()
+                ))).fetchall()
                 smap = {r.strategy_name: r.cnt for r in strat_rows}
 
             lines = ['─── Pipeline Progress ───────────────────────────────────']
-
-            # Aggregation
-            seen = set()
-            for map_key, src_tf in source_mapping.items():
-                parts = map_key.split(':')
-                if len(parts) != 3:
-                    continue
-                ex, sym, tgt_tf = parts
-                if (ex, sym, tgt_tf) in seen:
-                    continue
-                seen.add((ex, sym, tgt_tf))
-                actual = cmap.get((ex, sym, tgt_tf, 'aggregated'), 0)
-                src = cmap.get((ex, sym, src_tf, 'aggregated'), 0) or cmap.get((ex, sym, src_tf, 'realtime'), 0)
-                ratio = tf_sec.get(tgt_tf, 1) // tf_sec.get(src_tf, 1) if tf_sec.get(src_tf) else 1
-                expected = (src // ratio) if ratio > 0 else 0
-                pct = min(actual / expected * 100, 100) if expected > 0 else (100.0 if actual > 0 else 0.0)
-                lines.append(f'  AGG  {sym:12s} {src_tf}→{tgt_tf:3s}  {_bar(pct)}  {pct:5.1f}%  {_fmt(actual)}/{_fmt(expected)}')
-
-            lines.append('')
 
             # Indicators
             for ind_name, cfg in indicators_cfg.items():

@@ -798,11 +798,14 @@
                     <div class="signals-list-title">Signals History</div>
                     <div class="signals-list-meta" id="signalsListMeta">Loading...</div>
                 </div>
-                <div class="signals-filter-btns">
-                    <button class="filter-btn active" data-filter="all" onclick="setSignalFilter('all', this)">All</button>
-                    <button class="filter-btn buy" data-filter="buy" onclick="setSignalFilter('buy', this)">BUY</button>
-                    <button class="filter-btn sell" data-filter="sell" onclick="setSignalFilter('sell', this)">SELL</button>
-                    <button class="filter-btn" style="background:#1e3a2f;color:#26a69a;border-color:#26a69a;" onclick="backfillPrices(this)">Backfill Prices</button>
+                <div style="display:flex;flex-direction:column;gap:4px;align-items:flex-end">
+                    <div class="signals-filter-btns">
+                        <button class="filter-btn active" data-filter="all" onclick="setSignalFilter('all', this)">All</button>
+                        <button class="filter-btn buy" data-filter="buy" onclick="setSignalFilter('buy', this)">BUY</button>
+                        <button class="filter-btn sell" data-filter="sell" onclick="setSignalFilter('sell', this)">SELL</button>
+                        <button class="filter-btn" style="background:#1e3a2f;color:#26a69a;border-color:#26a69a;" onclick="backfillPrices(this)">Backfill Prices</button>
+                    </div>
+                    <div class="signals-filter-btns" id="tfFilterBtns"></div>
                 </div>
             </div>
             <div class="signals-table-wrap">
@@ -949,6 +952,7 @@
         }
 
         let activeSignalFilter = 'all';
+        let activeTfFilters = new Set();  // empty = all TFs shown
         let activeRowIndex = null;
 
         async function loadSignalsHistory() {
@@ -964,6 +968,7 @@
 
                 showDebug(`Loaded ${signalsData.length} signals`);
 
+                buildTfFilterButtons();
                 renderSignalsList();
 
                 // Add signals to chart after chart is ready
@@ -988,6 +993,7 @@
                 if (t !== 'buy' && t !== 'sell') return false;
                 if (currentSymbol && s.symbol !== currentSymbol) return false;
                 if (selectedStrategy && s.strategy_name !== selectedStrategy) return false;
+                if (activeTfFilters.size > 0 && !activeTfFilters.has(s.timeframe)) return false;
                 return true;
             });
 
@@ -1033,9 +1039,32 @@
 
         function setSignalFilter(filter, btn) {
             activeSignalFilter = filter;
-            document.querySelectorAll('.filter-btn').forEach(b => b.classList.remove('active'));
+            document.querySelectorAll('.filter-btn[data-filter]').forEach(b => b.classList.remove('active'));
             btn.classList.add('active');
             renderSignalsList();
+            addSignalMarkers();
+        }
+
+        function toggleTfFilter(tf, btn) {
+            if (activeTfFilters.has(tf)) {
+                activeTfFilters.delete(tf);
+                btn.classList.remove('active');
+            } else {
+                activeTfFilters.add(tf);
+                btn.classList.add('active');
+            }
+            renderSignalsList();
+            addSignalMarkers();
+        }
+
+        function buildTfFilterButtons() {
+            const container = document.getElementById('tfFilterBtns');
+            if (!container) return;
+            const tfs = [...new Set(signalsData.map(s => s.timeframe).filter(Boolean))].sort();
+            container.innerHTML = tfs.map(tf =>
+                `<button class="filter-btn active" data-tf="${tf}" onclick="toggleTfFilter('${tf}', this)">${tf.toUpperCase()}</button>`
+            ).join('');
+            activeTfFilters.clear();  // all active by default
         }
 
         async function backfillPrices(btn) {
@@ -1252,6 +1281,11 @@
                 if (selectedStrategy) {
                     filteredSignals = filteredSignals.filter(item => item.strategy_name === selectedStrategy);
                 }
+
+                // Sub-filter by active timeframe toggles
+                if (activeTfFilters.size > 0) {
+                    filteredSignals = filteredSignals.filter(item => activeTfFilters.has(item.timeframe));
+                }
                 
                 // Filter signals to chart time range only
                 if (chartData && chartData.data && chartData.data.length > 0) {
@@ -1270,20 +1304,18 @@
                     ? chartData.data.map(c => c.time).sort((a, b) => a - b)
                     : [];
 
-                // Find the nearest chart candle timestamp for a given signal timestamp
+                // Find the chart candle whose open is <= sigTs (floor match).
+                // This correctly places cross-TF signals on the containing candle
+                // regardless of whether the signal TF is larger or smaller than the chart TF.
                 function snapToCandle(sigTs) {
-                    if (!sortedCandleTimes.length) return sigTs;
-                    let lo = 0, hi = sortedCandleTimes.length - 1;
-                    while (lo < hi) {
+                    if (!sortedCandleTimes.length) return null;
+                    let lo = 0, hi = sortedCandleTimes.length - 1, result = null;
+                    while (lo <= hi) {
                         const mid = (lo + hi) >> 1;
-                        if (sortedCandleTimes[mid] < sigTs) lo = mid + 1;
-                        else hi = mid;
+                        if (sortedCandleTimes[mid] <= sigTs) { result = sortedCandleTimes[mid]; lo = mid + 1; }
+                        else hi = mid - 1;
                     }
-                    // lo is first candle >= sigTs; compare with lo-1 to find nearest
-                    if (lo > 0 && Math.abs(sortedCandleTimes[lo - 1] - sigTs) <= Math.abs(sortedCandleTimes[lo] - sigTs)) {
-                        lo = lo - 1;
-                    }
-                    return sortedCandleTimes[lo];
+                    return result;  // null if signal precedes all loaded candles
                 }
 
                 // Group signals by nearest chart candle (handles 4h signals on 1d chart)
@@ -1293,6 +1325,7 @@
                     const type = item.signal_type ? item.signal_type.toLowerCase() : '';
                     if (!ts || (type !== 'buy' && type !== 'sell')) return;
                     const candleTs = snapToCandle(ts);
+                    if (candleTs === null) return;  // signal before loaded candle range
                     const key = `${candleTs}_${type}`;
                     if (!signalsByCandle.has(key)) {
                         signalsByCandle.set(key, { item, candleTs, count: 1, allSignals: [item] });

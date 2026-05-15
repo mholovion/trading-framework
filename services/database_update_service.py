@@ -18,6 +18,7 @@ from typing import Dict, Any, Optional, List
 from datetime import datetime, timezone
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
+from sqlalchemy import select as _sa_select
 
 from core.universal_config_manager import UniversalConfigManager
 from core.database import DatabaseManager
@@ -105,14 +106,15 @@ class DatabaseUpdateService:
             data = message.data
             
             # Create candle record using DatabaseManager (proper pool configuration)
-            with self.database_manager.get_session() as session:
+            async with self.database_manager.get_session() as session:
                 # Check if candle already exists
-                existing_candle = session.query(Candle).filter_by(
-                    exchange=data['exchange'],
-                    symbol=data['symbol'],
-                    timeframe=data['timeframe'],
-                    timestamp=data['timestamp']
-                ).first()
+                _r = await session.execute(
+                    _sa_select(Candle).filter_by(
+                        exchange=data['exchange'], symbol=data['symbol'],
+                        timeframe=data['timeframe'], timestamp=data['timestamp'],
+                    )
+                )
+                existing_candle = _r.scalar_one_or_none()
                 
                 if existing_candle:
                     # Update existing candle (for active candles)
@@ -139,11 +141,11 @@ class DatabaseUpdateService:
                     )
                     
                     session.add(candle)
-                    session.flush()  # Get the ID
+                    await session.flush()  # Get the ID
                     
                     self.logger.info(f"Created candle: {data['exchange']} {data['symbol']} {data['timeframe']} @ {data['timestamp']}")
                 
-                session.commit()
+                await session.commit()
             
             self.stats['candles_processed'] += 1
             
@@ -173,18 +175,19 @@ class DatabaseUpdateService:
             self.logger.info(f"Processing bulk candles: {len(candles_list)} candles from {message.source_service} ({exchange}/{symbol}/{timeframe}) source: {source}")
             
             # Use bulk operations for better performance
-            with self.database_manager.get_session() as session:
+            async with self.database_manager.get_session() as session:
                 candles_to_insert = []
                 candles_to_update = []
                 
                 for candle_data in candles_list:
                     # Check if candle already exists
-                    existing_candle = session.query(Candle).filter_by(
-                        exchange=candle_data['exchange'],
-                        symbol=candle_data['symbol'],
-                        timeframe=candle_data['timeframe'],
-                        timestamp=candle_data['timestamp']
-                    ).first()
+                    _r = await session.execute(
+                        _sa_select(Candle).filter_by(
+                            exchange=candle_data['exchange'], symbol=candle_data['symbol'],
+                            timeframe=candle_data['timeframe'], timestamp=candle_data['timestamp'],
+                        )
+                    )
+                    existing_candle = _r.scalar_one_or_none()
                     
                     if existing_candle:
                         # Update existing candle
@@ -215,7 +218,7 @@ class DatabaseUpdateService:
                     session.add_all(candles_to_insert)
                     
                 # Commit all changes
-                session.commit()
+                await session.commit()
                 
                 inserted_count = len(candles_to_insert)
                 updated_count = len(candles_to_update)
@@ -249,18 +252,21 @@ class DatabaseUpdateService:
             data = message.data
             
             # Create or update indicator record using ORM
-            with self.database_manager.get_session() as session:
+            async with self.database_manager.get_session() as session:
                 # Extract exchange, symbol, timeframe from source_candle data first
                 source_candle_info = data.get('source_candle', {})
                 
                 # Check if indicator value already exists (use all unique fields like aggregation does)
-                existing_indicator = session.query(Indicator).filter_by(
-                    indicator_name=data['indicator_name'],
-                    exchange=source_candle_info.get('exchange', ''),
-                    symbol=source_candle_info.get('symbol', ''),
-                    timeframe=source_candle_info.get('timeframe', ''),
-                    timestamp=data['timestamp']
-                ).first()
+                _r = await session.execute(
+                    _sa_select(Indicator).filter_by(
+                        indicator_name=data['indicator_name'],
+                        exchange=source_candle_info.get('exchange', ''),
+                        symbol=source_candle_info.get('symbol', ''),
+                        timeframe=source_candle_info.get('timeframe', ''),
+                        timestamp=data['timestamp'],
+                    )
+                )
+                existing_indicator = _r.scalar_one_or_none()
                 
                 if existing_indicator:
                     # Update existing indicator
@@ -274,12 +280,15 @@ class DatabaseUpdateService:
                     # Try to find source candle for dependency tracking
                     source_candle = None
                     if 'source_candle' in data:
-                        source_candle = session.query(Candle).filter_by(
-                            exchange=data['source_candle']['exchange'],
-                            symbol=data['source_candle']['symbol'],
-                            timeframe=data['source_candle']['timeframe'],
-                            timestamp=data['source_candle']['timestamp']
-                        ).first()
+                        _r = await session.execute(
+                            _sa_select(Candle).filter_by(
+                                exchange=data['source_candle']['exchange'],
+                                symbol=data['source_candle']['symbol'],
+                                timeframe=data['source_candle']['timeframe'],
+                                timestamp=data['source_candle']['timestamp'],
+                            )
+                        )
+                        source_candle = _r.scalar_one_or_none()
                     
                     
                     indicator = Indicator(
@@ -297,7 +306,7 @@ class DatabaseUpdateService:
                     session.add(indicator)
                     self.logger.debug(f"Created indicator: {data['indicator_name']} @ {data['timestamp']}")
                 
-                session.commit()
+                await session.commit()
             
             self.stats['indicators_processed'] += 1
             
@@ -336,22 +345,21 @@ class DatabaseUpdateService:
                 )
                 by_key[key] = ind
 
-            with self.database_manager.get_session() as session:
+            async with self.database_manager.get_session() as session:
                 # Collect unique (indicator_name, timestamp) pairs for a single IN lookup
                 ind_names = list({k[0] for k in by_key})
                 timestamps = list({k[4] for k in by_key})
 
-                existing_rows = session.query(
-                    Indicator.indicator_name,
-                    Indicator.exchange,
-                    Indicator.symbol,
-                    Indicator.timeframe,
-                    Indicator.timestamp,
-                    Indicator.id,
-                ).filter(
-                    Indicator.indicator_name.in_(ind_names),
-                    Indicator.timestamp.in_(timestamps),
-                ).all()
+                existing_rows = (await session.execute(
+                    _sa_select(
+                        Indicator.indicator_name,
+                        Indicator.exchange, Indicator.symbol,
+                        Indicator.timeframe, Indicator.timestamp, Indicator.id,
+                    ).where(
+                        Indicator.indicator_name.in_(ind_names),
+                        Indicator.timestamp.in_(timestamps),
+                    )
+                )).all()
 
                 existing_set = {
                     (r.indicator_name, r.exchange, r.symbol, r.timeframe, r.timestamp): r.id
@@ -378,7 +386,7 @@ class DatabaseUpdateService:
 
                 if indicators_to_insert:
                     session.add_all(indicators_to_insert)
-                session.commit()
+                await session.commit()
 
                 inserted_count = len(indicators_to_insert)
                 self.logger.info(f"Bulk processed {inserted_count} new + {len(by_key) - inserted_count} skipped indicators")
@@ -404,16 +412,19 @@ class DatabaseUpdateService:
             data = message.data
             
             # Create strategy signal record using ORM
-            with self.database_manager.get_session() as session:
+            async with self.database_manager.get_session() as session:
                 # Find source indicators for dependency tracking
                 source_indicator_ids = []
                 if 'source_indicators' in data:
                     for indicator_ref in data['source_indicators']:
-                        indicator = session.query(Indicator).filter_by(
-                            connection_name=indicator_ref['connection_name'],
-                            indicator_name=indicator_ref['indicator_name'],
-                            timestamp=indicator_ref['timestamp']
-                        ).first()
+                        _r = await session.execute(
+                            _sa_select(Indicator).filter_by(
+                                connection_name=indicator_ref['connection_name'],
+                                indicator_name=indicator_ref['indicator_name'],
+                                timestamp=indicator_ref['timestamp'],
+                            )
+                        )
+                        indicator = _r.scalar_one_or_none()
                         if indicator:
                             source_indicator_ids.append(indicator.id)
                 
@@ -429,7 +440,7 @@ class DatabaseUpdateService:
                 )
                 
                 session.add(strategy_signal)
-                session.commit()
+                await session.commit()
             
             self.stats['strategy_signals_processed'] += 1
             
