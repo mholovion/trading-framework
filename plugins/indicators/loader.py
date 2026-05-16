@@ -13,11 +13,11 @@ from plugins.indicators.base import IndicatorPlugin
 
 _PROJECT_ROOT = Path(__file__).parents[3]
 _INDICATORS_DIR = _PROJECT_ROOT / "plugins" / "indicators"
-_PRIMITIVES_DIR = _PROJECT_ROOT / "plugins" / "ta_primitives"
+_PRIMITIVES_DIR = _PROJECT_ROOT / "plugins" / "indicators" / "primitives"
 
 
 def load_all_primitives() -> None:
-    """Scan plugins/ta_primitives/ and compile every .py file as a numba primitive."""
+    """Scan plugins/indicators/primitives/ and compile every .py file as a numba primitive."""
     if not _PRIMITIVES_DIR.exists():
         return
     for path in sorted(_PRIMITIVES_DIR.glob("*.py")):
@@ -34,7 +34,7 @@ def load_all_primitives() -> None:
 
 def load_primitive(name: str) -> Any:
     """
-    Load plugins/ta_primitives/NAME.py, wrap as (source, period) -> np.ndarray,
+    Load plugins/indicators/primitives/NAME.py, wrap as (source, period) -> np.ndarray,
     compile with numba @njit, register as ctx.ta.NAME().
     """
     from numba import njit
