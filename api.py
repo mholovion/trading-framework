@@ -1,11 +1,8 @@
 #!/usr/bin/env python3
-"""
-Trading Bot API v3 - Simplified with DatabaseManager
-====================================================
+"""Trading Bot API — ClickHouse backend."""
 
-Clean, simple API that uses only DatabaseManager methods.
-No direct SQL queries, much cleaner code.
-"""
+import os
+os.environ.setdefault("NUMBA_DISABLE_JIT", "1")  # pandas_ta numba caching fix in Docker
 
 from aiohttp import web
 import aiohttp_jinja2
@@ -15,1400 +12,610 @@ import os
 import sys
 from pathlib import Path
 from datetime import datetime, timezone
-from decimal import Decimal
 from typing import Optional
 
-# Add project root to Python path
 sys.path.append(str(Path(__file__).parent))
 
 from core.universal_config_manager import UniversalConfigManager
 from core.logging_config import setup_service_logging
-from core.database import DatabaseManager
-import time as _time
-
-# Simple in-memory TTL cache for expensive aggregation queries
-_api_cache: dict = {}
-
-def _get_cached(key: str, ttl: float):
-    entry = _api_cache.get(key)
-    if entry and (_time.monotonic() - entry[0]) < ttl:
-        return entry[1], True
-    return None, False
-
-def _set_cached(key: str, value):
-    _api_cache[key] = (_time.monotonic(), value)
-
-
-class DecimalEncoder(json.JSONEncoder):
-    """Custom JSON encoder to handle Decimal objects"""
-    def default(self, obj):
-        if isinstance(obj, Decimal):
-            return float(obj)
-        elif isinstance(obj, datetime):
-            return obj.isoformat()
-        return super().default(obj)
+from core.clickhouse import ClickHouseManager, create_clickhouse_manager
+from core.resolver import DependencyResolver
 
 
 def convert_decimals(data):
-    """Convert Decimal objects to float for JSON serialization"""
+    from decimal import Decimal
     if isinstance(data, Decimal):
         return float(data)
     elif isinstance(data, datetime):
         return data.isoformat()
     elif isinstance(data, dict):
-        return {key: convert_decimals(value) for key, value in data.items()}
+        return {k: convert_decimals(v) for k, v in data.items()}
     elif isinstance(data, list):
-        return [convert_decimals(item) for item in data]
+        return [convert_decimals(i) for i in data]
     return data
 
 
 class TradingBotAPI:
-    """Simplified Trading Bot API using DatabaseManager"""
-    
+
     def __init__(self):
-        self.logger = setup_service_logging('api')
-        self.app = web.Application()
+        self.logger         = setup_service_logging('api')
+        self.app            = web.Application()
         self.config_manager: Optional[UniversalConfigManager] = None
-        self.database_manager: Optional[DatabaseManager] = None
-        
+        self.clickhouse:     Optional[ClickHouseManager]      = None
+        self.resolver:       Optional[DependencyResolver]     = None
+
     async def initialize(self):
-        """Initialize API server components"""
-        self.logger.info("Initializing Trading Bot API v3...")
-        
-        # Load configuration
+        self.logger.info("Initializing Trading Bot API...")
+
         self.config_manager = UniversalConfigManager()
         self.config_manager.load_all_configs()
-        
-        # Initialize database manager
-        main_config = self.config_manager.get_config('main')
-        database_config = main_config['database'].copy()
-        
-        # Override host for Docker containers
-        if os.getenv('DATABASE_HOST'):
-            database_config['host'] = os.getenv('DATABASE_HOST')
-        
-        self.database_manager = DatabaseManager({'database': database_config})
-        await self.database_manager.initialize()
-        
-        # Setup routes
+
+        main_config     = self.config_manager.get_config('main')
+        self.clickhouse = create_clickhouse_manager(main_config.get('clickhouse', {}))
+        await self.clickhouse.initialize()
+        self.resolver   = DependencyResolver(self.clickhouse)
+
         self._setup_routes()
-        
-        # Setup Jinja2 templates
+
         _base_dir = Path(__file__).parent
         aiohttp_jinja2.setup(
             self.app,
             loader=jinja2.FileSystemLoader(str(_base_dir / 'templates')),
-            enable_async=True
+            enable_async=True,
         )
-        
-        self.logger.info("Trading Bot API v3 initialized")
+
+        self.logger.info("Trading Bot API initialized")
     
     def _setup_routes(self):
-        """Setup API routes"""
-        # API endpoints
-        self.app.router.add_get('/api/health', self.health_check)
-        self.app.router.add_get('/api/stats', self.get_stats)
-        
-        # Candles endpoints with source support
-        self.app.router.add_get('/api/candles', self.get_candles)
-        self.app.router.add_get('/api/data/candles', self.get_candles)  # Legacy compatibility
-        self.app.router.add_get('/api/candles/sources', self.get_candle_sources)
-        self.app.router.add_get('/api/data/sources', self.get_candle_sources)  # Legacy compatibility
-        self.app.router.add_get('/api/candles/latest', self.get_latest_candle)
-        
-        # Chart endpoint for trading chart page
-        self.app.router.add_get('/api/chart', self.get_chart_data)
-        self.app.router.add_get('/api/data/timeframes', self.get_timeframes)
-        
-        # Indicators endpoints
-        self.app.router.add_get('/api/indicators', self.get_indicators)
-        self.app.router.add_get('/api/indicators/status', self.get_indicators_status)
-        
-        # Strategies endpoints
-        self.app.router.add_get('/api/strategies', self.get_strategies)
-        self.app.router.add_get('/api/strategies/status', self.get_strategies_status)
-        self.app.router.add_get('/api/strategies/signals', self.get_strategies_signals)
-        self.app.router.add_get('/api/strategies/performance', self.get_strategy_performance)
-        self.app.router.add_post('/api/strategies/backfill-prices', self.backfill_signal_prices)
-
-        # Data export
-        self.app.router.add_get('/api/export/features', self.get_ml_features)
-        self.app.router.add_get('/api/export/signals', self.get_signals_with_context)
-        self.app.router.add_get('/api/export/features.arrow', self.export_features_arrow)
-        self.app.router.add_get('/api/export/features.parquet', self.export_features_parquet)
-
-        # Progress endpoint
-        self.app.router.add_get('/api/progress', self.get_progress)
-
-        # Web dashboard
-        self.app.router.add_get('/', self.dashboard)
-        self.app.router.add_get('/dashboard', self.dashboard)
-        self.app.router.add_get('/progress', self.progress_page)
-
-        # Chart pages
-        self.app.router.add_get('/chart', self.trading_chart)
-        self.app.router.add_get('/indicators', self.indicators_chart)
-        self.app.router.add_get('/strategies', self.strategies_chart)
-        
-        # Static files
+        self.app.router.add_get('/api/health',                  self.health_check)
+        self.app.router.add_get('/api/stats',                   self.get_stats)
+        self.app.router.add_get('/api/chart',                   self.get_chart_data)
+        self.app.router.add_get('/api/data/sources',            self.get_data_sources)
+        self.app.router.add_get('/api/data/timeframes',         self.get_timeframes)
+        self.app.router.add_get('/api/indicators',              self.get_indicator_data)
+        self.app.router.add_get('/api/indicators/library',      self.get_indicators_library)
+        self.app.router.add_get('/api/indicators/status',       self.get_indicators_status)
+        self.app.router.add_post('/api/indicators/compute',     self.compute_indicator)
+        self.app.router.add_post('/api/indicators/test',        self.test_indicator)
+        self.app.router.add_post('/api/indicators/custom',      self.save_custom_indicator)
+        self.app.router.add_get('/api/strategies/signals',      self.get_strategies_signals)
+        self.app.router.add_get('/api/strategies/status',       self.get_strategies_status)
+        self.app.router.add_post('/api/strategies/compute',     self.compute_strategy)
+        self.app.router.add_get('/api/progress',                self.get_progress)
+        self.app.router.add_get('/',                            self.dashboard)
+        self.app.router.add_get('/dashboard',                   self.dashboard)
+        self.app.router.add_get('/chart',                       self.trading_chart)
+        self.app.router.add_get('/indicators',                  self.indicators_chart)
+        self.app.router.add_get('/strategies',                  self.strategies_chart)
         _base_dir = Path(__file__).parent
         self.app.router.add_static('/static', str(_base_dir / 'static'))
     
     async def health_check(self, request):
-        """Health check endpoint"""
-        is_healthy = (await self.database_manager.health_check()) if self.database_manager else False
-        status_code = 200 if is_healthy else 503
-        
+        ch_ok = self.clickhouse and self.clickhouse._conn is not None
         return web.json_response({
-            'status': 'healthy' if is_healthy else 'unhealthy',
+            'status': 'healthy' if ch_ok else 'unhealthy',
             'timestamp': datetime.now(timezone.utc).isoformat(),
-            'database': 'connected' if is_healthy else 'disconnected'
-        }, status=status_code)
+            'clickhouse': 'connected' if ch_ok else 'disconnected',
+        }, status=200 if ch_ok else 503)
     
     async def get_stats(self, request):
-        """Get database statistics"""
         try:
-            stats = await self.database_manager.get_database_stats()
-            return web.json_response({
-                'status': 'success',
-                'data': convert_decimals(stats)
-            })
-        except Exception as e:
-            self.logger.error(f"Error getting stats: {e}")
-            return web.json_response({'error': str(e)}, status=500)
-    
-    async def get_candles(self, request):
-        """Get candles with source filtering support"""
-        try:
-            # Parse parameters
-            exchange = request.query.get('exchange', '').strip().lower()
-            symbol = request.query.get('symbol', '').strip().upper()
-            timeframe = request.query.get('timeframe', '').strip().lower()
-            limit = int(request.query.get('limit', 100))
-            source_type = request.query.get('source_type')  # 'exchange' or 'aggregated'
-            source_timeframe = request.query.get('source_timeframe')  # source timeframe
-            
-            if not all([exchange, symbol, timeframe]):
-                return web.json_response({
-                    'error': 'Missing required parameters: exchange, symbol, timeframe'
-                }, status=400)
-            
-            # Get candles using DatabaseManager
-            candles = await self.database_manager.get_candles_by_source(
-                exchange=exchange,
-                symbol=symbol,
-                timeframe=timeframe,
-                source_type=source_type,
-                source_timeframe=source_timeframe,
-                limit=limit
+            rows = await self.clickhouse._execute(
+                "SELECT "
+                " (SELECT count() FROM candles) AS candles,"
+                " (SELECT count() FROM indicators) AS indicators,"
+                " (SELECT count() FROM strategy_signals) AS signals"
             )
-            
-            return web.json_response({
-                'status': 'success',
-                'data': {
-                    'exchange': exchange,
-                    'symbol': symbol,
-                    'timeframe': timeframe,
-                    'source_type': source_type,
-                    'source_timeframe': source_timeframe,
-                    'candles': convert_decimals(candles),
-                    'count': len(candles)
-                }
-            })
-            
-        except ValueError as e:
-            return web.json_response({'error': f'Invalid parameter: {e}'}, status=400)
+            r = rows[0] if rows else (0, 0, 0)
+            return web.json_response({'status': 'success', 'data': {
+                'candles_count': int(r[0]),
+                'indicators_count': int(r[1]),
+                'strategies_count': int(r[2]),
+            }})
         except Exception as e:
-            self.logger.error(f"Error getting candles: {e}")
             return web.json_response({'error': str(e)}, status=500)
     
-    async def get_candle_sources(self, request):
-        """Get available data sources for a timeframe"""
+    # ------------------------------------------------------------------ #
+    # Data source / indicator metadata endpoints                           #
+    # ------------------------------------------------------------------ #
+
+    async def get_data_sources(self, request):
+        """
+        GET /api/data/sources
+        Returns distinct (exchange, symbol, timeframe, count) from the candles table.
+        """
         try:
-            exchange = request.query.get('exchange', '').strip().lower()
-            symbol = request.query.get('symbol', '').strip().upper()
-            timeframe = request.query.get('timeframe', '').strip().lower()
-            
-            # If no parameters provided, return dashboard-compatible format
-            if not any([exchange, symbol, timeframe]):
-                cached, hit = _get_cached('candle_sources', 300.0)
-                if hit:
-                    return web.json_response(cached)
-
-                from sqlalchemy import text
-                # Use per-group index scans (DISTINCT ON) + approx count instead of
-                # full COUNT(*) GROUP BY which triggers a slow multi-chunk seq scan.
-                async with self.database_manager.get_session() as session:
-                    groups = (await session.execute(text("""
-                        SELECT DISTINCT exchange, symbol, timeframe, source_type
-                        FROM candles
-                        ORDER BY exchange, symbol, timeframe, source_type
-                    """))).fetchall()
-
-                    sources = []
-                    for g in groups:
-                        ex, sym, tf, st = g.exchange, g.symbol, g.timeframe, g.source_type
-                        stats = (await session.execute(text("""
-                            SELECT
-                                (SELECT timestamp FROM candles
-                                 WHERE exchange=:ex AND symbol=:sym AND timeframe=:tf AND source_type=:st
-                                 ORDER BY timestamp ASC  LIMIT 1) AS first_ts,
-                                (SELECT timestamp FROM candles
-                                 WHERE exchange=:ex AND symbol=:sym AND timeframe=:tf AND source_type=:st
-                                 ORDER BY timestamp DESC LIMIT 1) AS last_ts,
-                                approximate_row_count('candles') AS approx_total
-                        """), dict(ex=ex, sym=sym, tf=tf, st=st))).fetchone()
-
-                        first_date = datetime.fromtimestamp(int(stats.first_ts), tz=timezone.utc).isoformat() if stats.first_ts else 'N/A'
-                        last_date  = datetime.fromtimestamp(int(stats.last_ts),  tz=timezone.utc).isoformat() if stats.last_ts  else 'N/A'
-                        sources.append({
-                            'exchange': ex, 'symbol': sym,
-                            'timeframe': tf, 'source': st,
-                            'candles_count': int(stats.approx_total or 0),
-                            'first_datetime': first_date,
-                            'last_datetime': last_date,
-                            'status': 'online'
-                        })
-
-                resp = {'sources': sources, 'summary': {'total_sources': len(sources)}}
-                _set_cached('candle_sources', resp)
-                return web.json_response(resp)
-            
-            if not all([exchange, symbol, timeframe]):
-                return web.json_response({
-                    'error': 'Missing required parameters: exchange, symbol, timeframe'
-                }, status=400)
-            
-            # Get available sources using DatabaseManager
-            sources = await self.database_manager.get_available_sources(exchange, symbol, timeframe)
-            
-            return web.json_response({
-                'status': 'success',
-                'data': {
-                    'exchange': exchange,
-                    'symbol': symbol,
-                    'timeframe': timeframe,
-                    'sources': convert_decimals(sources),
-                    'count': len(sources)
-                }
-            })
-            
-        except Exception as e:
-            self.logger.error(f"Error getting candle sources: {e}")
-            return web.json_response({'error': str(e)}, status=500)
-    
-    async def get_latest_candle(self, request):
-        """Get latest candle with optional source filtering"""
-        try:
-            exchange = request.query.get('exchange', '').strip().lower()
-            symbol = request.query.get('symbol', '').strip().upper()
-            timeframe = request.query.get('timeframe', '').strip().lower()
-            source_type = request.query.get('source_type')
-            source_timeframe = request.query.get('source_timeframe')
-            
-            if not all([exchange, symbol, timeframe]):
-                return web.json_response({
-                    'error': 'Missing required parameters: exchange, symbol, timeframe'
-                }, status=400)
-            
-            # Get latest candle using DatabaseManager
-            candle = await self.database_manager.get_latest_candle(
-                exchange=exchange,
-                symbol=symbol,
-                timeframe=timeframe,
-                source_type=source_type,
-                source_timeframe=source_timeframe
+            rows = await self.clickhouse._execute(
+                "SELECT exchange, symbol, timeframe, count() AS cnt "
+                "FROM candles GROUP BY exchange, symbol, timeframe "
+                "ORDER BY exchange, symbol, timeframe"
             )
-            
-            if not candle:
-                return web.json_response({
-                    'error': f'No candle found for {exchange}/{symbol}/{timeframe}'
-                }, status=404)
-            
-            return web.json_response({
-                'status': 'success',
-                'data': convert_decimals(candle)
-            })
-            
+            sources = [
+                {"exchange": r[0], "symbol": r[1], "timeframe": r[2], "count": int(r[3])}
+                for r in rows
+            ]
+            return web.json_response({"sources": sources})
         except Exception as e:
-            self.logger.error(f"Error getting latest candle: {e}")
-            return web.json_response({'error': str(e)}, status=500)
-    
-    async def get_chart_data(self, request):
-        """Get chart data endpoint for trading chart"""
-        try:
-            # Parse parameters
-            exchange = request.query.get('exchange', '').strip().lower()
-            symbol = request.query.get('symbol', '').strip().upper()
-            timeframe = request.query.get('timeframe', '').strip().lower()
-            limit = int(request.query.get('limit', 300))
-            source_type = request.query.get('source_type')
-            source_timeframe = request.query.get('source_timeframe')
-            before_timestamp = request.query.get('before_timestamp')
-            before_timestamp = int(before_timestamp) if before_timestamp else None
+            return web.json_response({"sources": [], "error": str(e)}, status=500)
 
-            if not all([exchange, symbol, timeframe]):
-                return web.json_response({
-                    'error': 'Missing required parameters: exchange, symbol, timeframe'
-                }, status=400)
-
-            candles = await self.database_manager.get_candles_from_source(
-                exchange=exchange,
-                symbol=symbol,
-                timeframe=timeframe,
-                limit=limit,
-                before_timestamp=before_timestamp,
-            )
-
-            has_more = len(candles) == limit
-
-            return web.json_response({
-                'status': 'success',
-                'data': convert_decimals(candles),
-                'count': len(candles),
-                'has_more': has_more,
-                'exchange': exchange,
-                'symbol': symbol,
-                'timeframe': timeframe,
-            })
-            
-        except ValueError as e:
-            return web.json_response({'error': f'Invalid parameter: {e}'}, status=400)
-        except Exception as e:
-            self.logger.error(f"Error getting chart data: {e}")
-            return web.json_response({'error': str(e)}, status=500)
-    
-    async def get_timeframes(self, request):
-        """Get ALL available timeframes with source info for exchange/symbol"""
-        try:
-            exchange = request.query.get('exchange', '').strip().lower()
-            symbol = request.query.get('symbol', '').strip().upper()
-            
-            if not exchange or not symbol:
-                return web.json_response({
-                    'error': 'Missing required parameters: exchange, symbol'
-                }, status=400)
-            
-            # Get timeframes — deduplicated, skipping old 'aggregated' entries that
-            # are now served by TimescaleDB continuous aggregate views.
-            from sqlalchemy import text
-
-            query = text("""
-                SELECT
-                    timeframe,
-                    source_type,
-                    COUNT(*) as candles_count
-                FROM candles
-                WHERE exchange = :exchange AND symbol = :symbol
-                  AND source_type = 'exchange'
-                GROUP BY timeframe, source_type
-                ORDER BY timeframe
-            """)
-
-            async with self.database_manager.get_session() as session:
-                result = (await session.execute(query, {'exchange': exchange, 'symbol': symbol}))
-                rows = result.fetchall()
-
-            # Build deduplicated timeframe list.
-            # For configured aggregate TFs (served by TimescaleDB views), add them even
-            # if there are no 'exchange' rows for that timeframe in candles.
-            seen = set()
-            timeframes = []
-            for row in rows:
-                tf = row.timeframe
-                if tf in seen:
-                    continue
-                seen.add(tf)
-                src_table = self.database_manager.candle_source_table(tf)
-                source = 'timescaledb' if src_table != 'candles' else 'exchange'
-                timeframes.append({
-                    'timeframe': tf,
-                    'source': source,
-                    'candles_count': row.candles_count,
-                })
-
-            # Add configured aggregate timeframes not yet in list
-            for rule in self.database_manager._aggregation_rules:
-                for tf in rule.get('targets', []):
-                    if tf not in seen:
-                        seen.add(tf)
-                        timeframes.append({
-                            'timeframe': tf,
-                            'source': 'timescaledb',
-                            'candles_count': None,
-                        })
-            
-            return web.json_response({
-                'timeframes': timeframes,  # Array of objects with timeframe and source info
-                'exchange': exchange,
-                'symbol': symbol
-            })
-            
-        except Exception as e:
-            self.logger.error(f"Error getting timeframes: {e}")
-            return web.json_response({'error': str(e)}, status=500)
-    
-    async def get_indicators(self, request):
-        """Get indicator values"""
-        try:
-            indicator_name = request.query.get('indicator_name', '').strip()
-            exchange = request.query.get('exchange', '').strip().lower()
-            symbol = request.query.get('symbol', '').strip().upper()
-            timeframe = request.query.get('timeframe', '').strip().lower()
-            limit = int(request.query.get('limit', 100))
-            raw_start = request.query.get('start_ts')
-            raw_end   = request.query.get('end_ts')
-            start_ts  = int(raw_start) if raw_start else None
-            end_ts    = int(raw_end)   if raw_end   else None
-
-            if not all([indicator_name, exchange, symbol, timeframe]):
-                return web.json_response({
-                    'error': 'Missing required parameters: indicator_name, exchange, symbol, timeframe'
-                }, status=400)
-
-            # Get indicators using DatabaseManager
-            indicators = await self.database_manager.get_indicator_values(
-                indicator_name=indicator_name,
-                exchange=exchange,
-                symbol=symbol,
-                timeframe=timeframe,
-                limit=limit,
-                start_ts=start_ts,
-                end_ts=end_ts,
-            )
-            
-            return web.json_response({
-                'status': 'success',
-                'data': {
-                    'indicator_name': indicator_name,
-                    'exchange': exchange,
-                    'symbol': symbol,
-                    'timeframe': timeframe,
-                    'indicators': convert_decimals(indicators),
-                    'count': len(indicators)
-                }
-            })
-            
-        except ValueError as e:
-            return web.json_response({'error': f'Invalid parameter: {e}'}, status=400)
-        except Exception as e:
-            self.logger.error(f"Error getting indicators: {e}")
-            return web.json_response({'error': str(e)}, status=500)
-    
-    async def get_strategies(self, request):
-        """Get strategy signals"""
-        try:
-            strategy_name = request.query.get('strategy_name', '').strip()
-            exchange = request.query.get('exchange', '').strip().lower()
-            symbol = request.query.get('symbol', '').strip().upper()
-            timeframe = request.query.get('timeframe', '').strip().lower()
-            limit = int(request.query.get('limit', 100))
-            
-            if not all([strategy_name, exchange, symbol, timeframe]):
-                return web.json_response({
-                    'error': 'Missing required parameters: strategy_name, exchange, symbol, timeframe'
-                }, status=400)
-            
-            # Get strategies using DatabaseManager
-            strategies = await self.database_manager.get_strategy_signals(
-                strategy_name=strategy_name,
-                exchange=exchange,
-                symbol=symbol,
-                timeframe=timeframe,
-                limit=limit
-            )
-            
-            return web.json_response({
-                'status': 'success',
-                'data': {
-                    'strategy_name': strategy_name,
-                    'exchange': exchange,
-                    'symbol': symbol,
-                    'timeframe': timeframe,
-                    'strategies': convert_decimals(strategies),
-                    'count': len(strategies)
-                }
-            })
-            
-        except ValueError as e:
-            return web.json_response({'error': f'Invalid parameter: {e}'}, status=400)
-        except Exception as e:
-            self.logger.error(f"Error getting strategies: {e}")
-            return web.json_response({'error': str(e)}, status=500)
-    
     async def get_indicators_status(self, request):
-        """Get indicators status (for dashboard compatibility)"""
+        """
+        GET /api/indicators/status
+        Returns cached indicator types/hashes with their candle-level connection info.
+        Dashboard uses this to populate the indicator selector.
+        """
         try:
-            cached, hit = _get_cached('indicators_status', 300.0)
-            if hit:
-                return web.json_response(cached)
-
-            from sqlalchemy import text
-            query = text("""
-                SELECT
-                    indicator_name,
-                    exchange,
-                    symbol,
-                    timeframe,
-                    COUNT(*) AS count,
-                    MAX(timestamp) AS last_update
-                FROM indicators
-                GROUP BY indicator_name, exchange, symbol, timeframe
-                ORDER BY indicator_name, exchange, symbol, timeframe
-            """)
-
-            async with self.database_manager.get_session() as session:
-                rows = (await session.execute(query)).fetchall()
-
+            rows = await self.clickhouse._execute(
+                "SELECT pm.params_hash, pm.params_json, "
+                "       count() AS cnt, min(i.timestamp) AS first_ts, max(i.timestamp) AS last_ts "
+                "FROM indicators i "
+                "JOIN params_meta pm ON i.params_hash = pm.params_hash "
+                "GROUP BY pm.params_hash, pm.params_json"
+            )
             indicators = []
-            for row in rows:
-                last_update_date = datetime.fromtimestamp(row.last_update, tz=timezone.utc).isoformat() if row.last_update else 'N/A'
-                indicators.append({
-                    'name': row.indicator_name,
-                    'connection': f"{row.exchange}_{row.symbol}_{row.timeframe}",
-                    'status': 'active',
-                    'count': row.count,
-                    'last_update': last_update_date
-                })
-
-            resp = {
-                'indicators': indicators,
-                'summary': {
-                    'total_indicators': len(indicators),
-                    'active_indicators': len(indicators),
-                    'last_update': indicators[0]['last_update'] if indicators else 'N/A'
-                }
-            }
-            _set_cached('indicators_status', resp)
-            return web.json_response(resp)
-
+            for r in rows:
+                try:
+                    p = json.loads(r[1])
+                    tf  = p.get("timeframe", "")
+                    ex  = p.get("exchange",  "")
+                    sym = p.get("symbol",    "")
+                    # connection string format expected by dashboard: exchange_SYMBOL_tf
+                    conn = f"{ex}_{sym}_{tf}" if ex else tf
+                    indicators.append({
+                        "name":       f"{p.get('type','?')}_{p.get('period','')}_{tf}",
+                        "params_hash": r[0],
+                        "connection":  conn,
+                        "count":       int(r[2]),
+                        "params":      p,
+                    })
+                except Exception:
+                    pass
+            return web.json_response({"indicators": indicators})
         except Exception as e:
-            self.logger.error(f"Error getting indicators status: {e}")
-            return web.json_response({
-                'indicators': [],
-                'summary': {'total_indicators': 0, 'active_indicators': 0, 'last_update': 'N/A'}
-            })
-    
-    async def get_strategies_status(self, request):
-        """Get strategies status — config entries merged with live signal counts."""
+            return web.json_response({"indicators": [], "error": str(e)}, status=500)
+
+    async def get_indicator_data(self, request):
+        """
+        GET /api/indicators?indicator_name=rsi_14_4h&exchange=...&symbol=...&timeframe=...
+        Returns time-series data points for a cached indicator.
+        """
         try:
-            from sqlalchemy import text
+            from core.params import IndicatorParams
+            indicator_name = request.query.get('indicator_name', '').strip()
+            exchange       = request.query.get('exchange', '').strip().lower()
+            symbol         = request.query.get('symbol',   '').strip().upper()
+            timeframe      = request.query.get('timeframe', '').strip()
+            start_ts = int(request.query['start_ts']) if 'start_ts' in request.query else None
+            end_ts   = int(request.query['end_ts'])   if 'end_ts'   in request.query else None
 
-            # Seed from config
-            strategies_config = self.config_manager.get_config('strategies') or {}
-            strategies_data = {}
-            for name, cfg in (strategies_config.get('strategies') or {}).items():
-                strategies_data[name] = {
-                    'enabled': cfg.get('enabled', True),
-                    'total_signals': 0,
-                    'plugin': cfg.get('plugin', 'unknown'),
-                    'latest_signal': None
+            # Parse "rsi_14_4h" → type=rsi, period=14, tf=4h
+            parts  = indicator_name.rsplit('_', 2)
+            ind_type = parts[0] if len(parts) >= 1 else indicator_name
+            period   = int(parts[1]) if len(parts) >= 2 and parts[1].isdigit() else 14
+            tf       = timeframe or (parts[2] if len(parts) >= 3 else '1m')
+
+            params = IndicatorParams.create(ind_type, tf, period)
+            rows   = await self.clickhouse.fetch_indicator(
+                params, exchange, symbol, start_ts=start_ts, end_ts=end_ts
+            )
+            return web.json_response({
+                "data": {
+                    "indicators": [{"timestamp": r[0], "value": r[1]} for r in rows]
                 }
+            })
+        except Exception as e:
+            self.logger.error(f"get_indicator_data error: {e}")
+            return web.json_response({"data": {"indicators": []}, "error": str(e)}, status=500)
 
-            # Single SQL query: count + latest signal per strategy
-            query = text("""
-                SELECT
-                    strategy_name,
-                    COUNT(*) AS total_signals,
-                    MAX(timestamp) AS last_ts
-                FROM strategy_signals
-                GROUP BY strategy_name
-            """)
-            latest_query = text("""
-                SELECT DISTINCT ON (strategy_name)
-                    strategy_name, signal_type, timestamp, price, confidence
-                FROM strategy_signals
-                ORDER BY strategy_name, timestamp DESC
-            """)
+    async def get_strategies_status(self, request):
+        """
+        GET /api/strategies/status
+        Returns per-strategy signal count + latest signal for the strategies panel.
+        """
+        try:
+            rows = await self.clickhouse._execute(
+                "SELECT strategy_type, count() AS total, "
+                "       argMax(signal_type, timestamp) AS last_type, "
+                "       argMax(price,       timestamp) AS last_price, "
+                "       argMax(confidence,  timestamp) AS last_conf, "
+                "       max(timestamp) AS last_ts "
+                "FROM strategy_signals "
+                "GROUP BY strategy_type"
+            )
+            result = {}
+            for r in rows:
+                result[r[0]] = {
+                    "total_signals": int(r[1]),
+                    "latest_signal": {
+                        "signal_type": r[2],
+                        "price":       float(r[3]) if r[3] else None,
+                        "confidence":  float(r[4]) if r[4] else None,
+                        "timestamp":   int(r[5])   if r[5] else None,
+                    } if r[5] else None,
+                }
+            return web.json_response(result)
+        except Exception as e:
+            return web.json_response({}, status=500)
 
-            async with self.database_manager.get_session() as session:
-                counts = {r.strategy_name: r for r in (await session.execute(query)).fetchall()}
-                latests = {r.strategy_name: r for r in (await session.execute(latest_query)).fetchall()}
+    # ------------------------------------------------------------------ #
+    # On-demand indicator endpoints                                        #
+    # ------------------------------------------------------------------ #
 
-            for name, row in counts.items():
-                if name not in strategies_data:
-                    strategies_data[name] = {
-                        'enabled': True, 'total_signals': 0,
-                        'plugin': 'unknown', 'latest_signal': None
-                    }
-                strategies_data[name]['total_signals'] = row.total_signals
-                latest = latests.get(name)
-                if latest:
-                    strategies_data[name]['latest_signal'] = {
-                        'signal_type': latest.signal_type,
-                        'timestamp': latest.timestamp,
-                        'price': float(latest.price) if latest.price else None,
-                        'confidence': float(latest.confidence)
-                    }
+    async def get_indicators_library(self, request):
+        """Return all available indicator types: pandas-ta, custom primitives, user scripts."""
+        try:
+            import pandas_ta as pdta
+            from pathlib import Path
 
-            return web.json_response(strategies_data)
+            # pandas-ta public callables (skip private/utility names)
+            _SKIP = {"version", "ticker", "trends", "non_unique", "above", "below",
+                     "above_value", "below_value", "cross", "cross_value", "signals",
+                     "percent_return", "log_return", "Strategy", "AllStrategy"}
+            ta_names = sorted(
+                n for n in dir(pdta)
+                if not n.startswith("_") and n not in _SKIP
+                   and callable(getattr(pdta, n, None))
+            )
+
+            # Custom primitives from plugins/ta_primitives/
+            primitives_dir = Path("/app/plugins/ta_primitives")
+            primitives = sorted(
+                p.stem for p in primitives_dir.glob("*.py")
+                if not p.stem.startswith("_")
+            ) if primitives_dir.exists() else []
+
+            # User-created indicators from plugins/indicators/user/
+            user_dir = Path("/app/plugins/indicators/user")
+            user_inds = sorted(
+                p.stem for p in user_dir.glob("*.py")
+                if not p.stem.startswith("_")
+            ) if user_dir.exists() else []
+
+            # Schema: well-known indicators with their default parameters
+            INDICATOR_SCHEMA = {
+                "rsi":    {"display": "RSI",              "category": "Oscillators",
+                           "params": [{"key": "period", "type": "int", "default": 14, "label": "Length"},
+                                      {"key": "source", "type": "select", "label": "Source",
+                                       "options": ["close","open","high","low"], "default": "close"}]},
+                "ema":    {"display": "EMA",              "category": "Trend",
+                           "params": [{"key": "period", "type": "int", "default": 20, "label": "Length"},
+                                      {"key": "source", "type": "select", "label": "Source",
+                                       "options": ["close","open","high","low"], "default": "close"}]},
+                "sma":    {"display": "SMA",              "category": "Trend",
+                           "params": [{"key": "period", "type": "int", "default": 20, "label": "Length"},
+                                      {"key": "source", "type": "select", "label": "Source",
+                                       "options": ["close","open","high","low"], "default": "close"}]},
+                "macd":   {"display": "MACD",             "category": "Oscillators",
+                           "params": [{"key": "period",  "type": "int", "default": 12, "label": "Fast"},
+                                      {"key": "slow",    "type": "int", "default": 26, "label": "Slow"},
+                                      {"key": "signal",  "type": "int", "default": 9,  "label": "Signal"}]},
+                "bbands": {"display": "Bollinger Bands",  "category": "Volatility",
+                           "params": [{"key": "period", "type": "int",   "default": 20, "label": "Length"},
+                                      {"key": "std",    "type": "float", "default": 2.0,"label": "StdDev"}]},
+                "stoch":  {"display": "Stochastic",       "category": "Oscillators",
+                           "params": [{"key": "k", "type": "int", "default": 14, "label": "%K"},
+                                      {"key": "d", "type": "int", "default": 3,  "label": "%D"}]},
+                "atr":    {"display": "ATR",              "category": "Volatility",
+                           "params": [{"key": "period", "type": "int", "default": 14, "label": "Length"}]},
+                "adx":    {"display": "ADX",              "category": "Trend",
+                           "params": [{"key": "period", "type": "int", "default": 14, "label": "Length"}]},
+                "cci":    {"display": "CCI",              "category": "Oscillators",
+                           "params": [{"key": "period", "type": "int", "default": 20, "label": "Length"}]},
+                "mfi":    {"display": "MFI",              "category": "Volume",
+                           "params": [{"key": "period", "type": "int", "default": 14, "label": "Length"}]},
+            }
+
+            # Build full list: known schema first, remaining ta_names as generic
+            library = []
+            for name in ta_names:
+                schema = INDICATOR_SCHEMA.get(name, {
+                    "display": name.upper(),
+                    "category": "Other",
+                    "params": [{"key": "period", "type": "int", "default": 14, "label": "Period"}],
+                })
+                library.append({"name": name, **schema})
+
+            return web.json_response({
+                "pandas_ta": library,
+                "primitives": [{"name": n, "display": n.upper(), "category": "Custom Primitives",
+                                 "params": [{"key": "period", "type": "int", "default": 14, "label": "Period"}]}
+                                for n in primitives],
+                "user": [{"name": n, "display": n.replace("_", " ").title(),
+                           "category": "My Indicators", "params": []}
+                          for n in user_inds],
+            })
+        except Exception as e:
+            self.logger.error(f"Error building indicator library: {e}")
+            return web.json_response({"pandas_ta": [], "primitives": [], "user": []})
+
+    async def compute_indicator(self, request):
+        """
+        POST /api/indicators/compute
+        Body: { type, timeframe, period, source, exchange, symbol, ...extra }
+        Returns SSE stream: progress events then data points.
+        """
+        body = await request.json()
+        from core.params import IndicatorParams
+
+        try:
+            type_    = body.pop("type")
+            tf       = body.pop("timeframe")
+            period   = int(body.pop("period", 14))
+            source   = body.pop("source", "close")
+            exchange = body.pop("exchange")
+            symbol   = body.pop("symbol")
+            start_ts = int(body.pop("start_ts")) if "start_ts" in body else None
+            end_ts   = int(body.pop("end_ts"))   if "end_ts"   in body else None
+            params   = IndicatorParams.create(type_, tf, period, source, **body)
+        except Exception as e:
+            return web.json_response({"error": str(e)}, status=400)
+
+        response = web.StreamResponse(headers={"Content-Type": "text/event-stream",
+                                                "Cache-Control": "no-cache"})
+        await response.prepare(request)
+
+        async def send(data: dict):
+            await response.write(f"data: {json.dumps(data)}\n\n".encode())
+
+        try:
+            await self.resolver.resolve_indicator(params, exchange, symbol,
+                                                   progress_cb=send)
+            # Only return values for the requested visible range (avoids fetching millions of rows)
+            rows = await self.clickhouse.fetch_indicator(params, exchange, symbol,
+                                                          start_ts=start_ts, end_ts=end_ts)
+            await send({"stage": "done",
+                        "data": [{"timestamp": r[0], "value": r[1]} for r in rows]})
+        except Exception as e:
+            self.logger.error(f"compute_indicator error: {e}", exc_info=True)
+            await send({"stage": "error", "message": str(e)})
+        finally:
+            await response.write_eof()
+        return response
+
+    async def test_indicator(self, request):
+        """
+        POST /api/indicators/test
+        Computes indicator WITHOUT caching it. Returns data for preview.
+        Body: same as /compute plus candle data range from chart (start_ts, end_ts).
+        """
+        try:
+            body     = await request.json()
+            from core.params import IndicatorParams
+            from plugins.indicators.loader import load_indicator_plugin
+
+            type_    = body.pop("type")
+            tf       = body.pop("timeframe")
+            period   = int(body.pop("period", 14))
+            source   = body.pop("source", "close")
+            exchange = body.pop("exchange")
+            symbol   = body.pop("symbol")
+            start_ts = body.pop("start_ts", None)
+            end_ts   = body.pop("end_ts",   None)
+            params   = IndicatorParams.create(type_, tf, period, source, **body)
+
+            candles = await self.clickhouse.fetch_candles(
+                exchange, symbol, tf, start_ts=start_ts, end_ts=end_ts
+            )
+            if not candles:
+                return web.json_response({"data": []})
+
+            plugin  = load_indicator_plugin(type_, params.to_dict())
+            warmup  = plugin.get_required_periods()
+            results = await plugin.calculate_stream(candles, warmup)
+
+            data = []
+            for i, r in enumerate(results):
+                if r and r.get("value") is not None:
+                    data.append({"timestamp": candles[warmup + i]["timestamp"],
+                                  "value": float(r["value"])})
+
+            return web.json_response({"data": data,
+                                       "display_name": params.display_name()})
+        except Exception as e:
+            self.logger.error(f"test_indicator error: {e}")
+            return web.json_response({"error": str(e)}, status=500)
+
+    async def save_custom_indicator(self, request):
+        """
+        POST /api/indicators/custom
+        Body: { name, code, params_schema: [{key, type, default, label}, ...] }
+        Saves to plugins/indicators/user/{name}.py
+        """
+        try:
+            body = await request.json()
+            name = body.get("name", "").strip()
+            code = body.get("code", "")
+
+            if not name or not code:
+                return web.json_response({"error": "name and code required"}, status=400)
+            if not name.replace("_", "").isalnum():
+                return web.json_response({"error": "name must be alphanumeric + underscores"}, status=400)
+
+            from pathlib import Path
+            user_dir = Path("/app/plugins/indicators/user")
+            user_dir.mkdir(parents=True, exist_ok=True)
+            (user_dir / f"{name}.py").write_text(code)
+
+            # Save params schema alongside as JSON sidecar
+            import json as _json
+            schema = body.get("params_schema", [])
+            (user_dir / f"{name}.json").write_text(_json.dumps(schema, indent=2))
+
+            return web.json_response({"status": "saved", "name": name})
+        except Exception as e:
+            self.logger.error(f"save_custom_indicator error: {e}")
+            return web.json_response({"error": str(e)}, status=500)
+
+    # ------------------------------------------------------------------ #
+    # On-demand strategy endpoint                                          #
+    # ------------------------------------------------------------------ #
+
+    async def compute_strategy(self, request):
+        """
+        POST /api/strategies/compute
+        Body: { type, exchange, symbol, **strategy_params }
+        Returns SSE stream: progress events then signals.
+        """
+        try:
+            body     = await request.json()
+            from core.params import StrategyParams
+
+            type_    = body.pop("type")
+            exchange = body.pop("exchange")
+            symbol   = body.pop("symbol")
+            params   = StrategyParams.create(type_, **body)
+
+            response = web.StreamResponse(headers={"Content-Type": "text/event-stream",
+                                                    "Cache-Control": "no-cache"})
+            await response.prepare(request)
+
+            async def send(data: dict):
+                await response.write(f"data: {json.dumps(data)}\n\n".encode())
+
+            signals = await self.resolver.resolve_strategy(params, exchange, symbol,
+                                                            progress_cb=send)
+            await send({"stage": "done", "signals": signals})
+            await response.write_eof()
+            return response
 
         except Exception as e:
-            self.logger.error(f"Error getting strategies status: {e}")
+            self.logger.error(f"compute_strategy error: {e}")
+            return web.json_response({"error": str(e)}, status=500)
+
+    # ------------------------------------------------------------------ #
+    # Chart data + metadata                                                #
+    # ------------------------------------------------------------------ #
+
+    async def get_chart_data(self, request):
+        """
+        GET /api/chart?exchange=...&symbol=...&timeframe=...&limit=...&start_ts=...&end_ts=...
+        Aggregates candles on-demand if the requested timeframe isn't cached yet.
+        """
+        try:
+            exchange         = request.query.get('exchange', '').strip().lower()
+            symbol           = request.query.get('symbol',   '').strip().upper()
+            timeframe        = request.query.get('timeframe', '1m').strip()
+            limit            = int(request.query.get('limit', 2000))
+            start_ts         = int(request.query['start_ts'])         if 'start_ts'         in request.query else None
+            end_ts           = int(request.query['end_ts'])           if 'end_ts'           in request.query else None
+            before_timestamp = int(request.query['before_timestamp']) if 'before_timestamp' in request.query else None
+            if not exchange or not symbol:
+                return web.json_response({'error': 'exchange and symbol required'}, status=400)
+
+            # Ensure the requested timeframe is aggregated (no-op if already cached)
+            if timeframe != '1m':
+                await self.resolver._ensure_candles(timeframe, exchange, symbol)
+
+            if before_timestamp is not None:
+                # Backwards pagination: fetch the `limit` most recent candles
+                # strictly before before_timestamp (DESC + flip to ascending)
+                candles = await self.clickhouse.fetch_candles(
+                    exchange, symbol, timeframe,
+                    start_ts=start_ts, end_ts=before_timestamp - 1,
+                    limit=limit, order='DESC',
+                )
+                candles = list(reversed(candles))
+            elif start_ts is None and end_ts is None:
+                # Initial load — return the most recent `limit` candles
+                candles = await self.clickhouse.fetch_candles(
+                    exchange, symbol, timeframe,
+                    limit=limit, order='DESC',
+                )
+                candles = list(reversed(candles))
+            else:
+                candles = await self.clickhouse.fetch_candles(
+                    exchange, symbol, timeframe,
+                    start_ts=start_ts, end_ts=end_ts, limit=limit,
+                )
+
+            return web.json_response({
+                'status': 'success',
+                'data': candles,
+                'count': len(candles),
+            })
+        except Exception as e:
+            self.logger.error(f"get_chart_data error: {e}")
             return web.json_response({'error': str(e)}, status=500)
 
-    async def get_ml_features(self, request):
-        """
-        Aligned feature matrix for ML training.
-
-        Query params:
-          exchange   – required
-          symbol     – required
-          timeframe  – candle timeframe to join prices on (default: 4h)
-          start      – ISO date, e.g. 2022-01-01
-          end        – ISO date, e.g. 2026-01-01
-          format     – json (default) | csv
-        """
+    async def get_timeframes(self, request):
+        """Return distinct timeframes available in ClickHouse for exchange/symbol."""
         try:
             exchange = request.query.get('exchange', '').strip().lower()
-            symbol = request.query.get('symbol', '').strip().upper()
-            timeframe = request.query.get('timeframe', '4h').strip().lower()
-            fmt = request.query.get('format', 'json').strip().lower()
-
+            symbol   = request.query.get('symbol',   '').strip().upper()
             if not exchange or not symbol:
-                return web.json_response(
-                    {'error': 'exchange and symbol are required'}, status=400
-                )
-
-            start_ts, end_ts = None, None
-            try:
-                if request.query.get('start'):
-                    start_ts = int(datetime.fromisoformat(request.query['start']).replace(tzinfo=timezone.utc).timestamp())
-                if request.query.get('end'):
-                    end_ts = int(datetime.fromisoformat(request.query['end']).replace(tzinfo=timezone.utc).timestamp())
-            except ValueError as e:
-                return web.json_response({'error': f'Invalid date format: {e}'}, status=400)
-
-            from sqlalchemy import text
-
-            async with self.database_manager.get_session() as session:
-                # All indicator names for this exchange+symbol
-                indicator_rows = (await session.execute(text("""
-                    SELECT DISTINCT indicator_name
-                    FROM indicators
-                    WHERE exchange = :ex AND symbol = :sym
-                    ORDER BY indicator_name
-                """), {'ex': exchange, 'sym': symbol})).fetchall()
-
-                indicator_names = [r.indicator_name for r in indicator_rows]
-                if not indicator_names:
-                    return web.json_response({'error': 'No indicators found for this exchange/symbol'}, status=404)
-
-                # Pivot: one column per indicator, joined to candle close price
-                indicator_joins = "\n".join([
-                    f"LEFT JOIN indicators i_{i} ON i_{i}.timestamp = c.timestamp"
-                    f"  AND i_{i}.exchange = c.exchange AND i_{i}.symbol = c.symbol"
-                    f"  AND i_{i}.indicator_name = :ind_{i}"
-                    for i, _ in enumerate(indicator_names)
-                ])
-                indicator_selects = ", ".join([
-                    f"i_{i}.value AS \"{name}\""
-                    for i, name in enumerate(indicator_names)
-                ])
-                ind_params = {f'ind_{i}': name for i, name in enumerate(indicator_names)}
-
-                src_table = self.database_manager.candle_source_table(timeframe)
-                tf_filter = f"AND c.timeframe = :tf" if src_table == 'candles' else ""
-
-                where_clauses = ["c.exchange = :ex", "c.symbol = :sym"]
-                if tf_filter:
-                    where_clauses.append("c.timeframe = :tf")
-                if start_ts:
-                    where_clauses.append("c.timestamp >= :start_ts")
-                    ind_params['start_ts'] = start_ts
-                if end_ts:
-                    where_clauses.append("c.timestamp <= :end_ts")
-                    ind_params['end_ts'] = end_ts
-
-                ind_params.update({'ex': exchange, 'sym': symbol, 'tf': timeframe})
-
-                query = text(f"""
-                    SELECT
-                        c.timestamp,
-                        c.open_price AS open, c.high_price AS high,
-                        c.low_price AS low, c.close_price AS close, c.volume,
-                        {indicator_selects}
-                    FROM {src_table} c
-                    {indicator_joins}
-                    WHERE {" AND ".join(where_clauses)}
-                    ORDER BY c.timestamp ASC
-                """)
-
-                rows = (await session.execute(query, ind_params)).fetchall()
-
-            columns = ['timestamp', 'open', 'high', 'low', 'close', 'volume'] + indicator_names
-
-            if fmt == 'csv':
-                import io, csv
-                buf = io.StringIO()
-                writer = csv.writer(buf)
-                writer.writerow(['datetime', 'open', 'high', 'low', 'close', 'volume'] + indicator_names)
-                for row in rows:
-                    dt = datetime.fromtimestamp(int(row.timestamp), tz=timezone.utc).isoformat()
-                    rest = [float(v) if v is not None else None for v in list(row)[1:]]
-                    writer.writerow([dt] + rest)
-                return web.Response(
-                    body=buf.getvalue(),
-                    content_type='text/csv',
-                    headers={'Content-Disposition': f'attachment; filename="{symbol}_{exchange}_features.csv"'}
-                )
-
-            records = []
-            for row in rows:
-                rec = {
-                    'timestamp': int(row.timestamp),
-                    'datetime': datetime.fromtimestamp(int(row.timestamp), tz=timezone.utc).isoformat(),
-                    'open': float(row.open), 'high': float(row.high),
-                    'low': float(row.low), 'close': float(row.close),
-                    'volume': float(row.volume),
-                }
-                for name in indicator_names:
-                    v = getattr(row, name)
-                    rec[name] = float(v) if v is not None else None
-                records.append(rec)
-
-            return web.json_response({
-                'exchange': exchange, 'symbol': symbol, 'timeframe': timeframe,
-                'columns': ['datetime', 'open', 'high', 'low', 'close', 'volume'] + indicator_names,
-                'count': len(records),
-                'data': records
-            })
-
-        except Exception as e:
-            self.logger.error(f"Error building ML features: {e}", exc_info=True)
-            return web.json_response({'error': str(e)}, status=500)
-
-    async def get_signals_with_context(self, request):
-        """
-        Strategy signals with indicator values at signal time.
-
-        Query params:
-          connection  – filter by connection_name (e.g. sol_usdt_1m)
-          strategy    – filter by strategy_name
-          signal_type – buy | sell | hold
-          start       – ISO date
-          end         – ISO date
-          format      – json (default) | csv
-        """
-        try:
-            connection = request.query.get('connection', '').strip()
-            strategy = request.query.get('strategy', '').strip()
-            signal_type = request.query.get('signal_type', '').strip().upper()
-            fmt = request.query.get('format', 'json').strip().lower()
-
-            start_ts, end_ts = None, None
-            try:
-                if request.query.get('start'):
-                    start_ts = int(datetime.fromisoformat(request.query['start']).replace(tzinfo=timezone.utc).timestamp())
-                if request.query.get('end'):
-                    end_ts = int(datetime.fromisoformat(request.query['end']).replace(tzinfo=timezone.utc).timestamp())
-            except ValueError as e:
-                return web.json_response({'error': f'Invalid date format: {e}'}, status=400)
-
-            from sqlalchemy import text
-
-            async with self.database_manager.get_session() as session:
-                where, params = [], {}
-                if connection:
-                    where.append("s.connection_name = :conn"); params['conn'] = connection
-                if strategy:
-                    where.append("s.strategy_name = :strat"); params['strat'] = strategy
-                if signal_type:
-                    where.append("UPPER(s.signal_type) = :stype"); params['stype'] = signal_type
-                if start_ts:
-                    where.append("s.timestamp >= :start_ts"); params['start_ts'] = start_ts
-                if end_ts:
-                    where.append("s.timestamp <= :end_ts"); params['end_ts'] = end_ts
-
-                where_sql = ("WHERE " + " AND ".join(where)) if where else ""
-
-                signals = (await session.execute(text(f"""
-                    SELECT id, strategy_name, connection_name,
-                           signal_type, timestamp, price, confidence
-                    FROM strategy_signals s
-                    {where_sql}
-                    ORDER BY timestamp ASC
-                """), params)).fetchall()
-
-                if not signals:
-                    return web.json_response({'signals': [], 'count': 0})
-
-                # Resolve exchange+symbol from indicators table using connection_name
-                conn_name = connection or signals[0].connection_name
-                connections_cfg = self.config_manager.get_config('connections')
-                conn_cfg = connections_cfg.get('connections', {}).get(conn_name, {})
-                ex_q = conn_cfg.get('exchange', '')
-                sym_q = conn_cfg.get('symbol', '')
-
-                indicator_names = []
-                ind_map: dict = {}
-                if ex_q and sym_q:
-                    indicator_names = [r.indicator_name for r in (await session.execute(text("""
-                        SELECT DISTINCT indicator_name FROM indicators
-                        WHERE exchange = :ex AND symbol = :sym ORDER BY indicator_name
-                    """), {'ex': ex_q, 'sym': sym_q})).fetchall()]
-
-                    if indicator_names:
-                        signal_timestamps = list({int(s.timestamp) for s in signals})
-                        for row in (await session.execute(text("""
-                            SELECT indicator_name, timestamp, value
-                            FROM indicators
-                            WHERE exchange = :ex AND symbol = :sym
-                              AND timestamp = ANY(:ts)
-                        """), {'ex': ex_q, 'sym': sym_q, 'ts': signal_timestamps})).fetchall():
-                            ind_map.setdefault(int(row.timestamp), {})[row.indicator_name] = (
-                                float(row.value) if row.value is not None else None
-                            )
-
-            records = []
-            for s in signals:
-                ctx = ind_map.get(int(s.timestamp), {})
-                rec = {
-                    'id': s.id,
-                    'strategy': s.strategy_name,
-                    'connection': s.connection_name,
-                    'signal_type': s.signal_type,
-                    'timestamp': int(s.timestamp),
-                    'datetime': datetime.fromtimestamp(int(s.timestamp), tz=timezone.utc).isoformat(),
-                    'price': float(s.price) if s.price else None,
-                    'confidence': float(s.confidence) if s.confidence else None,
-                }
-                for name in indicator_names:
-                    rec[name] = ctx.get(name)
-                records.append(rec)
-
-            base_cols = ['datetime', 'strategy', 'connection', 'signal_type', 'price', 'confidence']
-
-            if fmt == 'csv':
-                import io, csv
-                buf = io.StringIO()
-                writer = csv.writer(buf)
-                writer.writerow(base_cols + indicator_names)
-                for rec in records:
-                    writer.writerow([rec.get(c) for c in base_cols + indicator_names])
-                return web.Response(
-                    body=buf.getvalue(),
-                    content_type='text/csv',
-                    headers={'Content-Disposition': 'attachment; filename="signals_context.csv"'}
-                )
-
-            return web.json_response({
-                'columns': base_cols + indicator_names,
-                'count': len(records),
-                'signals': records
-            })
-
-        except Exception as e:
-            self.logger.error(f"Error getting signals with context: {e}", exc_info=True)
-            return web.json_response({'error': str(e)}, status=500)
-
-    async def export_features_arrow(self, request):
-        """
-        Export ml_features as Apache Arrow IPC stream.
-
-        Query params: exchange, symbol, timeframe (default 4h), start, end (ISO dates)
-
-        Response: application/vnd.apache.arrow.stream
-        Usage in Python:
-            import pyarrow.ipc as ipc, requests, io
-            r = requests.get(url)
-            df = ipc.open_stream(io.BytesIO(r.content)).read_all().to_pandas()
-        """
-        try:
-            import pyarrow as pa
-            import pyarrow.ipc as ipc
-        except ImportError:
-            return web.json_response({'error': 'pyarrow not installed'}, status=500)
-
-        try:
-            exchange, symbol, timeframe, start_ts, end_ts, err = self._parse_export_params(request)
-            if err:
-                return web.json_response({'error': err}, status=400)
-
-            rows = await self._query_ml_features(exchange, symbol, timeframe, start_ts, end_ts)
-            if rows is None:
-                return web.json_response(
-                    {'error': 'No ml_features data. Run indicators first.'}, status=404
-                )
-
-            table = self._ml_features_to_arrow(rows)
-            buf = pa.BufferOutputStream()
-            with ipc.new_stream(buf, table.schema) as writer:
-                writer.write_table(table)
-
-            return web.Response(
-                body=buf.getvalue().to_pybytes(),
-                content_type='application/vnd.apache.arrow.stream',
-                headers={'Content-Disposition': f'attachment; filename="{symbol}_{timeframe}.arrow"'},
+                return web.json_response({'error': 'exchange and symbol required'}, status=400)
+            rows = await self.clickhouse._execute(
+                "SELECT DISTINCT timeframe, count() AS cnt FROM candles "
+                "WHERE exchange=%(ex)s AND symbol=%(sym)s "
+                "GROUP BY timeframe ORDER BY timeframe",
+                {"ex": exchange, "sym": symbol},
             )
+            timeframes = [{"timeframe": r[0], "candles_count": int(r[1])} for r in rows]
+            return web.json_response({'status': 'success', 'data': timeframes})
         except Exception as e:
-            self.logger.error(f"Arrow export error: {e}", exc_info=True)
             return web.json_response({'error': str(e)}, status=500)
-
-    async def export_features_parquet(self, request):
-        """
-        Export ml_features as Parquet file (compressed, universally compatible).
-
-        Query params: exchange, symbol, timeframe (default 4h), start, end (ISO dates)
-        """
-        try:
-            import pyarrow.parquet as pq
-            import pyarrow as pa
-            import io
-        except ImportError:
-            return web.json_response({'error': 'pyarrow not installed'}, status=500)
-
-        try:
-            exchange, symbol, timeframe, start_ts, end_ts, err = self._parse_export_params(request)
-            if err:
-                return web.json_response({'error': err}, status=400)
-
-            rows = await self._query_ml_features(exchange, symbol, timeframe, start_ts, end_ts)
-            if rows is None:
-                return web.json_response(
-                    {'error': 'No ml_features data. Run indicators first.'}, status=404
-                )
-
-            table = self._ml_features_to_arrow(rows)
-            buf = io.BytesIO()
-            pq.write_table(table, buf, compression='snappy')
-
-            return web.Response(
-                body=buf.getvalue(),
-                content_type='application/octet-stream',
-                headers={'Content-Disposition': f'attachment; filename="{symbol}_{timeframe}.parquet"'},
-            )
-        except Exception as e:
-            self.logger.error(f"Parquet export error: {e}", exc_info=True)
-            return web.json_response({'error': str(e)}, status=500)
-
-    # ── Export helpers ──────────────────────────────────────────────────────
-
-    def _parse_export_params(self, request):
-        """Parse common query params for export endpoints. Returns (exchange, symbol, tf, start, end, err)."""
-        exchange  = request.query.get('exchange', '').strip().lower()
-        symbol    = request.query.get('symbol', '').strip().upper()
-        timeframe = request.query.get('timeframe', '4h').strip().lower()
-        if not exchange or not symbol:
-            return None, None, None, None, None, 'exchange and symbol are required'
-        start_ts = end_ts = None
-        try:
-            if request.query.get('start'):
-                start_ts = int(datetime.fromisoformat(request.query['start']).replace(tzinfo=timezone.utc).timestamp())
-            if request.query.get('end'):
-                end_ts = int(datetime.fromisoformat(request.query['end']).replace(tzinfo=timezone.utc).timestamp())
-        except ValueError as e:
-            return None, None, None, None, None, f'Invalid date: {e}'
-        return exchange, symbol, timeframe, start_ts, end_ts, None
-
-    async def _query_ml_features(self, exchange, symbol, timeframe, start_ts, end_ts):
-        """Query ml_features table and return raw rows (or None if empty)."""
-        from sqlalchemy import text as _text
-        where = ["exchange = :ex", "symbol = :sym", "timeframe = :tf"]
-        params = {'ex': exchange, 'sym': symbol, 'tf': timeframe}
-        if start_ts:
-            where.append("timestamp >= :start_ts"); params['start_ts'] = start_ts
-        if end_ts:
-            where.append("timestamp <= :end_ts"); params['end_ts'] = end_ts
-
-        async with self.database_manager.get_session() as session:
-            rows = (await session.execute(_text(
-                f"SELECT * FROM ml_features WHERE {' AND '.join(where)} ORDER BY timestamp ASC"
-            ), params)).fetchall()
-
-        return rows if rows else None
-
-    def _ml_features_to_arrow(self, rows):
-        """Convert ml_features query rows to a pyarrow Table with OHLCV + flat indicator columns."""
-        import pyarrow as pa
-        import json as _json
-
-        timestamps, opens, highs, lows, closes, volumes = [], [], [], [], [], []
-        features_list, labels, pnls = [], [], []
-
-        for r in rows:
-            timestamps.append(int(r.timestamp))
-            opens.append(float(r.open_price) if r.open_price is not None else None)
-            highs.append(float(r.high_price) if r.high_price is not None else None)
-            lows.append(float(r.low_price) if r.low_price is not None else None)
-            closes.append(float(r.close_price) if r.close_price is not None else None)
-            volumes.append(float(r.volume) if r.volume is not None else None)
-            features_list.append(r.features if isinstance(r.features, dict) else _json.loads(r.features or '{}'))
-            labels.append(int(r.trade_label) if r.trade_label is not None else None)
-            pnls.append(float(r.trade_pnl_pct) if r.trade_pnl_pct is not None else None)
-
-        # Collect all indicator keys across all rows
-        all_keys = sorted({k for f in features_list for k in f})
-
-        arrays = {
-            'timestamp':    pa.array(timestamps, type=pa.int64()),
-            'open_price':   pa.array(opens,      type=pa.float64()),
-            'high_price':   pa.array(highs,      type=pa.float64()),
-            'low_price':    pa.array(lows,        type=pa.float64()),
-            'close_price':  pa.array(closes,     type=pa.float64()),
-            'volume':       pa.array(volumes,    type=pa.float64()),
-            'trade_label':  pa.array(labels,     type=pa.int16()),
-            'trade_pnl_pct': pa.array(pnls,      type=pa.float64()),
-        }
-        for key in all_keys:
-            arrays[key] = pa.array(
-                [f.get(key) for f in features_list],
-                type=pa.float64(),
-            )
-
-        return pa.table(arrays)
 
     async def get_strategies_signals(self, request):
-        """Get all strategy signals for chart display"""
+        """Return strategy signals from ClickHouse for chart display."""
         try:
-            limit = int(request.query.get('limit', 1000))
-            
-            # Get all strategy signals from database
-            signals = await self.database_manager.get_all_strategy_signals(limit=limit)
-            
-            if signals is None:
-                return web.json_response({'error': 'Failed to fetch signals'}, status=500)
-            
-            # Convert signals to the format expected by the chart
-            connections_config = self.config_manager.get_config('connections').get('connections', {})
-            signals_data = []
-            for signal in signals:
-                conn_cfg = connections_config.get(signal.connection_name, {})
-                exchange = conn_cfg.get('exchange', 'unknown')
-                symbol = conn_cfg.get('symbol', 'UNKNOWN')
-                timeframe = conn_cfg.get('timeframe', 'unknown')
-                
-                signals_data.append({
-                    'id': signal.id,
-                    'strategy_name': signal.strategy_name,
-                    'connection_name': signal.connection_name,
-                    'exchange': exchange,
-                    'symbol': symbol,
-                    'timeframe': timeframe,
-                    'signal_type': signal.signal_type,
-                    'timestamp': signal.timestamp,
-                    'price': float(signal.price) if signal.price else None,
-                    'confidence': float(signal.confidence) if signal.confidence else None,
-                    'metadata': signal.meta_data or "{}"
-                })
-            
-            response_data = {
-                'status': 'success',
-                'data': {
-                    'signals': signals_data,
-                    'count': len(signals_data)
-                }
-            }
-            
-            return web.json_response(convert_decimals(response_data))
-            
-        except Exception as e:
-            self.logger.error(f"Error getting strategy signals: {e}")
-            return web.json_response({'error': str(e)}, status=500)
+            exchange = request.query.get('exchange', '').strip().lower()
+            symbol   = request.query.get('symbol',   '').strip().upper()
+            limit    = int(request.query.get('limit', 1000))
 
-    async def get_strategy_performance(self, request):
-        """Calculate strategy trading performance: pairs BUY/SELL signals into trades."""
-        try:
-            import math
-            from models.base import StrategySignal
-            from sqlalchemy import and_
+            where = "1=1"
+            kw: dict = {}
+            if exchange:
+                where += " AND exchange=%(ex)s"; kw["ex"] = exchange
+            if symbol:
+                where += " AND symbol=%(sym)s"; kw["sym"] = symbol
 
-            strategy_name = request.query.get('strategy_name', '').strip()
-            initial_capital = float(request.query.get('initial_capital', 10000))
-
-            if not strategy_name:
-                return web.json_response({'error': 'strategy_name is required'}, status=400)
-
-            from models.base import Candle as CandleModel
-
-            strategies_config = self.config_manager.get_config('strategies')
-            strategy_cfg = strategies_config.get('strategies', {}).get(strategy_name, {})
-            connection_name = strategy_cfg.get('connection', '')
-            connections_config = self.config_manager.get_config('connections')
-            conn_cfg = connections_config.get('connections', {}).get(connection_name, {})
-
-            async with self.database_manager.get_session() as session:
-                signals = session.query(StrategySignal).filter(
-                    and_(
-                        StrategySignal.strategy_name == strategy_name,
-                        StrategySignal.signal_type.in_(['buy', 'sell', 'BUY', 'SELL']),
-                        StrategySignal.price > 0,
-                    )
-                ).order_by(StrategySignal.timestamp.asc()).all()
-
-                signal_list = [
-                    {'type': s.signal_type.lower(), 'price': float(s.price), 'ts': s.timestamp}
-                    for s in signals
-                ]
-
-                # Fetch current market price (latest 1m candle close)
-                current_price = None
-                if conn_cfg:
-                    last_candle = session.query(CandleModel).filter(
-                        and_(
-                            CandleModel.exchange == conn_cfg.get('exchange', ''),
-                            CandleModel.symbol == conn_cfg.get('symbol', ''),
-                            CandleModel.timeframe == '1m',
-                        )
-                    ).order_by(CandleModel.timestamp.desc()).first()
-                    if last_candle:
-                        current_price = float(last_candle.close_price)
-
-            import time as _time
-            now_ts = int(_time.time())
-
-            #  Pair signals into trades (FIFO) 
-            # Each BUY = one Long entry. Each SELL closes the oldest open BUY (FIFO).
-            # Unmatched BUYs remain open — shown with current market price as exit.
-            trades = []
-            buy_queue = []   # FIFO queue of open BUY signals
-
-            for sig in signal_list:
-                if sig['type'] == 'buy':
-                    buy_queue.append(sig)
-                elif sig['type'] == 'sell' and buy_queue:
-                    entry = buy_queue.pop(0)
-                    exit_price = sig['price']
-                    pnl_pct = (exit_price - entry['price']) / entry['price'] * 100
-                    duration_sec = sig['ts'] - entry['ts']
-                    trades.append({
-                        'entry_time': entry['ts'],
-                        'exit_time': sig['ts'],
-                        'entry_price': entry['price'],
-                        'exit_price': exit_price,
-                        'pnl_pct': pnl_pct,
-                        'duration_days': round(duration_sec / 86400, 1),
-                        'open': False,
-                        'win': pnl_pct > 0,
-                    })
-
-            # Open positions: each remaining BUY is its own open trade
-            open_trades = []
-            for b in buy_queue:
-                mark_price = current_price or b['price']
-                pnl_pct = (mark_price - b['price']) / b['price'] * 100
-                open_trades.append({
-                    'entry_time': b['ts'],
-                    'exit_time': now_ts,
-                    'entry_price': b['price'],
-                    'exit_price': mark_price,
-                    'pnl_pct': pnl_pct,
-                    'duration_days': round((now_ts - b['ts']) / 86400, 1),
-                    'open': True,
-                    'win': pnl_pct > 0,
-                })
-
-            # For summary stats: include open trades marked-to-market
-            all_trades = trades + open_trades
-
-            # Legacy single open_trade summary for banner
-            open_trade = None
-            if buy_queue:
-                avg_entry = sum(b['price'] for b in buy_queue) / len(buy_queue)
-                open_trade = {
-                    'entry_time': buy_queue[0]['ts'],
-                    'avg_entry': avg_entry,
-                    'num_entries': len(buy_queue),
-                    'current_price': current_price,
-                }
-
-            #  Compute statistics 
-            if not trades:
-                return web.json_response({
-                    'status': 'success',
-                    'strategy_name': strategy_name,
-                    'initial_capital': initial_capital,
-                    'stats': None,
-                    'open_trade': open_trade,
-                    'trades': [],
-                })
-
-            # Stats include open trades (mark-to-market) — same as TradingView
-            wins = [t for t in all_trades if t['win']]
-            losses = [t for t in all_trades if not t['win']]
-
-            # Capital per trade = fixed allocation (initial_capital / total entries)
-            # This prevents compounding distortion from overlapping positions.
-            n_total = len(all_trades)
-            capital_per_trade = initial_capital / n_total if n_total else initial_capital
-
-            net_profit_usd = sum(t['pnl_pct'] / 100 * capital_per_trade for t in all_trades)
-            net_profit_pct = net_profit_usd / initial_capital * 100
-            final_capital = initial_capital + net_profit_usd
-
-            gross_profit_usd = sum(t['pnl_pct'] / 100 * capital_per_trade for t in wins)
-            gross_loss_usd = abs(sum(t['pnl_pct'] / 100 * capital_per_trade for t in losses))
-            gross_profit_pct = sum(t['pnl_pct'] for t in wins)
-            gross_loss_pct = abs(sum(t['pnl_pct'] for t in losses))
-            profit_factor = (gross_profit_usd / gross_loss_usd) if gross_loss_usd > 0 else None
-
-            win_rate = len(wins) / n_total * 100 if n_total else 0
-            avg_trade_pct = sum(t['pnl_pct'] for t in all_trades) / n_total if n_total else 0
-            avg_win_pct = (gross_profit_pct / len(wins)) if wins else 0
-            avg_loss_pct = (-gross_loss_pct / len(losses)) if losses else 0
-
-            # Max drawdown on equity curve (sequential, equal allocation)
-            running = initial_capital
-            peak = initial_capital
-            max_dd_usd = 0.0
-            max_dd_pct = 0.0
-            for t in all_trades:
-                running += t['pnl_pct'] / 100 * capital_per_trade
-                if running > peak:
-                    peak = running
-                dd = peak - running
-                dd_pct = dd / peak * 100 if peak > 0 else 0
-                if dd > max_dd_usd:
-                    max_dd_usd = dd
-                if dd_pct > max_dd_pct:
-                    max_dd_pct = dd_pct
-
-            # Sharpe ratio (trade-level)
-            returns = [t['pnl_pct'] for t in all_trades]
-            mean_r = sum(returns) / len(returns) if returns else 0
-            if len(returns) > 1:
-                variance = sum((r - mean_r) ** 2 for r in returns) / (len(returns) - 1)
-                std_r = math.sqrt(variance)
-                sharpe = (mean_r / std_r) * math.sqrt(len(returns)) if std_r > 0 else 0
-            else:
-                sharpe = 0
-
-            stats = {
-                'net_profit_usd': round(net_profit_usd, 2),
-                'net_profit_pct': round(net_profit_pct, 2),
-                'gross_profit_pct': round(gross_profit_pct, 2),
-                'gross_loss_pct': round(gross_loss_pct, 2),
-                'max_drawdown_usd': round(max_dd_usd, 2),
-                'max_drawdown_pct': round(max_dd_pct, 2),
-                'total_trades': n_total,
-                'closed_trades': len(trades),
-                'open_trades_count': len(open_trades),
-                'winning_trades': len(wins),
-                'losing_trades': len(losses),
-                'win_rate': round(win_rate, 1),
-                'profit_factor': round(profit_factor, 2) if profit_factor is not None else None,
-                'avg_trade_pct': round(avg_trade_pct, 2),
-                'avg_win_pct': round(avg_win_pct, 2),
-                'avg_loss_pct': round(avg_loss_pct, 2),
-                'largest_win_pct': round(max((t['pnl_pct'] for t in wins), default=0), 2),
-                'largest_loss_pct': round(min((t['pnl_pct'] for t in losses), default=0), 2),
-                'sharpe_ratio': round(sharpe, 2),
-                'final_capital': round(final_capital, 2),
-                'capital_per_trade': round(capital_per_trade, 2),
-                'current_price': current_price,
-            }
-
-            # Combine closed + open trades, sorted newest-first (like TradingView)
-            all_trades_sorted = sorted(all_trades, key=lambda t: t['entry_time'], reverse=True)
-            trades_out = [
-                {
-                    'num': n_total - i,
-                    'entry_time': t['entry_time'],
-                    'exit_time': t['exit_time'],
-                    'entry_price': round(t['entry_price'], 4),
-                    'exit_price': round(t['exit_price'], 4),
-                    'pnl_pct': round(t['pnl_pct'], 2),
-                    'pnl_usd': round(t['pnl_pct'] / 100 * capital_per_trade, 2),
-                    'duration_days': t['duration_days'],
-                    'open': t['open'],
-                    'win': t['win'],
-                }
-                for i, t in enumerate(all_trades_sorted)
+            rows = await self.clickhouse._execute(
+                f"SELECT timestamp, strategy_type, signal_type, confidence, price, metadata "
+                f"FROM strategy_signals WHERE {where} "
+                f"ORDER BY timestamp DESC LIMIT {int(limit)}",
+                kw,
+            )
+            signals = [
+                {"timestamp": r[0], "strategy_name": r[1], "signal_type": r[2],
+                 "confidence": float(r[3]), "price": float(r[4]),
+                 "metadata": json.loads(r[5]) if r[5] else {}}
+                for r in rows
             ]
-
-            return web.json_response(convert_decimals({
-                'status': 'success',
-                'strategy_name': strategy_name,
-                'initial_capital': initial_capital,
-                'stats': stats,
-                'open_trade': open_trade,
-                'trades': trades_out,
-            }))
-
+            return web.json_response({'status': 'success', 'data': {'signals': signals, 'count': len(signals)}})
         except Exception as e:
-            self.logger.error(f"Error computing strategy performance: {e}")
-            import traceback
-            self.logger.error(traceback.format_exc())
             return web.json_response({'error': str(e)}, status=500)
 
-    async def backfill_signal_prices(self, request):
-        """Backfill price=0 signals with actual candle close prices"""
+    async def get_progress(self, request):
+        """Return candle counts per (exchange, symbol, timeframe) from ClickHouse."""
         try:
-            from models.base import StrategySignal, Candle
-            from sqlalchemy import and_
-
-            connections_config = self.config_manager.get_config('connections').get('connections', {})
-
-            updated = 0
-            skipped = 0
-
-            async with self.database_manager.get_session() as session:
-                signals = session.query(StrategySignal).filter(
-                    StrategySignal.price == 0
-                ).all()
-
-                for signal in signals:
-                    conn_cfg = connections_config.get(signal.connection_name, {})
-                    if not conn_cfg:
-                        skipped += 1
-                        continue
-
-                    # Determine source timeframe from indicators config
-                    indicators_config = self.config_manager.get_config('indicators').get('indicators', {})
-                    strategies_config = self.config_manager.get_config('strategies').get('strategies', {})
-                    strategy_cfg = strategies_config.get(signal.strategy_name, {})
-                    required_indicators = strategy_cfg.get('required_indicators', [])
-                    base_indicator = strategy_cfg.get('base_indicator', required_indicators[0] if required_indicators else None)
-                    source_timeframe = '4h'
-                    if base_indicator and base_indicator in indicators_config:
-                        source_timeframe = indicators_config[base_indicator].get('source_timeframe', '4h')
-
-                    candle = session.query(Candle).filter(
-                        and_(
-                            Candle.exchange == conn_cfg.get('exchange', ''),
-                            Candle.symbol == conn_cfg.get('symbol', ''),
-                            Candle.timeframe == source_timeframe,
-                            Candle.timestamp == signal.timestamp
-                        )
-                    ).first()
-
-                    if candle:
-                        signal.price = candle.close_price
-                        updated += 1
-                    else:
-                        skipped += 1
-
-                session.commit()
-
-            return web.json_response({
-                'status': 'success',
-                'updated': updated,
-                'skipped': skipped
-            })
-
+            rows = await self.clickhouse._execute(
+                "SELECT exchange, symbol, timeframe, count() AS cnt, "
+                "min(timestamp) AS first_ts, max(timestamp) AS last_ts "
+                "FROM candles GROUP BY exchange, symbol, timeframe "
+                "ORDER BY exchange, symbol, timeframe"
+            )
+            pairs = []
+            for r in rows:
+                pairs.append({
+                    'exchange': r[0], 'symbol': r[1], 'timeframe': r[2],
+                    'candle_count': int(r[3]),
+                    'first_candle': datetime.fromtimestamp(int(r[4]), tz=timezone.utc).strftime('%Y-%m-%d') if r[4] else None,
+                    'last_candle':  datetime.fromtimestamp(int(r[5]), tz=timezone.utc).strftime('%Y-%m-%d') if r[5] else None,
+                })
+            return web.json_response({'pairs': pairs})
         except Exception as e:
-            self.logger.error(f"Error backfilling signal prices: {e}")
             return web.json_response({'error': str(e)}, status=500)
+
+    # ------------------------------------------------------------------ #
+    # HTML pages                                                           #
+    # ------------------------------------------------------------------ #
 
     @aiohttp_jinja2.template('dashboard.html')
     async def dashboard(self, request):
-        """Dashboard page"""
-        try:
-            # Get basic stats for dashboard
-            stats = await self.database_manager.get_database_stats()
-            
-            return {
-                'title': 'Trading Bot Dashboard',
-                'stats': convert_decimals(stats),
-                'timestamp': datetime.now(timezone.utc).isoformat()
-            }
-        except Exception as e:
-            self.logger.error(f"Error loading dashboard: {e}")
-            return {
-                'title': 'Trading Bot Dashboard',
-                'error': str(e),
-                'timestamp': datetime.now(timezone.utc).isoformat()
-            }
+        return {
+            'title': 'Trading Bot Dashboard',
+            'timestamp': datetime.now(timezone.utc).isoformat(),
+        }
     
     @aiohttp_jinja2.template('trading_chart.html')
     async def trading_chart(self, request):
@@ -1452,185 +659,6 @@ class TradingBotAPI:
                 'error': str(e)
             }
 
-    @aiohttp_jinja2.template('progress.html')
-    async def progress_page(self, request):
-        return {'title': 'Pipeline Progress'}
-
-    async def get_progress(self, request):
-        """Return pipeline progress for candles, aggregation, indicators and strategies."""
-        try:
-            cached, hit = _get_cached('progress', 120.0)
-            if hit:
-                return web.json_response(cached)
-
-            from sqlalchemy import text
-
-            connections_config = self.config_manager.get_config('connections').get('connections', {})
-            indicators_config = self.config_manager.get_config('indicators').get('indicators', {})
-            strategies_config = self.config_manager.get_config('strategies').get('strategies', {})
-            aggregation_config = self.config_manager.get_config('aggregation').get('aggregation', {})
-            source_mapping = aggregation_config.get('source_mapping', {})
-
-            async with self.database_manager.get_session() as session:
-                # ── Candles ────────────────────────────────────────────────────
-                candle_rows = (await session.execute(text("""
-                    SELECT exchange, symbol, timeframe, source_type,
-                           COUNT(*) AS cnt,
-                           MIN(timestamp) AS first_ts,
-                           MAX(timestamp) AS last_ts
-                    FROM candles
-                    GROUP BY exchange, symbol, timeframe, source_type
-                    ORDER BY exchange, symbol, timeframe, source_type
-                """))).fetchall()
-
-                candle_map = {}   # (exchange, symbol, timeframe, source_type) → row
-                for r in candle_rows:
-                    candle_map[(r.exchange, r.symbol, r.timeframe, r.source_type)] = r
-
-                # ── Indicators ─────────────────────────────────────────────────
-                ind_rows = (await session.execute(text("""
-                    SELECT indicator_name, exchange, symbol, timeframe,
-                           COUNT(*) AS cnt,
-                           MIN(timestamp) AS first_ts,
-                           MAX(timestamp) AS last_ts
-                    FROM indicators
-                    GROUP BY indicator_name, exchange, symbol, timeframe
-                """))).fetchall()
-                ind_map = {r.indicator_name: r for r in ind_rows}
-
-                # ── Strategies ─────────────────────────────────────────────────
-                strat_rows = (await session.execute(text("""
-                    SELECT strategy_name, COUNT(*) AS cnt,
-                           MIN(timestamp) AS first_ts,
-                           MAX(timestamp) AS last_ts
-                    FROM strategy_signals
-                    GROUP BY strategy_name
-                """))).fetchall()
-                strat_map = {r.strategy_name: r for r in strat_rows}
-
-                # Base indicator timestamps (denominator for strategy progress)
-                base_ind_counts = {}
-                for name, cfg in strategies_config.items():
-                    base_ind = cfg.get('base_indicator') or (cfg.get('required_indicators') or [None])[0]
-                    if base_ind and base_ind not in base_ind_counts:
-                        row = (await session.execute(text(
-                            "SELECT COUNT(*) AS cnt FROM indicators WHERE indicator_name = :n"
-                        ), {'n': base_ind})).fetchone()
-                        base_ind_counts[base_ind] = row.cnt if row else 0
-
-            # ── Build pairs info ───────────────────────────────────────────────
-            pairs = []
-            for conn_name, cfg in connections_config.items():
-                ex, sym, tf = cfg['exchange'], cfg['symbol'], cfg['timeframe']
-                raw = candle_map.get((ex, sym, tf, 'exchange')) or candle_map.get((ex, sym, tf, 'realtime'))
-                hist_start = cfg.get('historical', {}).get('start_date', 'N/A')
-                pairs.append({
-                    'connection': conn_name,
-                    'exchange': ex,
-                    'symbol': sym,
-                    'timeframe': tf,
-                    'historical_start': hist_start,
-                    'candle_count': raw.cnt if raw else 0,
-                    'first_candle': datetime.fromtimestamp(raw.first_ts, tz=timezone.utc).strftime('%Y-%m-%d') if raw and raw.first_ts else None,
-                    'last_candle': datetime.fromtimestamp(raw.last_ts, tz=timezone.utc).strftime('%Y-%m-%d') if raw and raw.last_ts else None,
-                })
-
-            # ── Build aggregation progress ─────────────────────────────────────
-            tf_seconds = {'1m': 60, '5m': 300, '1h': 3600, '4h': 14400,
-                          '1d': 86400, '1w': 604800, '1M': 2592000}
-
-            aggregation = []
-            seen_agg = set()
-            for map_key, src_tf in source_mapping.items():
-                parts = map_key.split(':')
-                if len(parts) != 3:
-                    continue
-                ex, sym, tgt_tf = parts
-                agg_key = (ex, sym, tgt_tf)
-                if agg_key in seen_agg:
-                    continue
-                seen_agg.add(agg_key)
-
-                actual_row = candle_map.get((ex, sym, tgt_tf, 'aggregated'))
-                actual = actual_row.cnt if actual_row else 0
-
-                # Expected ≈ source candle count / ratio
-                src_row = (candle_map.get((ex, sym, src_tf, 'aggregated'))
-                           or candle_map.get((ex, sym, src_tf, 'exchange'))
-                           or candle_map.get((ex, sym, src_tf, 'realtime')))
-                ratio = tf_seconds.get(tgt_tf, 1) // tf_seconds.get(src_tf, 1) if tf_seconds.get(src_tf) else 1
-                expected = (src_row.cnt // ratio) if (src_row and ratio > 0) else 0
-
-                pct = round(actual / expected * 100, 1) if expected > 0 else (100.0 if actual > 0 else 0.0)
-                aggregation.append({
-                    'exchange': ex, 'symbol': sym,
-                    'source_tf': src_tf, 'target_tf': tgt_tf,
-                    'actual': actual, 'expected': expected, 'pct': pct,
-                    'first': datetime.fromtimestamp(actual_row.first_ts, tz=timezone.utc).strftime('%Y-%m-%d') if actual_row and actual_row.first_ts else None,
-                    'last':  datetime.fromtimestamp(actual_row.last_ts,  tz=timezone.utc).strftime('%Y-%m-%d') if actual_row and actual_row.last_ts  else None,
-                })
-            aggregation.sort(key=lambda x: (x['exchange'], x['symbol'], tf_seconds.get(x['target_tf'], 0)))
-
-            # ── Build indicator progress ───────────────────────────────────────
-            indicators_progress = []
-            for ind_name, cfg in indicators_config.items():
-                if not cfg.get('enabled', True):
-                    continue
-                ex = connections_config.get(cfg['connection'], {}).get('exchange', '')
-                sym = connections_config.get(cfg['connection'], {}).get('symbol', '')
-                src_tf = cfg.get('source_timeframe', '1m')
-
-                actual_row = ind_map.get(ind_name)
-                actual = actual_row.cnt if actual_row else 0
-
-                # Expected ≈ candles for that timeframe
-                src_candle = (candle_map.get((ex, sym, src_tf, 'aggregated'))
-                              or candle_map.get((ex, sym, src_tf, 'exchange'))
-                              or candle_map.get((ex, sym, src_tf, 'realtime')))
-                expected = src_candle.cnt if src_candle else 0
-                pct = round(actual / expected * 100, 1) if expected > 0 else (100.0 if actual > 0 else 0.0)
-
-                indicators_progress.append({
-                    'name': ind_name, 'symbol': sym, 'timeframe': src_tf,
-                    'plugin': cfg.get('plugin', ''),
-                    'actual': actual, 'expected': expected, 'pct': pct,
-                    'first': datetime.fromtimestamp(actual_row.first_ts, tz=timezone.utc).strftime('%Y-%m-%d') if actual_row and actual_row.first_ts else None,
-                    'last':  datetime.fromtimestamp(actual_row.last_ts,  tz=timezone.utc).strftime('%Y-%m-%d') if actual_row and actual_row.last_ts  else None,
-                })
-
-            # ── Build strategy progress ────────────────────────────────────────
-            strategies_progress = []
-            for strat_name, cfg in strategies_config.items():
-                if not cfg.get('enabled', True):
-                    continue
-                base_ind = cfg.get('base_indicator') or (cfg.get('required_indicators') or [None])[0]
-                actual_row = strat_map.get(strat_name)
-                actual = actual_row.cnt if actual_row else 0
-                expected = base_ind_counts.get(base_ind, 0) if base_ind else 0
-                pct = round(actual / expected * 100, 1) if expected > 0 else (100.0 if actual > 0 else 0.0)
-                conn = cfg.get('connection', '')
-                sym = connections_config.get(conn, {}).get('symbol', '')
-                strategies_progress.append({
-                    'name': strat_name, 'symbol': sym,
-                    'plugin': cfg.get('plugin', ''), 'base_indicator': base_ind,
-                    'actual': actual, 'expected': expected, 'pct': pct,
-                    'first': datetime.fromtimestamp(actual_row.first_ts, tz=timezone.utc).strftime('%Y-%m-%d') if actual_row and actual_row.first_ts else None,
-                    'last':  datetime.fromtimestamp(actual_row.last_ts,  tz=timezone.utc).strftime('%Y-%m-%d') if actual_row and actual_row.last_ts  else None,
-                })
-
-            result = {
-                'pairs': pairs,
-                'aggregation': aggregation,
-                'indicators': indicators_progress,
-                'strategies': strategies_progress,
-            }
-            _set_cached('progress', result)
-            return web.json_response(result)
-
-        except Exception as e:
-            self.logger.error(f"Error getting progress: {e}")
-            return web.json_response({'error': str(e)}, status=500)
-
     async def start_server(self, host='0.0.0.0', port=8080):
         """Start the API server"""
         self.logger.info(f"Starting API server on {host}:{port}")
@@ -1648,13 +676,8 @@ class TradingBotAPI:
         return runner
     
     async def cleanup(self):
-        """Cleanup resources"""
-        self.logger.info("Cleaning up API v3...")
-        
-        if self.database_manager:
-            self.database_manager.close()
-        
-        self.logger.info("API v3 cleanup completed")
+        if self.clickhouse:
+            await self.clickhouse.close()
 
 
 async def main():

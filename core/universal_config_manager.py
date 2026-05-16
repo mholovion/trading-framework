@@ -87,7 +87,8 @@ class UniversalConfigManager:
         
     def load_all_configs(self, symbol_filter: str = None) -> Dict[str, Dict[str, Any]]:
         """Load all required configuration files and expand templates."""
-        required_configs = ['main', 'connections', 'indicators', 'strategies', 'aggregation']
+        required_configs  = ['main', 'connections']
+        optional_configs  = ['indicators', 'strategies', 'aggregation']
 
         self.logger.info("Loading all configurations...")
 
@@ -97,6 +98,13 @@ class UniversalConfigManager:
             except FileNotFoundError as e:
                 self.logger.error(f"Missing required configuration: {config_name}")
                 raise e
+
+        for config_name in optional_configs:
+            try:
+                self.load_config(config_name)
+            except FileNotFoundError:
+                self.logger.debug(f"Optional config '{config_name}' not found, skipping")
+                self._configs.setdefault(config_name, {})
 
         # Expand templates into full per-symbol configs before validation
         self.expand_from_templates(symbol_filter=symbol_filter)

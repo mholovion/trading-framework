@@ -62,24 +62,147 @@
   }
   .add-ind-btn:hover { color: var(--text); border-color: var(--text); }
 
-  /* indicator dropdown — fixed so overflow:hidden on topbar doesn't clip it */
-  .ind-dropdown {
-    position: fixed; top: 44px; left: 0; min-width: 280px; max-height: 320px;
-    background: var(--surface); border: 1px solid var(--border); border-radius: 6px;
-    overflow-y: auto; z-index: 200; box-shadow: 0 4px 20px rgba(0,0,0,.5);
-    display: none;
+  /* ── Indicator library modal ── */
+  .ind-modal {
+    position: fixed; inset: 0; background: rgba(0,0,0,.55); z-index: 300;
+    display: none; align-items: flex-start; justify-content: center; padding-top: 56px;
   }
-  .ind-dropdown.open { display: block; }
-  .ind-group { padding: 6px 0; border-bottom: 1px solid var(--border); }
-  .ind-group:last-child { border-bottom: none; }
-  .ind-group-label { padding: 4px 12px; font-size: 10px; color: var(--dim); letter-spacing: .5px; text-transform: uppercase; }
-  .ind-item {
-    padding: 6px 12px; cursor: pointer; display: flex; justify-content: space-between;
-    align-items: center; font-size: 12px;
+  .ind-modal.open { display: flex; }
+  .ind-modal-box {
+    background: var(--surface); border: 1px solid var(--border); border-radius: 8px;
+    width: 700px; max-height: 72vh; display: flex; flex-direction: column;
+    box-shadow: 0 8px 32px rgba(0,0,0,.6); overflow: hidden;
   }
-  .ind-item:hover { background: var(--border); }
-  .ind-item.active { color: var(--accent); }
-  .ind-item-count { font-size: 11px; color: var(--dim); }
+  .ind-modal-head {
+    display: flex; align-items: center; gap: 8px;
+    padding: 10px 12px; border-bottom: 1px solid var(--border); flex-shrink: 0;
+  }
+  .ind-modal-head input {
+    flex: 1; background: var(--bg); border: 1px solid var(--border); color: var(--text);
+    padding: 5px 10px; border-radius: 4px; font-size: 13px; outline: none;
+  }
+  .ind-modal-head input:focus { border-color: var(--accent); }
+  .ind-modal-close {
+    background: none; border: none; color: var(--dim); font-size: 18px;
+    cursor: pointer; padding: 0 4px; line-height: 1; flex-shrink: 0;
+  }
+  .ind-modal-close:hover { color: var(--text); }
+  .ind-modal-body { display: flex; flex: 1; overflow: hidden; }
+
+  /* Left: scrollable indicator list */
+  .ind-lib-list {
+    width: 240px; flex-shrink: 0; overflow-y: auto; border-right: 1px solid var(--border);
+  }
+  .ind-lib-list::-webkit-scrollbar { width: 4px; }
+  .ind-lib-list::-webkit-scrollbar-thumb { background: var(--muted); border-radius: 2px; }
+  .ind-cat-label {
+    padding: 6px 12px 3px; font-size: 10px; color: var(--dim);
+    letter-spacing: .5px; text-transform: uppercase; position: sticky; top: 0;
+    background: var(--surface); z-index: 1;
+  }
+  .ind-lib-item {
+    padding: 6px 12px; cursor: pointer; font-size: 12px;
+    display: flex; align-items: center; justify-content: space-between;
+    transition: background .08s;
+  }
+  .ind-lib-item:hover  { background: var(--border); }
+  .ind-lib-item.sel    { background: rgba(41,98,255,.2); color: var(--accent); }
+  .ind-lib-item-badge  { font-size: 10px; color: var(--dim); }
+  .ind-new-btn {
+    margin: 6px 10px; padding: 4px 10px; border-radius: 4px;
+    border: 1px dashed var(--muted); background: transparent; color: var(--dim);
+    font-size: 11px; cursor: pointer; width: calc(100% - 20px); text-align: left;
+  }
+  .ind-new-btn:hover { color: var(--text); border-color: var(--text); }
+
+  /* Right: settings panel */
+  .ind-settings {
+    flex: 1; overflow-y: auto; padding: 16px; display: flex; flex-direction: column; gap: 14px;
+  }
+  .ind-settings-title { font-size: 14px; font-weight: 600; }
+  .ind-settings-group { display: flex; flex-direction: column; gap: 8px; }
+  .ind-settings-row   { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+  .ind-settings-label { font-size: 12px; color: var(--dim); flex-shrink: 0; width: 80px; }
+  .ind-settings-row input[type=number], .ind-settings-row select {
+    flex: 1; background: var(--bg); border: 1px solid var(--border); color: var(--text);
+    padding: 4px 8px; border-radius: 4px; font-size: 12px; outline: none;
+  }
+  .ind-settings-row input:focus, .ind-settings-row select:focus { border-color: var(--accent); }
+  .ind-settings-tf {
+    flex: 1; background: var(--bg); border: 1px solid var(--border); color: var(--text);
+    padding: 4px 8px; border-radius: 4px; font-size: 12px; outline: none; cursor: pointer;
+  }
+  .ind-settings-actions { display: flex; gap: 8px; margin-top: 4px; }
+  .btn-apply {
+    flex: 1; padding: 6px 14px; border-radius: 4px; border: none;
+    background: var(--accent); color: #fff; font-size: 12px; cursor: pointer;
+    transition: opacity .12s;
+  }
+  .btn-apply:hover { opacity: .85; }
+  .btn-apply:disabled { opacity: .4; cursor: default; }
+  .btn-cancel {
+    padding: 6px 14px; border-radius: 4px; border: 1px solid var(--border);
+    background: transparent; color: var(--dim); font-size: 12px; cursor: pointer;
+  }
+  .btn-cancel:hover { color: var(--text); }
+  .ind-progress {
+    font-size: 11px; color: var(--dim); display: none;
+    align-items: center; gap: 6px;
+  }
+  .ind-progress.on { display: flex; }
+  .ind-progress .spin { width: 12px; height: 12px; margin: 0; }
+
+  /* ── Custom indicator editor modal ── */
+  .editor-modal {
+    position: fixed; inset: 0; background: rgba(0,0,0,.65); z-index: 400;
+    display: none; align-items: center; justify-content: center;
+  }
+  .editor-modal.open { display: flex; }
+  .editor-box {
+    background: var(--surface); border: 1px solid var(--border); border-radius: 8px;
+    width: 720px; max-height: 85vh; display: flex; flex-direction: column;
+    box-shadow: 0 8px 32px rgba(0,0,0,.7); overflow: hidden;
+  }
+  .editor-head {
+    display: flex; align-items: center; gap: 10px; padding: 10px 14px;
+    border-bottom: 1px solid var(--border); flex-shrink: 0;
+  }
+  .editor-head-title { font-size: 13px; font-weight: 600; }
+  .editor-head input {
+    background: var(--bg); border: 1px solid var(--border); color: var(--text);
+    padding: 4px 8px; border-radius: 4px; font-size: 12px; outline: none; width: 160px;
+  }
+  .editor-head input:focus { border-color: var(--accent); }
+  .editor-close {
+    margin-left: auto; background: none; border: none; color: var(--dim);
+    font-size: 18px; cursor: pointer; padding: 0 4px;
+  }
+  .editor-close:hover { color: var(--text); }
+  .editor-params {
+    padding: 8px 14px; border-bottom: 1px solid var(--border); flex-shrink: 0;
+    display: flex; flex-wrap: wrap; gap: 6px; align-items: center;
+  }
+  .editor-param-chip {
+    display: flex; align-items: center; gap: 4px; padding: 2px 8px;
+    border: 1px solid var(--border); border-radius: 10px; font-size: 11px;
+  }
+  .editor-param-chip span { color: var(--dim); }
+  .editor-param-chip button { background: none; border: none; color: var(--dim); cursor: pointer; font-size: 13px; padding: 0; }
+  .editor-param-chip button:hover { color: var(--red); }
+  .editor-add-param {
+    padding: 2px 8px; border: 1px dashed var(--muted); border-radius: 10px;
+    background: transparent; color: var(--dim); font-size: 11px; cursor: pointer;
+  }
+  .editor-add-param:hover { color: var(--text); border-color: var(--text); }
+  #monacoMount { flex: 1; min-height: 0; }
+  .editor-hint {
+    padding: 4px 14px; font-size: 10px; color: var(--dim);
+    border-top: 1px solid var(--border); flex-shrink: 0;
+  }
+  .editor-actions {
+    display: flex; gap: 8px; padding: 10px 14px;
+    border-top: 1px solid var(--border); flex-shrink: 0;
+  }
 
   /* price */
   .price-area { margin-left: auto; display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
@@ -98,9 +221,22 @@
   /* ── Chart area ── */
   .chart-area { display: flex; flex-direction: column; overflow: hidden; position: relative; }
   #chartMain   { width: 100%; flex: 1 1 auto; min-height: 0; }
-  #chartVolume { width: 100%; flex: 0 0 80px; border-top: 1px solid var(--border); }
-  #chartRsi    { width: 100%; flex: 0 0 110px; border-top: 1px solid var(--border); }
-  #chartVolume.h, #chartRsi.h { display: none; }
+  #chartVolume { width: 100%; flex: 0 0 auto; }
+  #chartSub    { width: 100%; flex: 0 0 auto; }
+  #chartVolume.h, #chartSub.h { display: none; }
+  .chart-resizer {
+    width: 100%; height: 5px; flex-shrink: 0; cursor: row-resize; position: relative; z-index: 5;
+    background: var(--border);
+    transition: background .12s;
+  }
+  .chart-resizer::after {
+    content: ''; position: absolute; left: 50%; top: 50%; transform: translate(-50%,-50%);
+    width: 32px; height: 3px; border-radius: 2px;
+    background: var(--muted); opacity: 0; transition: opacity .15s;
+  }
+  .chart-resizer:hover::after, .chart-resizer.dragging::after { opacity: 1; }
+  .chart-resizer:hover, .chart-resizer.dragging { background: #2a3047; }
+  .chart-resizer.h { display: none; }
 
   /* status bar */
   #status {
@@ -115,11 +251,31 @@
     display: flex; align-items: center; justify-content: center; z-index: 10; font-size: 13px; color: var(--dim);
   }
   #loader.h { display: none; }
+  #loadMoreBar {
+    position: absolute; top: 4px; left: 50%; transform: translateX(-50%);
+    background: rgba(19,23,34,.85); border: 1px solid var(--border); border-radius: 4px;
+    padding: 3px 10px; font-size: 11px; color: var(--dim); z-index: 6;
+    display: flex; align-items: center; gap: 6px; white-space: nowrap;
+  }
+  #loadMoreBar.h { display: none; }
   .spin {
     width: 18px; height: 18px; border: 2px solid var(--border); border-top-color: var(--accent);
     border-radius: 50%; animation: spin .8s linear infinite; margin-right: 10px; flex-shrink: 0;
   }
   @keyframes spin { to { transform: rotate(360deg); } }
+
+  /* Single crosshair overlay — one dashed line spanning all panels */
+  #xhairLine {
+    position: absolute; top: 0; left: 0;
+    width: 0; border-left: 1px dashed rgba(255,255,255,0.35);
+    pointer-events: none; display: none; z-index: 4;
+  }
+  /* Horizontal indicator line on sub chart, follows crosshair */
+  #subHorzLine {
+    position: absolute; left: 0; width: 100%;
+    height: 0; border-top: 1px dashed rgba(255,255,255,0.35);
+    pointer-events: none; display: none; z-index: 4;
+  }
 
   /* error */
   #errBanner {
@@ -129,9 +285,34 @@
   }
 
   /* scrollbar */
-  .ind-dropdown::-webkit-scrollbar { width: 4px; }
-  .ind-dropdown::-webkit-scrollbar-track { background: var(--surface); }
-  .ind-dropdown::-webkit-scrollbar-thumb { background: var(--muted); border-radius: 2px; }
+  .ind-lib-list::-webkit-scrollbar-track { background: var(--surface); }
+  .ind-settings::-webkit-scrollbar { width: 4px; }
+  .ind-settings::-webkit-scrollbar-thumb { background: var(--muted); border-radius: 2px; }
+
+  /* ── OHLCV hover legend ── */
+  #chartMain { position: relative; }
+  #ohlcLegend {
+    position: absolute; top: 6px; left: 6px; z-index: 5;
+    font-size: 11px; pointer-events: none; display: flex; gap: 5px; align-items: center;
+    user-select: none; white-space: nowrap;
+  }
+  #ohlcLegend .ol-lbl { color: var(--dim); font-size: 10px; }
+
+  /* ── Sub-panel move buttons ── */
+  #chartVolume, #chartSub { position: relative; }
+  .panel-hdr {
+    position: absolute; top: 3px; left: 4px; z-index: 10;
+    display: flex; align-items: center; gap: 2px;
+    opacity: 0.35; transition: opacity .15s; pointer-events: all;
+  }
+  #chartVolume:hover .panel-hdr, #chartSub:hover .panel-hdr { opacity: 1; }
+  .panel-move-btn {
+    background: rgba(19,23,34,.85); border: 1px solid var(--muted); color: var(--dim);
+    width: 18px; height: 18px; border-radius: 3px; font-size: 10px; cursor: pointer;
+    padding: 0; line-height: 1; display: inline-flex; align-items: center; justify-content: center;
+  }
+  .panel-move-btn:hover { color: #fff; border-color: var(--text); background: var(--accent); }
+  .panel-move-btn:disabled { opacity: .25; cursor: default; }
 
   /* ── Strategy panel ── */
   #stratPanel {
@@ -207,8 +388,7 @@
 
     <!-- Indicator area -->
     <div class="ind-area" id="indArea">
-      <button class="add-ind-btn" onclick="toggleIndMenu(event)">+ Indicator</button>
-      <div class="ind-dropdown" id="indDropdown"></div>
+      <button class="add-ind-btn" onclick="openIndModal()">+ Indicator</button>
     </div>
 
     <div class="price-area">
@@ -217,6 +397,49 @@
     </div>
     <a href="/progress" class="nav-btn">Progress</a>
     <button class="nav-btn" id="btnStrat" onclick="toggleStratPanel()">Strategies</button>
+  </div>
+
+  <!-- Indicator library modal -->
+  <div class="ind-modal" id="indModal" onclick="onModalBgClick(event)">
+    <div class="ind-modal-box">
+      <div class="ind-modal-head">
+        <input id="indSearch" type="text" placeholder="Search indicators…" oninput="filterLibrary(this.value)" autofocus>
+        <button class="ind-modal-close" onclick="closeIndModal()">×</button>
+      </div>
+      <div class="ind-modal-body">
+        <!-- Left: indicator list -->
+        <div class="ind-lib-list" id="indLibList"></div>
+        <!-- Right: settings panel -->
+        <div class="ind-settings" id="indSettings">
+          <div style="color:var(--dim);font-size:12px;margin-top:20px;text-align:center">
+            Select an indicator from the list
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Custom indicator editor modal -->
+  <div class="editor-modal" id="editorModal" onclick="onEditorBgClick(event)">
+    <div class="editor-box">
+      <div class="editor-head">
+        <span class="editor-head-title">New Indicator</span>
+        <input id="editorName" type="text" placeholder="indicator_name">
+        <button class="editor-close" onclick="closeEditorModal()">×</button>
+      </div>
+      <div class="editor-params" id="editorParams">
+        <button class="editor-add-param" onclick="addEditorParam()">+ param</button>
+      </div>
+      <div id="monacoMount"></div>
+      <div class="editor-hint">
+        Available: <code>close open high low volume ts np ta</code> + your params above · assign <code>result</code>
+      </div>
+      <div class="editor-actions">
+        <button class="btn-cancel" onclick="closeEditorModal()">Cancel</button>
+        <button class="btn-apply" onclick="testCustomIndicator()" style="background:var(--muted)">▶ Test Run</button>
+        <button class="btn-apply" onclick="saveCustomIndicator()">💾 Save to Library</button>
+      </div>
+    </div>
   </div>
 
   <!-- Strategy panel -->
@@ -233,11 +456,31 @@
 
   <!-- Charts -->
   <div class="chart-area" id="chartArea">
-    <div id="chartMain"></div>
-    <div id="chartVolume"></div>
-    <div id="chartRsi"    class="h"></div>
+    <div id="chartMain">
+      <div id="ohlcLegend"></div>
+    </div>
+    <div class="chart-resizer h" id="resizerVol"></div>
+    <div id="chartVolume">
+      <div class="panel-hdr" id="volHdr">
+        <button class="panel-move-btn" id="volUpBtn" onclick="movePanel('vol',-1)" title="Move up">↑</button>
+        <button class="panel-move-btn" id="volDnBtn" onclick="movePanel('vol',1)"  title="Move down">↓</button>
+      </div>
+    </div>
+    <div class="chart-resizer h" id="resizerSub"></div>
+    <div id="chartSub" class="h">
+      <div class="panel-hdr" id="subHdr">
+        <button class="panel-move-btn" id="subUpBtn" onclick="movePanel('sub',-1)" title="Move up">↑</button>
+        <button class="panel-move-btn" id="subDnBtn" onclick="movePanel('sub',1)"  title="Move down">↓</button>
+      </div>
+    </div>
+
+    <!-- Single crosshair line spanning main+resizer+sub panels -->
+    <div id="xhairLine"></div>
+    <!-- Horizontal line on sub chart at current indicator value -->
+    <div id="subHorzLine"></div>
 
     <div id="loader"><div class="spin"></div><span id="loaderMsg">Loading…</span></div>
+    <div id="loadMoreBar" class="h"></div>
     <div id="errBanner"></div>
     <div id="status"></div>
   </div>
@@ -249,21 +492,25 @@ const S = {
   ex: '', sym: '', tf: '',
   layers: { candles: true, volume: true, signals: true },
   sources: [],
-  candles: [],          // loaded OHLCV array
-  allSignals: [],       // all signals (unfiltered)
-  allInds: [],          // available indicators from /status (objects with name, exchange, symbol, timeframe, count)
-  activeInds: new Map(),// name -> { on: bool, series: Series|null, rsiRefLines: [], data: [] }
+  candles: [],
+  allSignals: [],
+  allInds: [],           // stored indicators from /status
+  activeInds: new Map(), // key → { on, series, rsiRefLines, data, meta }
+  indMeta: new Map(),    // key → { display_name } for on-demand computed inds
 
-  charts: { main: null, vol: null, rsi: null },
-  series: { candle: null, line: null, vol: null, rsiMap: new Map() },
+  charts: { main: null, vol: null, sub: null },
+  series: { candle: null, line: null, vol: null },
   emaColors: ['#f6c90e','#a29bfe','#74b9ff','#fd79a8','#81ecec','#55efc4','#fdcb6e'],
   emaColorIdx: 0,
-  indColorMap: new Map(), // name -> color (stable across re-renders)
+  indColorMap: new Map(),
 
   loadingMore: false,
-  fitting: false,       // true while fitContent() is running — blocks lazy load
+  noMoreData: false,
+  fitting: false,
   oldestTs: null,
-  chartGen: 0,          // incremented on each loadChart() to cancel stale continuations
+  chartGen: 0,
+  panelH: { sub: 140 },
+  panelOrder: ['sub'],
 };
 
 // ═══ Boot ════════════════════════════════════════════════════════════
@@ -282,6 +529,7 @@ async function boot() {
     });
     buildSelects();
     initCharts();
+    initResizers();
     await loadChart();
   } catch (e) { showErr(e.message); }
   finally { load(false); }
@@ -328,10 +576,19 @@ function tfMin(tf) { return ({1:1,3:3,5:5,15:15,30:30,'1h':60,'2h':120,'4h':240,
 
 // ═══ Charts init ═════════════════════════════════════════════════════
 function initCharts() {
+  // Full crosshair line specs — all properties explicit to avoid v3.8 null errors
+  // when a partial object is merged with uninitialised internal defaults.
+  const _vLine = { visible: false, labelVisible: true,  color: '#758696', width: 1, style: 3, labelBackgroundColor: '#4c525e' };
+  const _hLine = { visible: true,  labelVisible: true,  color: '#758696', width: 1, style: 2, labelBackgroundColor: '#4c525e' };
+
   const base = {
-    layout: { background: { color: '#131722' }, textColor: '#787b86' },
+    layout: { background: { color: '#131722' }, textColor: '#c0c3cc' },
     grid:   { vertLines: { color: '#1a1e2a' }, horzLines: { color: '#1a1e2a' } },
-    crosshair: { mode: LightweightCharts.CrosshairMode.Normal },
+    crosshair: {
+      mode: LightweightCharts.CrosshairMode.Magnet,
+      vertLine: { ..._vLine },  // native vertLine hidden — CSS #xhairLine overlay used instead
+      horzLine: { ..._hLine },  // main chart shows horzLine at current price level
+    },
     timeScale: { timeVisible: true, secondsVisible: false, borderColor: '#2a2e39' },
     rightPriceScale: { borderColor: '#2a2e39' },
     handleScroll: { mouseWheel: true, pressedMouseMove: true },
@@ -340,28 +597,39 @@ function initCharts() {
   S.charts.main = LightweightCharts.createChart(g('chartMain'), { ...base });
   S.charts.vol  = LightweightCharts.createChart(g('chartVolume'), {
     ...base,
+    crosshair: { mode: LightweightCharts.CrosshairMode.Normal,
+                 vertLine: { ..._vLine }, horzLine: { ..._hLine, visible: false } },
     timeScale: { visible: false },
     rightPriceScale: { scaleMargins: { top: 0.05, bottom: 0 }, borderColor: '#2a2e39' },
   });
-  S.charts.rsi  = LightweightCharts.createChart(g('chartRsi'), {
+  S.charts.sub  = LightweightCharts.createChart(g('chartSub'), {
     ...base,
+    crosshair: {
+      mode: LightweightCharts.CrosshairMode.Normal,
+      vertLine: { ..._vLine },
+      horzLine: { ..._hLine, visible: false },  // CSS #subHorzLine used instead
+    },
     timeScale: { visible: false },
     rightPriceScale: { scaleMargins: { top: 0.1, bottom: 0.1 }, borderColor: '#2a2e39' },
   });
 
-  // sync
-  const all = [S.charts.main, S.charts.vol, S.charts.rsi];
-  all.forEach(src => {
-    src.timeScale().subscribeVisibleLogicalRangeChange(range => {
-      if (!range) return;
-      all.forEach(t => { if (t !== src) t.timeScale().setVisibleLogicalRange(range); });
-    });
+  // One-directional time sync: main → sub only.
+  // Sub chart has no visible time axis so the user cannot scroll it independently.
+  // Two-way sync caused jumps: when sub chart's data doesn't cover the full range
+  // of main, it auto-adjusts after setVisibleRange and fires a new event that
+  // shifts main back — removing the reverse direction eliminates that feedback loop.
+  S.charts.main.timeScale().subscribeVisibleTimeRangeChange(range => {
+    if (!range) return;
+    try { S.charts.sub.timeScale().setVisibleRange(range); } catch (_) {}
   });
 
   // lazy load on scroll to left edge — guarded by S.fitting to prevent loop after fitContent
   S.charts.main.timeScale().subscribeVisibleLogicalRangeChange(range => {
-    if (range && range.from < 5 && !S.loadingMore && !S.fitting) loadMore();
+    if (range && range.from < 20 && !S.loadingMore && !S.noMoreData && !S.fitting) loadMore();
   });
+
+  initCrosshairSync();
+  updatePanelOrder();
 
   new ResizeObserver(relayout).observe(g('chartArea'));
   // Size charts correctly after creation (important: chartVolume is visible at init)
@@ -370,13 +638,231 @@ function initCharts() {
 
 function relayout() {
   const W = g('chartArea').clientWidth, H = g('chartArea').clientHeight;
-  const volH = (S.layers.volume && !g('chartVolume').classList.contains('h')) ? 80  : 0;
-  const rsiH = (hasRsi()        && !g('chartRsi').classList.contains('h'))    ? 110 : 0;
-  try { S.charts.main.resize(W, Math.max(H - volH - rsiH, 100)); } catch (_) {}
-  if (volH) { try { S.charts.vol.resize(W, volH); } catch (_) {} }
-  if (rsiH) { try { S.charts.rsi.resize(W, rsiH); } catch (_) {} }
+  const statusH = (g('status').offsetHeight || 18) + 8;  // status bar + breathing room for time labels
+  const usableH = H - statusH;
+  const rsiVisible = hasRsi() && !g('chartSub').classList.contains('h');
+  const rsiH = rsiVisible ? S.panelH.sub : 0;
+
+  // Volume is an overlay on main chart — the separate vol panel stays hidden
+  g('chartVolume').classList.add('h');
+  g('resizerVol').classList.add('h');
+  g('chartSub').style.height = rsiH ? `${rsiH}px` : '';
+  g('resizerSub').classList.toggle('h', !rsiVisible);
+
+  try { S.charts.main.resize(W, Math.max(usableH - rsiH, 100)); } catch (_) {}
+  if (rsiH) { try { S.charts.sub.resize(W, rsiH); } catch (_) {} }
+  g('xhairLine').style.height = usableH + 'px';
+  updateTimeAxes();
 }
-function hasRsi() { return [...S.activeInds.entries()].some(([n, v]) => v.on && n.includes('rsi')); }
+function hasRsi() { return [...S.activeInds.values()].some(v => v.on && v.displayType === 'sub_panel'); }
+
+function initResizers() {
+  // panel: 'vol' | 'sub'
+  // dragging the handle UP shrinks the panel, DOWN grows it
+  function setupResizer(id, panel, minH, maxH) {
+    const el = g(id);
+    if (!el) return;
+    let startY, startH;
+
+    function onDown(clientY) {
+      startY = clientY;
+      startH = S.panelH[panel];
+      el.classList.add('dragging');
+      document.body.style.cursor = 'row-resize';
+      document.body.style.userSelect = 'none';
+    }
+    function onMove(clientY) {
+      // drag UP (startY > clientY) → expand panel; drag DOWN → shrink panel
+      const delta = startY - clientY;
+      S.panelH[panel] = Math.max(minH, Math.min(maxH, startH + delta));
+      relayout();
+    }
+    function onUp() {
+      el.classList.remove('dragging');
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+    }
+
+    // Mouse
+    el.addEventListener('mousedown', e => {
+      e.preventDefault();
+      onDown(e.clientY);
+      const mv = e2 => onMove(e2.clientY);
+      const up = () => { onUp(); document.removeEventListener('mousemove', mv); document.removeEventListener('mouseup', up); };
+      document.addEventListener('mousemove', mv);
+      document.addEventListener('mouseup', up);
+    });
+
+    // Touch
+    el.addEventListener('touchstart', e => {
+      e.preventDefault();
+      onDown(e.touches[0].clientY);
+      const mv = e2 => onMove(e2.touches[0].clientY);
+      const up = () => { onUp(); document.removeEventListener('touchmove', mv); document.removeEventListener('touchend', up); };
+      document.addEventListener('touchmove', mv, { passive: false });
+      document.addEventListener('touchend', up);
+    }, { passive: false });
+  }
+
+  setupResizer('resizerVol', 'vol', 70, 250);
+  setupResizer('resizerSub', 'sub', 90, 500);
+}
+
+// ═══ Panel order (move buttons) ══════════════════════════════════
+function updatePanelOrder() {
+  const map = {
+    vol: { resizer: g('resizerVol'), panel: g('chartVolume') },
+    sub: { resizer: g('resizerSub'), panel: g('chartSub') },
+  };
+  S.panelOrder.forEach((k, i) => {
+    map[k].resizer.style.order = i * 2 + 1;
+    map[k].panel.style.order   = i * 2 + 2;
+  });
+  // Update disabled state of move buttons
+  S.panelOrder.forEach((k, i) => {
+    const upBtn = g(k + 'UpBtn'), dnBtn = g(k + 'DnBtn');
+    if (upBtn) upBtn.disabled = (i === 0);
+    if (dnBtn) dnBtn.disabled = (i === S.panelOrder.length - 1);
+  });
+}
+
+function movePanel(key, dir) {
+  const idx = S.panelOrder.indexOf(key);
+  const newIdx = idx + dir;
+  if (newIdx < 0 || newIdx >= S.panelOrder.length) return;
+  const other = S.panelOrder[newIdx];
+  S.panelOrder[idx] = other;
+  S.panelOrder[newIdx] = key;
+  updatePanelOrder();
+  updateTimeAxes();
+}
+
+// ═══ Time axes — only bottommost visible panel shows time ruler ══
+function updateTimeAxes() {
+  const subVis = hasRsi() && !g('chartSub').classList.contains('h');
+  const tsBase = { timeVisible: true, secondsVisible: false, borderColor: '#2a2e39' };
+  try { S.charts.main.applyOptions({ timeScale: { ...tsBase, visible: !subVis } }); } catch (_) {}
+  try { S.charts.sub.applyOptions({  timeScale: { ...tsBase, visible: subVis  } }); } catch (_) {}
+}
+
+// ═══ Crosshair sync + OHLCV legend ═══════════════════════════════
+// Return pixel-Y of the first active sub-panel series at `time`.
+// Used to position the horzLine at the actual indicator value, not chart centre.
+function subChartCrosshairY(time) {
+  for (const entry of S.activeInds.values()) {
+    if (!entry.on || entry.displayType !== 'sub_panel' || !entry.series || !entry.data.length) continue;
+    const data = entry.data;
+    // Binary search: last point with time ≤ target
+    let lo = 0, hi = data.length - 1;
+    while (lo < hi) { const mid = (lo + hi + 1) >> 1; if (data[mid].time <= time) lo = mid; else hi = mid - 1; }
+    if (data[lo] && data[lo].time <= time) {
+      try {
+        const y = entry.series.priceToCoordinate(data[lo].value);
+        if (y !== null && y !== undefined && isFinite(y)) return y;
+      } catch (_) {}
+    }
+    break;
+  }
+  return null;  // no valid position — caller hides the CSS line
+}
+
+function initCrosshairSync() {
+  let _xhairSync = false;
+  const allCharts = [S.charts.main, S.charts.sub];
+  const xhairLine    = g('xhairLine');
+  const subHorzLine  = g('subHorzLine');
+
+  function chartEl(c) {
+    return c === S.charts.main ? g('chartMain') : g('chartSub');
+  }
+
+  function updateSubHorzLine(time) {
+    const subEl = g('chartSub');
+    if (!subEl || subEl.classList.contains('h')) { subHorzLine.style.display = 'none'; return; }
+    const y = subChartCrosshairY(time);  // pixel Y within sub chart canvas
+    if (y === null || !isFinite(y)) { subHorzLine.style.display = 'none'; return; }
+    // offsetTop gives sub chart's top relative to #chartArea (its position:relative parent)
+    subHorzLine.style.top     = (subEl.offsetTop + y) + 'px';
+    subHorzLine.style.display = 'block';
+  }
+
+  allCharts.forEach(chart => {
+    chart.subscribeCrosshairMove(param => {
+      if (_xhairSync) return;
+      _xhairSync = true;
+
+      if (chart === S.charts.main) updateOhlcLegend(param);
+      if (chart !== S.charts.main && !param.time) updateOhlcLegend(null);
+
+      const time = param.time;
+      const others = allCharts.filter(c => c !== chart);
+
+      if (!time) {
+        xhairLine.style.display = 'none';
+        subHorzLine.style.display = 'none';
+        others.forEach(c => {
+          const el = chartEl(c);
+          if (!el || el.classList.contains('h')) return;
+          try { c.setCrossHairXY(-1, -1, false); } catch (_) {}
+        });
+      } else if (param.point) {
+        xhairLine.style.left    = param.point.x + 'px';
+        xhairLine.style.display = 'block';
+        updateSubHorzLine(time);
+        others.forEach(c => {
+          const el = chartEl(c);
+          if (!el || el.classList.contains('h')) return;
+          try { c.setCrossHairXY(param.point.x, el.clientHeight / 2, true); } catch (_) {}
+        });
+      }
+
+      _xhairSync = false;
+    });
+  });
+}
+
+function updateOhlcLegend(param) {
+  const el = g('ohlcLegend');
+  if (!el) return;
+
+  if (!param || !param.time || !S.candles.length) {
+    if (S.candles.length) {
+      const c = S.candles[S.candles.length - 1];
+      renderOhlcLegend(+c.open, +c.high, +c.low, +c.close, +c.volume || 0);
+    } else {
+      el.innerHTML = '';
+    }
+    return;
+  }
+
+  // Binary-search for the candle nearest to param.time
+  const ts = param.time;
+  let lo = 0, hi = S.candles.length - 1;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (S.candles[mid].timestamp < ts) lo = mid + 1;
+    else hi = mid;
+  }
+  // lo = first index with timestamp >= ts; compare with lo-1 to pick nearest
+  const c1 = S.candles[lo];
+  const c0 = lo > 0 ? S.candles[lo - 1] : null;
+  const candle = c0 && Math.abs(c0.timestamp - ts) <= Math.abs(c1.timestamp - ts) ? c0 : c1;
+  renderOhlcLegend(+candle.open, +candle.high, +candle.low, +candle.close, +candle.volume || 0);
+}
+
+function renderOhlcLegend(o, h, l, c, v) {
+  const el = g('ohlcLegend');
+  if (!el) return;
+  const fmt  = n => (+n).toFixed(4);
+  const fmtV = n => n >= 1e6 ? (n/1e6).toFixed(2)+'M' : n >= 1e3 ? (n/1e3).toFixed(1)+'K' : (+n).toFixed(0);
+  const col  = c >= o ? 'var(--green)' : 'var(--red)';
+  el.innerHTML =
+    `<span class="ol-lbl">O</span><span style="color:${col}">${fmt(o)}</span>` +
+    `<span class="ol-lbl">H</span><span style="color:${col}">${fmt(h)}</span>` +
+    `<span class="ol-lbl">L</span><span style="color:${col}">${fmt(l)}</span>` +
+    `<span class="ol-lbl">C</span><span style="color:${col}">${fmt(c)}</span>` +
+    `<span class="ol-lbl">V</span><span style="color:var(--text)">${fmtV(v)}</span>`;
+}
 
 function smartLimit() {
   const tf = S.tf || val('selTf') || '1m';
@@ -399,8 +885,9 @@ async function loadChart() {
     const cRes = await api(`/api/chart?exchange=${S.ex}&symbol=${S.sym}&timeframe=${S.tf}&limit=${lim}`);
     if (gen !== S.chartGen) return; // superseded by a newer loadChart() call
 
-    S.candles  = (cRes.data || []).sort((a, b) => a.timestamp - b.timestamp);
-    S.oldestTs = S.candles.length ? S.candles[0].timestamp : null;
+    S.candles    = (cRes.data || []).sort((a, b) => a.timestamp - b.timestamp);
+    S.oldestTs   = S.candles.length ? S.candles[0].timestamp : null;
+    S.noMoreData = false;
 
     // Clear only after data arrives — avoids blank chart during network wait
     clearMainSeries();
@@ -438,11 +925,13 @@ async function fetchSignals() {
 async function loadMore() {
   if (!S.oldestTs || S.loadingMore) return;
   S.loadingMore = true;
+  g('loadMoreBar').classList.remove('h');
+  g('loadMoreBar').innerHTML = '<div class="spin" style="width:10px;height:10px;margin:0"></div> Loading older candles…';
   try {
     const lim = smartLimit();
     const res = await api(`/api/chart?exchange=${S.ex}&symbol=${S.sym}&timeframe=${S.tf}&limit=${lim}&before_timestamp=${S.oldestTs}`);
     const more = (res.data || []).filter(c => c.timestamp < S.oldestTs);
-    if (!more.length) { S.loadingMore = false; return; }
+    if (!more.length) { S.noMoreData = true; S.loadingMore = false; g('loadMoreBar').classList.add('h'); return; }
 
     // Merge, sort ascending, deduplicate — prevents duplicate-timestamp crash in lightweight-charts
     const merged = [...more, ...S.candles].sort((a, b) => a.timestamp - b.timestamp);
@@ -468,7 +957,10 @@ async function loadMore() {
     renderSignals();
     updateStatus();
   } catch (_) {}
-  finally { S.loadingMore = false; }
+  finally {
+    S.loadingMore = false;
+    g('loadMoreBar').classList.add('h');
+  }
 }
 
 // ═══ Render candles ═══════════════════════════════════════════════════
@@ -488,6 +980,7 @@ function renderCandles() {
   S.series.line = S.charts.main.addLineSeries({ color: 'transparent', lineWidth: 1, priceLineVisible: false, lastValueVisible: false });
   S.series.line.setData(data.map(c => ({ time: c.time, value: c.close })));
   updatePrice();
+  updateOhlcLegend(null); // show last candle OHLCV in legend
 }
 
 // ═══ Render volume ════════════════════════════════════════════════════
@@ -498,21 +991,20 @@ function volData() {
   }));
 }
 function renderVolume() {
-  const el = g('chartVolume');
   if (!S.layers.volume) {
-    el.classList.add('h');
-    rmSeries(S.charts.vol, 'vol');
+    rmSeries(S.charts.main, 'vol');
     return;
   }
-  el.classList.remove('h');
   if (!S.candles.length) return;
   if (S.series.vol) {
-    // Update existing series (faster than recreate)
     S.series.vol.setData(volData());
   } else {
-    S.series.vol = S.charts.vol.addHistogramSeries({
+    S.series.vol = S.charts.main.addHistogramSeries({
+      priceScaleId: '',
       priceFormat: { type: 'volume' },
-      scaleMargins: { top: 0.1, bottom: 0 },
+      scaleMargins: { top: 0.85, bottom: 0 },
+      lastValueVisible: false,
+      priceLineVisible: false,
     });
     S.series.vol.setData(volData());
   }
@@ -548,82 +1040,279 @@ function renderSignals() {
   target.setMarkers(markers);
 }
 
-// ═══ Indicators ═══════════════════════════════════════════════════════
-function buildIndDropdown() {
-  const el = g('indDropdown');
-  if (!S.allInds.length) { el.innerHTML = '<div style="padding:10px 12px;color:var(--dim);font-size:12px">No indicators found</div>'; return; }
+// ═══ Indicator Library Modal ══════════════════════════════════════════
+let L = { pandas_ta: [], primitives: [], user: [] }; // library data
+let L_loaded = false;
+let L_sel = null;   // currently selected indicator schema object
 
-  // Group by type
-  const emas = S.allInds.filter(i => i.name.includes('ema'));
-  const rsis = S.allInds.filter(i => i.name.includes('rsi'));
-  const others = S.allInds.filter(i => !i.name.includes('ema') && !i.name.includes('rsi'));
-
-  let html = '';
-  const group = (label, items) => {
-    if (!items.length) return '';
-    const rows = items.map(i => {
-      const active = S.activeInds.has(i.name);
-      return `<div class="ind-item${active ? ' active' : ''}" onclick="toggleInd('${i.name}')">
-        <span>${i.name}</span>
-        <span class="ind-item-count">${i.tf} · ${fmtNum(i.count)}</span>
-      </div>`;
-    }).join('');
-    return `<div class="ind-group"><div class="ind-group-label">${label}</div>${rows}</div>`;
-  };
-  html += group('EMA', emas);
-  html += group('RSI', rsis);
-  html += group('Other', others);
-  el.innerHTML = html;
+async function openIndModal() {
+  g('indModal').classList.add('open');
+  g('indSearch').value = '';
+  if (!L_loaded) await loadLibrary();
+  renderLibraryList('');
+  g('indSearch').focus();
 }
 
-function toggleIndMenu(e) {
-  e.stopPropagation();
-  const el = g('indDropdown');
-  if (el.classList.toggle('open')) {
-    const rect = e.currentTarget.getBoundingClientRect();
-    el.style.left = Math.min(rect.left, window.innerWidth - 290) + 'px';
+function closeIndModal() { g('indModal').classList.remove('open'); L_sel = null; }
+function onModalBgClick(e) { if (e.target === g('indModal')) closeIndModal(); }
+
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape') { closeIndModal(); closeEditorModal(); }
+});
+
+async function loadLibrary() {
+  try {
+    const r = await api('/api/indicators/library');
+    L.pandas_ta  = r.pandas_ta  || [];
+    L.primitives = r.primitives || [];
+    L.user       = r.user       || [];
+    L_loaded = true;
+  } catch (_) { L_loaded = false; }
+}
+
+function filterLibrary(q) { renderLibraryList(q.trim().toLowerCase()); }
+
+function renderLibraryList(q) {
+  const match = item => !q || item.name.toLowerCase().includes(q)
+                             || (item.display || '').toLowerCase().includes(q);
+
+  // Build grouped list: active (on chart) first, then by category
+  const categories = {};
+  const addToGroup = (item, badge) => {
+    const cat = item.category || 'Other';
+    (categories[cat] = categories[cat] || []).push({ ...item, badge });
+  };
+
+  // Stored/active indicators on top
+  if (!q) {
+    S.activeInds.forEach((_, key) => {
+      const meta = S.indMeta.get(key);
+      if (meta) addToGroup({ name: key, display: meta.display_name || key, category: 'On Chart' }, '✓');
+    });
+  }
+
+  [...L.user, ...L.primitives].filter(match).forEach(i => addToGroup(i, ''));
+  L.pandas_ta.filter(match).forEach(i => addToGroup(i, ''));
+
+  let html = '';
+  if (Object.keys(categories).length === 0 && q) {
+    html = '<div style="padding:14px;color:var(--dim);font-size:12px">No results</div>';
+  } else {
+    const ORDER = ['On Chart', 'My Indicators', 'Custom Primitives',
+                   'Trend', 'Oscillators', 'Momentum', 'Volatility', 'Volume',
+                   'Statistics', 'Overlap', 'Performance', 'Candle'];
+    // Put "Other" always last
+    const allCats = [...new Set([...ORDER, ...Object.keys(categories)])].filter(c => categories[c]);
+    const sorted = [...allCats.filter(c => c !== 'Other'), ...allCats.filter(c => c === 'Other')];
+    sorted.forEach(cat => {
+      html += `<div class="ind-cat-label">${cat}</div>`;
+      html += categories[cat].map(item => {
+        const sel = L_sel && L_sel.name === item.name ? ' sel' : '';
+        return `<div class="ind-lib-item${sel}" onclick='selectLibItem(${JSON.stringify(JSON.stringify(item))})'>
+          <span>${item.display || item.name.toUpperCase()}</span>
+          <span class="ind-lib-item-badge">${item.badge || ''}</span>
+        </div>`;
+      }).join('');
+    });
+    html += `<div style="padding:4px 0"><button class="ind-new-btn" onclick="openEditorModal()">+ Write custom indicator</button></div>`;
+  }
+  g('indLibList').innerHTML = html;
+}
+
+function selectLibItem(jsonStr) {
+  L_sel = JSON.parse(jsonStr);
+  // Re-render list to highlight selected
+  renderLibraryList(g('indSearch').value.trim().toLowerCase());
+  renderSettings(L_sel);
+}
+
+function renderSettings(ind) {
+  const tfOptions = ['1m','5m','15m','30m','1h','4h','1d','1w']
+    .map(t => `<option value="${t}"${t === S.tf ? ' selected' : ''}>${t}</option>`).join('');
+
+  let paramsHtml = (ind.params || []).map(p => {
+    if (p.type === 'select') {
+      const opts = (p.options || []).map(o => `<option value="${o}"${o===p.default?' selected':''}>${o}</option>`).join('');
+      return `<div class="ind-settings-row">
+        <span class="ind-settings-label">${p.label}</span>
+        <select id="ip_${p.key}" class="ind-settings-tf">${opts}</select>
+      </div>`;
+    }
+    return `<div class="ind-settings-row">
+      <span class="ind-settings-label">${p.label}</span>
+      <input id="ip_${p.key}" type="number" value="${p.default ?? 14}" step="${p.type==='float'?'0.1':'1'}">
+    </div>`;
+  }).join('');
+
+  // Default display type: oscillators go to sub-panel, trend/overlay stay on main chart
+  const _OSC = new Set(['rsi','stoch','stochrsi','macd','cci','mfi','crsi','dpo','ppo',
+                         'roc','mom','trix','willr','uo','ao','cmo','kst','pvo','bop']);
+  const defaultDisplay = _OSC.has(ind.name) ? 'sub_panel' : 'overlay';
+
+  g('indSettings').innerHTML = `
+    <div class="ind-settings-title">${ind.display || ind.name.toUpperCase()}</div>
+    <div class="ind-settings-group">
+      ${paramsHtml}
+      <div class="ind-settings-row">
+        <span class="ind-settings-label">Timeframe</span>
+        <select id="ip_timeframe" class="ind-settings-tf">${tfOptions}</select>
+      </div>
+      <div class="ind-settings-row">
+        <span class="ind-settings-label">Display</span>
+        <select id="ip_display" class="ind-settings-tf">
+          <option value="sub_panel"${defaultDisplay==='sub_panel'?' selected':''}>Sub-panel</option>
+          <option value="overlay"${defaultDisplay==='overlay'?' selected':''}>Overlay on chart</option>
+        </select>
+      </div>
+    </div>
+    <div class="ind-progress" id="indProgress"><div class="spin"></div><span id="indProgressMsg">Computing…</span></div>
+    <div class="ind-settings-actions">
+      <button class="btn-cancel" onclick="closeIndModal()">Cancel</button>
+      <button class="btn-apply" id="btnApplyInd" onclick="applyIndicator()">Apply →</button>
+    </div>`;
+}
+
+async function applyIndicator() {
+  if (!L_sel) return;
+  const btn  = g('btnApplyInd');
+  const prog = g('indProgress');
+  const msg  = g('indProgressMsg');
+
+  btn.disabled = true;
+  prog.classList.add('on');
+
+  // Snapshot chart gen — if chart reloads during async compute we must abort
+  const gen = S.chartGen;
+
+  // Collect params
+  const body = {
+    type:      L_sel.name,
+    timeframe: g('ip_timeframe')?.value || S.tf,
+    exchange:  S.ex,
+    symbol:    S.sym,
+  };
+  (L_sel.params || []).forEach(p => {
+    const el = g(`ip_${p.key}`);
+    if (el) body[p.key] = p.type === 'int' ? parseInt(el.value) : el.value;
+  });
+  const displayType = g('ip_display')?.value || 'overlay';
+
+  // Pass visible candle range → server returns only what's needed for display.
+  // Resolver still computes and caches the full history; this only limits the
+  // rows returned in the SSE "done" payload (avoids 300MB+ responses).
+  if (S.candles.length) {
+    body.start_ts = S.candles[0].timestamp;
+    body.end_ts   = S.candles[S.candles.length - 1].timestamp;
+  }
+
+  const indKey = `${body.type}_${body.period || ''}_${body.timeframe}`;
+
+  try {
+    await streamCompute('/api/indicators/compute', body, ev => {
+      if (ev.stage === 'aggregating') msg.textContent = `Aggregating ${ev.timeframe}…`;
+      else if (ev.stage === 'loading')  msg.textContent = ev.message || 'Loading candles…';
+      else if (ev.stage === 'computing') msg.textContent = ev.message || 'Computing…';
+      else if (ev.stage === 'storing')  msg.textContent = ev.message || 'Storing…';
+      else if (ev.stage === 'error') { showErr(ev.message || 'Compute error'); closeIndModal(); }
+      else if (ev.stage === 'done') {
+        if (gen !== S.chartGen) { closeIndModal(); return; } // chart was reloaded during compute
+        // Sort, deduplicate and sanitise before handing to lightweight-charts
+        const raw = (ev.data || [])
+          .map(p => ({ time: p.timestamp, value: parseFloat(p.value) }))
+          .filter(p => p.time && isFinite(p.value))
+          .sort((a, b) => a.time - b.time);
+        const seen = new Set();
+        const pts = raw.filter(p => { if (seen.has(p.time)) return false; seen.add(p.time); return true; });
+        addIndToChart(indKey, pts, { ...body, display_type: displayType });
+        closeIndModal();
+      }
+    });
+  } catch (e) {
+    showErr(`Failed: ${e.message}`);
+  } finally {
+    btn.disabled = false;
+    prog.classList.remove('on');
   }
 }
 
-document.addEventListener('click', () => { g('indDropdown').classList.remove('open'); });
+async function streamCompute(url, body, onEvent) {
+  const resp = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+  const reader = resp.body.getReader();
+  const dec = new TextDecoder();
+  let buf = '';
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buf += dec.decode(value, { stream: true });
+    const parts = buf.split('\n\n');
+    buf = parts.pop();
+    for (const part of parts) {
+      const line = part.replace(/^data:\s*/, '').trim();
+      if (line) { try { onEvent(JSON.parse(line)); } catch (_) {} }
+    }
+  }
+}
 
+function addIndToChart(key, pts, meta) {
+  const existing = S.activeInds.get(key);
+  if (existing) removeIndSeries(key, existing);
+
+  if (!S.indColorMap.has(key))
+    S.indColorMap.set(key, S.emaColors[S.emaColorIdx++ % S.emaColors.length]);
+
+  // Auto-detect scale: if indicator values differ wildly from price, force sub-panel
+  let displayType = meta.display_type || 'overlay';
+  if (displayType === 'overlay' && pts.length > 0 && S.candles.length > 0) {
+    const lastPrice = +S.candles[S.candles.length - 1].close;
+    const sample = pts.slice(-50).map(p => p.value);
+    const avg = sample.reduce((a, b) => a + b, 0) / sample.length;
+    if (avg < lastPrice * 0.05 || avg > lastPrice * 3) displayType = 'sub_panel';
+  }
+
+  const entry = { on: true, series: null, rsiRefLines: [], data: pts, displayType,
+                   meta: { name: key, exchange: meta.exchange, symbol: meta.symbol,
+                           tf: meta.timeframe } };
+  S.activeInds.set(key, entry);
+  S.indMeta = S.indMeta || new Map();
+  S.indMeta.set(key, { display_name: `${meta.type?.toUpperCase()} (${meta.period || ''}, ${meta.timeframe?.toUpperCase()})` });
+
+  buildIndChips();
+  renderIndSeries(key, entry);
+  updateRsiPanel();
+  relayout();
+}
+
+// Keep existing toggleInd for backwards compat with stored indicators
 async function toggleInd(name) {
   if (S.activeInds.has(name)) {
-    // remove
     const entry = S.activeInds.get(name);
     removeIndSeries(name, entry);
     S.activeInds.delete(name);
     S.indColorMap.delete(name);
     buildIndChips();
-    buildIndDropdown();
     updateRsiPanel();
     relayout();
     return;
   }
-
-  // add
   const meta = S.allInds.find(i => i.name === name);
   if (!meta) return;
-
-  // Assign stable color for EMA
-  if (!S.indColorMap.has(name)) {
+  if (!S.indColorMap.has(name))
     S.indColorMap.set(name, S.emaColors[S.emaColorIdx++ % S.emaColors.length]);
-  }
-
   S.activeInds.set(name, { on: true, series: null, rsiRefLines: [], data: [], meta });
   buildIndChips();
-  buildIndDropdown();
-
   try {
     const tsParams = indTsParams();
     const r = await api(`/api/indicators?indicator_name=${name}&exchange=${meta.exchange}&symbol=${meta.symbol}&timeframe=${meta.tf}${tsParams}`);
     const pts = (r.data?.indicators || [])
       .map(p => ({ time: p.timestamp, value: parseFloat(p.value) }))
-      .filter(p => p.value > 0)
-      .sort((a, b) => a.time - b.time);
-
+      .filter(p => p.value > 0).sort((a, b) => a.time - b.time);
     const entry = S.activeInds.get(name);
-    if (!entry) return; // removed while loading
+    if (!entry) return;
     entry.data = pts;
     renderIndSeries(name, entry);
     updateRsiPanel();
@@ -633,47 +1322,95 @@ async function toggleInd(name) {
 
 function renderIndSeries(name, entry) {
   if (!entry.on || !entry.data.length) return;
-  const isRsi = name.includes('rsi');
+  const isSubPanel = (entry.displayType || 'overlay') === 'sub_panel';
+  const col = S.indColorMap.get(name) || '#f6c90e';
 
-  if (isRsi) {
-    // RSI sub-panel
-    g('chartRsi').classList.remove('h');
-    const s = S.charts.rsi.addLineSeries({
-      color: '#a29bfe', lineWidth: 1, priceLineVisible: false, lastValueVisible: true, title: name,
+  // Clip data to currently loaded candle range to prevent viewport jumps
+  const data = clipToCandles(entry.data);
+  if (!data.length) return;
+
+  // Save logical range before setData (S.fitting=true blocks loadMore so indices won't shift)
+  const mainRange = S.charts.main.timeScale().getVisibleLogicalRange();
+
+  // Block loadMore from firing during setData — scroll events during setData
+  // can prepend candles and shift logical indices, corrupting the restore below
+  const prevFitting = S.fitting;
+  S.fitting = true;
+
+  if (isSubPanel) {
+    // pre-size before removing .h to prevent layout jump
+    g('chartSub').style.height = `${S.panelH.sub}px`;
+    g('chartSub').classList.remove('h');
+    const s = S.charts.sub.addLineSeries({
+      color: col, lineWidth: 1, priceLineVisible: false, lastValueVisible: true, title: name,
     });
-    s.setData(entry.data);
+    try {
+      s.setData(data);
+    } catch (e) {
+      console.warn('renderIndSeries sub-panel setData error:', e.message);
+      S.fitting = prevFitting;
+      try { S.charts.sub.removeSeries(s); } catch (_) {}
+      return;
+    }
     entry.series = s;
-    // reference lines
-    const addRef = (v, col) => {
-      const rs = S.charts.rsi.addLineSeries({ color: col, lineWidth: 1, lineStyle: 2, priceLineVisible: false, lastValueVisible: false });
-      const t0 = entry.data[0].time, t1 = entry.data[entry.data.length-1].time;
-      rs.setData([{ time: t0, value: v }, { time: t1, value: v }]);
-      entry.rsiRefLines.push(rs);
-    };
-    addRef(70, 'rgba(239,83,80,.3)');
-    addRef(30, 'rgba(38,166,154,.3)');
+    // Restore main chart viewport — RSI setData fired sync subscription which may have scrolled main
+    if (mainRange) {
+      try { S.charts.main.timeScale().setVisibleLogicalRange(mainRange); } catch (_) {}
+    }
+    // reference lines for bounded oscillators (0-100 range)
+    const maxVal = Math.max(...data.slice(-20).map(p => p.value));
+    if (maxVal <= 105 && data.length > 1) {
+      const addRef = (v, c) => {
+        const rs = S.charts.sub.addLineSeries({ color: c, lineWidth: 1, lineStyle: 2,
+                                                 priceLineVisible: false, lastValueVisible: false });
+        const t0 = data[0].time, t1 = data[data.length-1].time;
+        try { rs.setData([{ time: t0, value: v }, { time: t1, value: v }]); } catch (_) { return; }
+        entry.rsiRefLines.push(rs);
+      };
+      addRef(70, 'rgba(239,83,80,.3)');
+      addRef(30, 'rgba(38,166,154,.3)');
+    }
   } else {
-    // EMA / other → main chart overlay
-    const col = S.indColorMap.get(name) || '#f6c90e';
     const s = S.charts.main.addLineSeries({
       color: col, lineWidth: 1, priceLineVisible: false, lastValueVisible: true, title: name,
     });
-    s.setData(entry.data);
+    try {
+      s.setData(data);
+    } catch (e) {
+      console.warn('renderIndSeries overlay setData error:', e.message);
+      S.fitting = prevFitting;
+      try { S.charts.main.removeSeries(s); } catch (_) {}
+      return;
+    }
     entry.series = s;
+    // Restore viewport via timestamps — logical indices may have shifted if loadMore
+    // ran between the save and restore, but timestamps are always stable
+    if (mainRange) {
+      try { S.charts.main.timeScale().setVisibleLogicalRange(mainRange); } catch (_) {}
+    }
   }
+
+  S.fitting = prevFitting;
+}
+
+function clipToCandles(data) {
+  if (!S.candles.length || !data.length) return data;
+  const t0 = S.candles[0].timestamp;
+  const t1 = S.candles[S.candles.length - 1].timestamp;
+  return data.filter(p => p.time >= t0 && p.time <= t1);
 }
 
 function removeIndSeries(name, entry) {
-  const isRsi = name.includes('rsi');
-  const chart = isRsi ? S.charts.rsi : S.charts.main;
+  const isSubPanel = (entry.displayType || 'overlay') === 'sub_panel';
+  const chart = isSubPanel ? S.charts.sub : S.charts.main;
   if (entry.series) { try { chart.removeSeries(entry.series); } catch (_) {} }
-  entry.rsiRefLines.forEach(rs => { try { S.charts.rsi.removeSeries(rs); } catch (_) {} });
+  entry.rsiRefLines.forEach(rs => { try { S.charts.sub.removeSeries(rs); } catch (_) {} });
   entry.series = null; entry.rsiRefLines = [];
 }
 
 function updateRsiPanel() {
-  const anyRsiOn = [...S.activeInds.entries()].some(([n, v]) => v.on && n.includes('rsi') && v.series);
-  g('chartRsi').classList.toggle('h', !anyRsiOn);
+  const anySubPanel = [...S.activeInds.values()].some(v => v.on && v.displayType === 'sub_panel' && v.series);
+  g('chartSub').classList.toggle('h', !anySubPanel);
 }
 
 function indTsParams() {
@@ -704,19 +1441,17 @@ async function refreshActiveIndicators(gen) {
 
 // ═══ Chips ════════════════════════════════════════════════════════════
 function buildIndChips() {
-  // Remove old chips
   document.querySelectorAll('.chip').forEach(el => el.remove());
   const area = g('indArea');
   [...S.activeInds.entries()].forEach(([name, entry]) => {
-    const isRsi = name.includes('rsi');
-    const col = isRsi ? '#a29bfe' : (S.indColorMap.get(name) || '#f6c90e');
+    const col = S.indColorMap.get(name) || '#f6c90e';
     const chip = document.createElement('div');
     chip.className = 'chip' + (entry.on ? '' : ' off');
     chip.innerHTML = `<span style="width:8px;height:8px;border-radius:50%;background:${col};flex-shrink:0;display:inline-block"></span>`
       + `<span>${name}</span>`
       + `<span class="chip-x" onclick="removeInd(event,'${name}')">×</span>`;
     chip.addEventListener('click', (e) => { if (!e.target.classList.contains('chip-x')) flipInd(name); });
-    area.insertBefore(chip, area.querySelector('.ind-dropdown'));
+    area.insertBefore(chip, area.querySelector('.add-ind-btn'));
   });
 }
 
@@ -724,11 +1459,10 @@ function flipInd(name) {
   const entry = S.activeInds.get(name);
   if (!entry) return;
   entry.on = !entry.on;
-  const isRsi = name.includes('rsi');
-  const chart  = isRsi ? S.charts.rsi : S.charts.main;
+  const chart = entry.displayType === 'sub_panel' ? S.charts.sub : S.charts.main;
   if (!entry.on) {
-    if (entry.series)  { try { chart.removeSeries(entry.series); } catch (_) {} entry.series = null; }
-    entry.rsiRefLines.forEach(rs => { try { S.charts.rsi.removeSeries(rs); } catch (_) {} });
+    if (entry.series) { try { chart.removeSeries(entry.series); } catch (_) {} entry.series = null; }
+    entry.rsiRefLines.forEach(rs => { try { S.charts.sub.removeSeries(rs); } catch (_) {} });
     entry.rsiRefLines = [];
   } else {
     renderIndSeries(name, entry);
@@ -737,6 +1471,8 @@ function flipInd(name) {
   updateRsiPanel();
   relayout();
 }
+
+function buildIndDropdown() { /* modal-based UI — no legacy dropdown needed */ }
 
 function removeInd(e, name) {
   e.stopPropagation();
@@ -770,7 +1506,7 @@ function tog(layer) {
 function clearMainSeries() {
   rmSeries(S.charts.main, 'candle');
   rmSeries(S.charts.main, 'line');
-  rmSeries(S.charts.vol,  'vol');
+  rmSeries(S.charts.main, 'vol');
   // Remove active indicator series (but keep the map — user's selection persists)
   [...S.activeInds.entries()].forEach(([name, entry]) => {
     removeIndSeries(name, entry);
@@ -900,6 +1636,136 @@ function showStratSignals(stratName) {
     <thead><tr><th>Date</th><th>Type</th><th>Price</th><th>Conf</th><th>Symbol</th></tr></thead>
     <tbody>${rows}</tbody>
   </table>`;
+}
+
+// ═══ Monaco editor (custom indicators) ══════════════════════════════
+let monacoEditor = null;
+let editorParams = []; // [{key, type, default}]
+
+const EDITOR_TEMPLATE = `# Available: close open high low volume ts np ta
+# Available: ta.rsi() ta.ema() ta.sma() ta.macd() ... + custom primitives
+# Assign: result = np.ndarray (one value per candle)
+
+ema = ta.ema(close, period)
+result = (close - ema) / ema * 100
+`;
+
+function openEditorModal() {
+  closeIndModal();
+  g('editorModal').classList.add('open');
+  g('editorName').value = '';
+  editorParams = [{ key: 'period', type: 'int', default: 14 }];
+  renderEditorParams();
+  initMonaco();
+}
+
+function closeEditorModal() { g('editorModal').classList.remove('open'); }
+function onEditorBgClick(e) { if (e.target === g('editorModal')) closeEditorModal(); }
+
+function initMonaco() {
+  if (monacoEditor) { return; }
+  if (typeof require === 'undefined') {
+    // Lazy-load Monaco from CDN
+    const script = document.createElement('script');
+    script.src = 'https://cdn.jsdelivr.net/npm/monaco-editor@0.45.0/min/vs/loader.js';
+    script.onload = () => {
+      require.config({ paths: { vs: 'https://cdn.jsdelivr.net/npm/monaco-editor@0.45.0/min/vs' } });
+      require(['vs/editor/editor.main'], createMonacoEditor);
+    };
+    document.head.appendChild(script);
+  } else {
+    require(['vs/editor/editor.main'], createMonacoEditor);
+  }
+}
+
+function createMonacoEditor() {
+  const mount = g('monacoMount');
+  mount.style.height = '260px';
+  monacoEditor = monaco.editor.create(mount, {
+    value: EDITOR_TEMPLATE,
+    language: 'python',
+    theme: 'vs-dark',
+    fontSize: 12,
+    minimap: { enabled: false },
+    scrollBeyondLastLine: false,
+    automaticLayout: true,
+    lineNumbers: 'on',
+    padding: { top: 8 },
+  });
+}
+
+function renderEditorParams() {
+  const area = g('editorParams');
+  let html = editorParams.map((p, i) => `
+    <div class="editor-param-chip">
+      <code>${p.key}</code>
+      <span>${p.type}</span>
+      <span>${p.default}</span>
+      <button onclick="removeEditorParam(${i})">×</button>
+    </div>`).join('');
+  html += `<button class="editor-add-param" onclick="addEditorParam()">+ param</button>`;
+  area.innerHTML = html;
+}
+
+function addEditorParam() {
+  const key = prompt('Parameter name (e.g. period, threshold):');
+  if (!key || !key.trim()) return;
+  const type = prompt('Type (int / float / str):', 'int') || 'int';
+  const def  = prompt('Default value:', '14') || '14';
+  editorParams.push({ key: key.trim(), type, default: def });
+  renderEditorParams();
+}
+
+function removeEditorParam(i) {
+  editorParams.splice(i, 1);
+  renderEditorParams();
+}
+
+async function testCustomIndicator() {
+  if (!monacoEditor) return;
+  const code = monacoEditor.getValue();
+  const name = g('editorName').value.trim() || 'preview';
+  const params_schema = editorParams;
+  const paramDefaults = Object.fromEntries(editorParams.map(p => [p.key, p.default]));
+
+  try {
+    const r = await fetch('/api/indicators/test', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        type: '__script__', timeframe: S.tf, exchange: S.ex, symbol: S.sym,
+        _code: code, ...paramDefaults,
+      }),
+    });
+    const data = await r.json();
+    if (data.error) { showErr(data.error); return; }
+    addIndToChart(`preview_${name}`, data.data, {
+      type: name, timeframe: S.tf, exchange: S.ex, symbol: S.sym,
+    });
+    closeEditorModal();
+  } catch (e) { showErr(e.message); }
+}
+
+async function saveCustomIndicator() {
+  if (!monacoEditor) return;
+  const name = g('editorName').value.trim();
+  if (!name) { alert('Enter a name for the indicator'); return; }
+  const code = monacoEditor.getValue();
+
+  try {
+    const r = await fetch('/api/indicators/custom', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name, code, params_schema: editorParams }),
+    });
+    const data = await r.json();
+    if (data.error) { showErr(data.error); return; }
+    // Refresh library and reopen modal
+    L_loaded = false;
+    await loadLibrary();
+    openIndModal();
+    closeEditorModal();
+  } catch (e) { showErr(e.message); }
 }
 
 window.addEventListener('DOMContentLoaded', boot);

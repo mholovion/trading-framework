@@ -16,6 +16,7 @@ from typing import Dict, Any, Optional
 from datetime import datetime, timezone
 
 from core.universal_config_manager import UniversalConfigManager
+from core.clickhouse import TIMEFRAME_SECONDS
 from rabbitmq.rabbitmq_client import RabbitMQClient, MessagePublisher
 from core.exceptions import ConfigurationError, ExchangeError
 from core.logging_config import get_historical_logger
@@ -26,15 +27,13 @@ class HistoricalDataService:
     Microservice for historical data collection
     """
     
-    def __init__(self, config_manager: UniversalConfigManager, 
-                 database_manager: Optional[Any],
+    def __init__(self, config_manager: UniversalConfigManager,
+                 clickhouse: Any,
                  queue_client: RabbitMQClient):
         self.config_manager = config_manager
-        self.database_manager = database_manager
+        self.clickhouse = clickhouse
         self.queue_client = queue_client
-        
-        if not self.database_manager:
-            raise ValueError("DatabaseManager is required - must be provided by orchestrator")
+
         self.message_publisher = MessagePublisher(queue_client, 'historical_data_service')
         
         self.active_connections: Dict[str, Dict] = {}
@@ -50,12 +49,7 @@ class HistoricalDataService:
     async def initialize(self):
         """Initialize historical data service"""
         self.logger.info("Initializing Historical Data Service...")
-        
-        # Initialize database if we created it
-        if not hasattr(self, '_db_initialized'):
-            await self.database_manager.initialize()
-            self._db_initialized = True
-        
+
         await self._setup_connections()
         await self._load_exchange_plugins()
         
@@ -317,25 +311,15 @@ class HistoricalDataService:
             raise
     
     async def _batch_already_complete(self, exchange: str, symbol: str, timeframe: str,
-                                      start_timestamp: int, end_timestamp: int) -> bool:
-        """Return True if the DB already has all candles for this batch window."""
+                                      start_ts: int, end_ts: int) -> bool:
+        """Return True if ClickHouse already has ≥95% of candles for this time window."""
         try:
-            from sqlalchemy import func, select as _select
-            from models.base import Candle
-            async with self.database_manager.get_session() as session:
-                result = await session.execute(
-                    _select(func.count(Candle.id)).where(
-                        Candle.exchange == exchange,
-                        Candle.symbol == symbol,
-                        Candle.timeframe == timeframe,
-                        Candle.timestamp >= start_timestamp,
-                        Candle.timestamp <= end_timestamp,
-                    )
-                )
-                actual = result.scalar() or 0
-            tf_seconds = end_timestamp - start_timestamp
-            expected = max(1, tf_seconds // 60) if timeframe == '1m' else 1
-            return actual >= expected * 0.95
+            tf_sec = TIMEFRAME_SECONDS.get(timeframe, 60)
+            expected = max(1, (end_ts - start_ts) // tf_sec)
+            count = await self.clickhouse.count_candles(
+                exchange, symbol, timeframe, start_ts=start_ts, end_ts=end_ts
+            )
+            return count >= int(expected * 0.95)
         except Exception:
             return False
 
@@ -348,10 +332,10 @@ class HistoricalDataService:
             start_dt = datetime.fromtimestamp(start_timestamp, tz=timezone.utc)
             end_dt = datetime.fromtimestamp(end_timestamp, tz=timezone.utc)
 
-            # Skip batch if data already fully present in DB
+            # Skip batch if data already fully present in ClickHouse
             if await self._batch_already_complete(exchange, symbol, timeframe, start_timestamp, end_timestamp):
                 if total_batches > 1:
-                    self.logger.debug(f"⏭ Batch {batch_number}/{total_batches}: already in DB, skipping ({start_dt.date()} – {end_dt.date()})")
+                    self.logger.debug(f"Batch {batch_number}/{total_batches}: already in ClickHouse, skipping ({start_dt.date()} - {end_dt.date()})")
                 return 0
 
             self.logger.info(f"Processing batch {batch_number}/{total_batches}: {exchange}/{symbol} {timeframe} from {start_dt} to {end_dt}")
@@ -364,10 +348,21 @@ class HistoricalDataService:
             
             stored_count = 0
             if candles:
-                stored_count = await self.database_manager.store_candles_batch(
-                    exchange, symbol, timeframe, candles, int(time.time())
-                )
-                
+                for candle in candles:
+                    await self.clickhouse.store_candle({
+                        "timestamp": int(candle['timestamp']),
+                        "exchange": exchange,
+                        "symbol": symbol,
+                        "timeframe": timeframe,
+                        "open": float(candle.get('open', candle.get('open_price', 0))),
+                        "high": float(candle.get('high', candle.get('high_price', 0))),
+                        "low": float(candle.get('low', candle.get('low_price', 0))),
+                        "close": float(candle.get('close', candle.get('close_price', 0))),
+                        "volume": float(candle.get('volume', 0)),
+                    })
+                await self.clickhouse.flush()
+                stored_count = len(candles)
+
                 # Publish candles as bulk message for efficient processing
                 if candles:
                     bulk_candles = []

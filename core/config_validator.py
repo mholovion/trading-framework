@@ -124,10 +124,9 @@ class ConfigValidator:
             return errors
             
         indicators = config['indicators']
-        
+
         if not indicators:
-            errors.append(ValidationError('indicators', 'At least one indicator must be configured'))
-            return errors
+            return errors  # empty is valid in on-demand mode
             
         # Get available connections
         available_connections = set(connections_config.get('connections', {}).keys())
@@ -168,8 +167,7 @@ class ConfigValidator:
         errors = []
         
         if not config:
-            errors.append(ValidationError('strategies', 'At least one strategy must be configured'))
-            return errors
+            return errors  # empty is valid in on-demand mode
             
         # Get available connections and indicators
         available_connections = set(connections_config.get('connections', {}).keys())

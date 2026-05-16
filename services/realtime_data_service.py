@@ -14,7 +14,6 @@ from typing import Dict, Any, Optional
 from datetime import datetime, timezone
 
 from core.universal_config_manager import UniversalConfigManager
-from core.database import DatabaseManager
 from rabbitmq.rabbitmq_client import RabbitMQClient, MessagePublisher
 from core.exceptions import ConfigurationError, ExchangeError
 from core.logging_config import get_realtime_logger
@@ -25,17 +24,14 @@ class RealtimeDataService:
     Microservice for real-time data collection
     """
     
-    def __init__(self, config_manager: UniversalConfigManager, 
-                 database_manager: Optional[Any],
+    def __init__(self, config_manager: UniversalConfigManager,
+                 clickhouse: Any,
                  queue_client: RabbitMQClient,
                  exchange_plugins: Optional[Dict[str, Any]] = None):
         self.config_manager = config_manager
-        self.database_manager = database_manager
+        self.clickhouse = clickhouse
         self.queue_client = queue_client
-        
-        if not self.database_manager:
-            raise ValueError("DatabaseManager is required - must be provided by orchestrator")
-            
+
         self.message_publisher = MessagePublisher(queue_client, 'realtime_data_service')
         
         self.active_connections: Dict[str, Dict] = {}
@@ -48,12 +44,7 @@ class RealtimeDataService:
     async def initialize(self):
         """Initialize real-time data service"""
         self.logger.info("Initializing Real-time Data Service...")
-        
-        # Initialize database if we created it
-        if not hasattr(self, '_db_initialized'):
-            await self.database_manager.initialize()
-            self._db_initialized = True
-        
+
         await self._setup_connections()
         # Exchange plugins are provided by orchestrator, just link them
         self._link_exchange_plugins()
@@ -228,30 +219,31 @@ class RealtimeDataService:
                                f"({datetime.fromtimestamp(current_server_time, tz=timezone.utc)}), "
                                f"is_closed={is_closed}")
             
-            # Store in real-time table
-            await self.database_manager.store_realtime_candle(
-                config['exchange'],
-                config['symbol'],
-                config['source_timeframe'],
-                candle_data,
-                is_closed
-            )
+            # Store candle in ClickHouse
+            await self.clickhouse.store_candle({
+                "timestamp": int(candle_data['timestamp']),
+                "exchange": config['exchange'],
+                "symbol": config['symbol'],
+                "timeframe": config['source_timeframe'],
+                "open": float(candle_data['open']),
+                "high": float(candle_data['high']),
+                "low": float(candle_data['low']),
+                "close": float(candle_data['close']),
+                "volume": float(candle_data.get('volume', 0)),
+            })
             
             # Check if we have a new candle (different timestamp than last processed)
             last_candle_timestamp = connection_info.get('last_processed_timestamp', 0)
             
             # If this is a new candle, the previous candle is now closed
             if candle_data['timestamp'] > last_candle_timestamp and last_candle_timestamp > 0:
-                # Get the previous closed candle from database and publish it
+                # Get the previous closed candle from ClickHouse and publish it
                 try:
-                    previous_candle = await self.database_manager.get_latest_candle(
-                        config['exchange'], 
-                        config['symbol'], 
-                        config['source_timeframe'],
-                        source_type='exchange',
-                        source_timeframe=config['source_timeframe']
+                    rows = await self.clickhouse.fetch_candles(
+                        config['exchange'], config['symbol'], config['source_timeframe'], limit=1
                     )
-                    
+                    previous_candle = rows[0] if rows else None
+
                     if previous_candle and previous_candle['timestamp'] == last_candle_timestamp:
                         connection_info['closed_candles_processed'] += 1
                         
@@ -479,82 +471,3 @@ class RealtimeDataService:
         self.logger.info("Real-time Data Service cleanup completed")
 
 
-async def main():
-    """Main function for running Real-time Data Service standalone"""
-    import sys
-    import os
-    
-    # Add project root to Python path
-    sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    
-    logging.basicConfig(
-        level=logging.INFO,
-        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-    )
-    
-    logger = logging.getLogger('RealtimeDataServiceMain')
-    
-    service = None
-    queue_client = None
-    database_manager = None
-    
-    try:
-        # Initialize config manager
-        config_manager = UniversalConfigManager()
-        config_manager.load_all_configs()
-        
-        # Initialize database manager
-        # Use environment variables for database connection
-        db_config = {
-            'database': {
-                'host': os.getenv('DATABASE_HOST', 'localhost'),
-                'port': int(os.getenv('DATABASE_PORT', '5432')),
-                'name': os.getenv('DATABASE_NAME', 'trading_bot'),
-                'user': os.getenv('DATABASE_USER', 'trading_bot'),
-                'password': os.getenv('DATABASE_PASSWORD', 'trading_bot_pass'),
-                'connection_pool_size': 50,
-                'query_timeout': 30
-            }
-        }
-        database_manager = DatabaseManager(db_config)
-        await database_manager.initialize()
-        
-        # Initialize queue client
-        rabbitmq_url = os.getenv('RABBITMQ_URL')
-        if not rabbitmq_url:
-            raise ValueError("RABBITMQ_URL environment variable is required")
-        queue_client = RabbitMQClient(rabbitmq_url)
-        await queue_client.connect()
-        
-        # Initialize real-time data service
-        service = RealtimeDataService(config_manager, database_manager, queue_client)
-        await service.initialize()
-        
-        # Start real-time data streams
-        await service.start_all_realtime_streams()
-        
-        # Keep service running
-        logger.info("Real-time Data Service is running. Press Ctrl+C to stop.")
-        try:
-            while True:
-                await asyncio.sleep(1)
-        except KeyboardInterrupt:
-            logger.info("Shutdown signal received")
-        
-    except Exception as e:
-        logger.error(f"Real-time Data Service failed: {e}")
-        raise
-    finally:
-        # Cleanup
-        if service:
-            await service.cleanup()
-        if queue_client:
-            await queue_client.disconnect()
-        if database_manager:
-            await database_manager.cleanup()
-        
-        logger.info("Real-time Data Service shutdown completed")
-
-
-if __name__ == "__main__":
-    asyncio.run(main())

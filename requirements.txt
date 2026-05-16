@@ -1,23 +1,14 @@
-# Trading Bot Requirements - Microservices Architecture
+# Trading Bot Requirements
 
-# Async Database Support
-asyncpg>=0.29.0,<1.0.0
-sqlalchemy>=2.0.0,<3.0.0
-sqlalchemy[asyncio]>=2.0.0,<3.0.0
-
-# Message Queue (RabbitMQ)
-aio-pika>=9.3.0,<10.0.0
+# ClickHouse (primary DB — native async protocol)
+asynch>=0.2.0
 
 # HTTP and WebSocket libraries
 aiohttp>=3.9.0,<4.0.0
 websockets>=12.0,<13.0
 
-# Legacy database support (for migration)
-psycopg2-binary>=2.9.0
-
 # Data validation and configuration
 pydantic>=2.6.0,<3.0.0
-jsonschema>=4.21.0,<5.0.0
 pyyaml>=6.0.1,<7.0.0
 
 # Date/time handling
@@ -32,6 +23,10 @@ jinja2==3.1.2
 aiohttp-jinja2==1.5.1
 
 # Numeric and data processing
-numpy>=1.24.0,<2.0.0
+numpy>=2.2.6
 pandas>=2.0.0,<3.0.0
 pyarrow>=14.0.0
+
+# Indicator DSL
+pandas-ta==0.4.71b0
+numba>=0.59.0
