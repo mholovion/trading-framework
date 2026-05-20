@@ -57,20 +57,55 @@ def load_indicator_plugin(name: str, config: Dict[str, Any]) -> IndicatorPlugin:
     """
     Load an indicator plugin by name.
 
-    Search order:
-      1. plugins/indicators/NAME.py containing a class  → import and instantiate
-      2. plugins/indicators/NAME.py body-only script     → _ScriptPlugin
-      3. pandas_ta fallback                              → _make_ta_plugin
+    Requires PLUGIN_RUNNER_URL env var — computation is delegated to the
+    plugin-runner container to keep database credentials out of plugin code.
     """
-    plugin_path = _INDICATORS_DIR / f"{name}.py"
+    runner_url = os.getenv("PLUGIN_RUNNER_URL")
+    if not runner_url:
+        raise RuntimeError(
+            "PLUGIN_RUNNER_URL is not configured — "
+            "indicator execution requires the plugin-runner container"
+        )
+    from plugin_runner.client import RemoteIndicatorPlugin
+    return RemoteIndicatorPlugin(name, config, runner_url)
 
-    if plugin_path.exists():
+
+def _load_locally(name: str, config: Dict[str, Any]) -> IndicatorPlugin:
+    """
+    Internal: load and execute an indicator in-process.
+
+    Used by plugin_runner/server.py (which runs inside the sandboxed container).
+    Not for direct use from the dashboard.
+
+    Handles the special '__script__' type for inline code sent from the editor.
+
+    Search order:
+      1. __script__ with _code in config → inline _ScriptPlugin
+      2. plugins/indicators/user/NAME.py — user uploads (checked first)
+      3. plugins/indicators/NAME.py      — built-in class or script
+      4. pandas_ta fallback
+    """
+    # Inline script from the custom indicator editor
+    inline_code = config.get("parameters", config).get("_code") or config.get("_code")
+    if name == "__script__" or inline_code:
+        if not inline_code:
+            raise ValueError("__script__ indicator requires '_code' in config")
+        return _ScriptPlugin(inline_code, config, "<editor>")
+
+    importlib.invalidate_caches()  # pick up newly uploaded files without restart
+
+    for search_dir in (_INDICATORS_DIR / "user", _INDICATORS_DIR):
+        plugin_path = search_dir / f"{name}.py"
+        if not plugin_path.exists():
+            continue
         code = plugin_path.read_text()
         if "class " in code:
-            mod = importlib.import_module(f"plugins.indicators.{name}")
+            # Derive module path relative to project root for importlib
+            rel = plugin_path.relative_to(_PROJECT_ROOT)
+            module = ".".join(rel.with_suffix("").parts)
+            mod = importlib.import_module(module)
             cls_name = f"{name.capitalize()}Plugin"
-            plugin_cls = getattr(mod, cls_name)
-            return plugin_cls(config)
+            return getattr(mod, cls_name)(config)
         return _ScriptPlugin(code, config, str(plugin_path))
 
     return _make_ta_plugin(name, config)

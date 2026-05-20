@@ -85,6 +85,8 @@ class GapRecoveryService:
         self.active_connections: Dict[str, Dict]    = {}
         self.exchange_plugins:   Dict[str, Any]     = {}
         self._server_time_cache: Dict[str, tuple]   = {}
+        self._inflight: Dict[tuple, float]          = {}  # (ex,sym,tf,start,end) → sent_at
+        self._inflight_ttl = self.gap_check_interval * 3  # 180 s
 
         self.gap_check_task: Optional[asyncio.Task] = None
         self.processing_semaphore = asyncio.Semaphore(10)
@@ -130,6 +132,10 @@ class GapRecoveryService:
     async def stop(self):
         if self.gap_check_task:
             self.gap_check_task.cancel()
+            try:
+                await self.gap_check_task
+            except asyncio.CancelledError:
+                pass
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -257,7 +263,13 @@ class GapRecoveryService:
     async def _process_gaps_batch(self, connection_name: str, exchange: str,
                                   symbol: str, timeframe: str, gaps: List[Dict]):
         batches = self.batch_processor.create_batches(gaps)
+        now = time.time()
+        self._inflight = {k: v for k, v in self._inflight.items() if now - v < self._inflight_ttl}
         for batch in batches:
+            key = (exchange, symbol, timeframe, batch['start_timestamp'], batch['end_timestamp'])
+            if key in self._inflight:
+                self.logger.debug(f"Skipping in-flight gap {exchange}/{symbol} {batch['start_timestamp']}-{batch['end_timestamp']}")
+                continue
             try:
                 async with self.processing_semaphore:
                     await self.message_publisher.publish_custom_message({
@@ -271,6 +283,7 @@ class GapRecoveryService:
                         'expected_candles': batch['total_candles'],
                         'source': 'gap_recovery',
                     })
+                    self._inflight[key] = time.time()
                     self.stats['batches_sent'] += 1
                     self.stats['historical_requests_sent'] += 1
             except Exception as e:

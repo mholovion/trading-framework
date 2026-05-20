@@ -28,7 +28,7 @@ _TF_INTERVAL: dict[str, str] = {
     "1d":  "1 DAY",     "1w":  "1 WEEK",
 }
 
-_FLUSH_INTERVAL = 2.0   # seconds between auto-flushes
+_FLUSH_INTERVAL = 0.5   # seconds between auto-flushes
 _CANDLE_BATCH   = 500
 _IND_BATCH      = 1000
 

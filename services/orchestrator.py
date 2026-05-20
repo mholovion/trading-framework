@@ -188,8 +188,9 @@ class Orchestrator:
                     while self.running:
                         await asyncio.sleep(1)
                 elif service_name == 'gap_recovery':
-                    while self.running:
-                        await asyncio.sleep(1)
+                    await service.start()
+                    if service.gap_check_task:
+                        await service.gap_check_task
                 else:
                     await service.start()
             except asyncio.CancelledError:
@@ -303,22 +304,6 @@ class Orchestrator:
             self.logger.debug(f"Progress log error: {e}")
 
     # ------------------------------------------------------------------ #
-    # Gap recovery loop                                                    #
-    # ------------------------------------------------------------------ #
-
-    async def _coordinated_gap_recovery_loop(self):
-        while self.running:
-            try:
-                if 'gap_recovery' in self.services:
-                    await self.services['gap_recovery'].check_and_recover_gaps()
-                await asyncio.sleep(300)
-            except asyncio.CancelledError:
-                break
-            except Exception as e:
-                self.logger.error(f"Gap recovery loop error: {e}")
-                await asyncio.sleep(300)
-
-    # ------------------------------------------------------------------ #
     # Run / shutdown                                                       #
     # ------------------------------------------------------------------ #
 
@@ -345,10 +330,8 @@ class Orchestrator:
         await self.start_services()
         self.logger.info("All services started. Running...")
 
-        gap_task = asyncio.create_task(self._coordinated_gap_recovery_loop())
         while self.running:
             await asyncio.sleep(1)
-        gap_task.cancel()
 
     async def shutdown(self):
         self.logger.info("Graceful shutdown initiated...")

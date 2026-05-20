@@ -160,7 +160,7 @@
   .editor-modal.open { display: flex; }
   .editor-box {
     background: var(--surface); border: 1px solid var(--border); border-radius: 8px;
-    width: 720px; max-height: 85vh; display: flex; flex-direction: column;
+    width: 900px; height: min(680px, 88vh); display: flex; flex-direction: column;
     box-shadow: 0 8px 32px rgba(0,0,0,.7); overflow: hidden;
   }
   .editor-head {
@@ -194,13 +194,29 @@
     background: transparent; color: var(--dim); font-size: 11px; cursor: pointer;
   }
   .editor-add-param:hover { color: var(--text); border-color: var(--text); }
-  #monacoMount { flex: 1; min-height: 0; }
+  #monacoMount { flex: 1; min-height: 320px; }
   .editor-hint {
     padding: 4px 14px; font-size: 10px; color: var(--dim);
     border-top: 1px solid var(--border); flex-shrink: 0;
   }
+  .editor-range {
+    display: flex; align-items: center; gap: 6px; padding: 6px 14px;
+    border-top: 1px solid var(--border); flex-shrink: 0; background: var(--panel);
+  }
+  .editor-range .range-label { font-size: 11px; color: var(--dim); flex-shrink: 0; }
+  .editor-range .range-sep   { font-size: 11px; color: var(--dim); }
+  .editor-range input[type="date"] {
+    background: var(--bg); color: var(--text); border: 1px solid var(--border);
+    border-radius: 4px; padding: 2px 6px; font-size: 11px; color-scheme: dark;
+  }
+  .editor-range .range-clear {
+    font-size: 10px; padding: 2px 7px; border-radius: 4px;
+    border: 1px solid var(--border); background: transparent; color: var(--dim);
+    cursor: pointer; margin-left: 2px;
+  }
+  .editor-range .range-clear:hover { color: var(--text); border-color: var(--muted); }
   .editor-actions {
-    display: flex; gap: 8px; padding: 10px 14px;
+    display: flex; align-items: center; gap: 8px; padding: 10px 14px;
     border-top: 1px solid var(--border); flex-shrink: 0;
   }
 
@@ -270,11 +286,13 @@
     width: 0; border-left: 1px dashed rgba(255,255,255,0.35);
     pointer-events: none; display: none; z-index: 4;
   }
-  /* Horizontal indicator line on sub chart, follows crosshair */
-  #subHorzLine {
-    position: absolute; left: 0; width: 100%;
-    height: 0; border-top: 1px dashed rgba(255,255,255,0.35);
-    pointer-events: none; display: none; z-index: 4;
+  #xhairTimeLabel {
+    position: absolute; bottom: 0; left: 0;
+    transform: translateX(-50%);
+    background: #4c525e; color: #c0c3cc;
+    font-size: 11px; font-family: 'Trebuchet MS', sans-serif;
+    padding: 2px 6px; border-radius: 2px;
+    white-space: nowrap; display: none;
   }
 
   /* error */
@@ -394,6 +412,7 @@
     <div class="price-area">
       <span id="priceVal" class="price-val">—</span>
       <span id="priceChg" class="price-chg">—</span>
+      <span id="wsLive" style="font-size:11px;margin-left:8px;color:#555;font-family:monospace">WS --</span>
     </div>
     <a href="/progress" class="nav-btn">Progress</a>
     <button class="nav-btn" id="btnStrat" onclick="toggleStratPanel()">Strategies</button>
@@ -434,8 +453,19 @@
       <div class="editor-hint">
         Available: <code>close open high low volume ts np ta</code> + your params above · assign <code>result</code>
       </div>
+      <div class="editor-range">
+        <span class="range-label">Range:</span>
+        <input type="date" id="rangeFrom" title="Start date (leave empty for all history)">
+        <span class="range-sep">→</span>
+        <input type="date" id="rangeTo" title="End date (leave empty for all history)">
+        <button class="range-clear" onclick="g('rangeFrom').value='';g('rangeTo').value=''">All history</button>
+      </div>
       <div class="editor-actions">
         <button class="btn-cancel" onclick="closeEditorModal()">Cancel</button>
+        <select id="editorDisplay" style="background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:4px 8px;font-size:12px;cursor:pointer">
+          <option value="sub_panel">Sub-panel</option>
+          <option value="overlay">Overlay on chart</option>
+        </select>
         <button class="btn-apply" onclick="testCustomIndicator()" style="background:var(--muted)">▶ Test Run</button>
         <button class="btn-apply" onclick="saveCustomIndicator()">💾 Save to Library</button>
       </div>
@@ -475,9 +505,7 @@
     </div>
 
     <!-- Single crosshair line spanning main+resizer+sub panels -->
-    <div id="xhairLine"></div>
-    <!-- Horizontal line on sub chart at current indicator value -->
-    <div id="subHorzLine"></div>
+    <div id="xhairLine"><span id="xhairTimeLabel"></span></div>
 
     <div id="loader"><div class="spin"></div><span id="loaderMsg">Loading…</span></div>
     <div id="loadMoreBar" class="h"></div>
@@ -495,11 +523,11 @@ const S = {
   candles: [],
   allSignals: [],
   allInds: [],           // stored indicators from /status
-  activeInds: new Map(), // key → { on, series, rsiRefLines, data, meta }
+  activeInds: new Map(), // key → { on, series, subRefLines, data, meta }
   indMeta: new Map(),    // key → { display_name } for on-demand computed inds
 
-  charts: { main: null, vol: null, sub: null },
-  series: { candle: null, line: null, vol: null },
+  charts: { main: null, sub: null },
+  series: { candle: null, line: null, vol: null, subAnchor: null },
   emaColors: ['#f6c90e','#a29bfe','#74b9ff','#fd79a8','#81ecec','#55efc4','#fdcb6e'],
   emaColorIdx: 0,
   indColorMap: new Map(),
@@ -509,6 +537,8 @@ const S = {
   fitting: false,
   oldestTs: null,
   chartGen: 0,
+  displayedCandleT0: null,
+  displayedCandleT1: null,
   panelH: { sub: 140 },
   panelOrder: ['sub'],
 };
@@ -574,6 +604,147 @@ function fill(id, vals) {
 }
 function tfMin(tf) { return ({1:1,3:3,5:5,15:15,30:30,'1h':60,'2h':120,'4h':240,'6h':360,'12h':720,'1d':1440,'1w':10080})[tf.replace('m','').replace('h','h').replace('d','d').replace('w','w')] || ({ '1m':1,'3m':3,'5m':5,'15m':15,'30m':30,'1h':60,'2h':120,'4h':240,'6h':360,'12h':720,'1d':1440,'1w':10080 })[tf] || 9999; }
 
+// ─── Shared time-axis sync helpers ───────────────────────────────────
+// All panels share a single logical time axis. Moving any chart moves all
+// others. Sync is bidirectional: main→sub and sub→main.
+
+// Convert main-chart logical index → Unix timestamp (extrapolates outside data).
+function _mainLogicalToTime(logIdx) {
+  const n = S.candles.length;
+  if (!n) return null;
+  const dt = n > 1 ? S.candles[n - 1].timestamp - S.candles[n - 2].timestamp : 60;
+  if (logIdx >= n - 1)
+    return Math.round(S.candles[n - 1].timestamp + (logIdx - (n - 1)) * dt);
+  if (logIdx < 0)
+    return Math.round(S.candles[0].timestamp + logIdx * dt);
+  const lo = Math.floor(logIdx);
+  const frac = logIdx - lo;
+  return Math.round(S.candles[lo].timestamp + frac * (S.candles[lo + 1].timestamp - S.candles[lo].timestamp));
+}
+
+// Inverse: Unix timestamp → main-chart fractional logical index.
+function _timeToMainLogical(ts) {
+  const n = S.candles.length;
+  if (!n) return null;
+  const dt = n > 1 ? S.candles[n - 1].timestamp - S.candles[n - 2].timestamp : 60;
+  if (ts <= S.candles[0].timestamp) return (ts - S.candles[0].timestamp) / dt;
+  if (ts >= S.candles[n - 1].timestamp) return (n - 1) + (ts - S.candles[n - 1].timestamp) / dt;
+  let lo = 0, hi = n - 1;
+  while (lo < hi) { const mid = (lo + hi + 1) >> 1; if (S.candles[mid].timestamp <= ts) lo = mid; else hi = mid - 1; }
+  const nextTs = S.candles[lo + 1]?.timestamp ?? S.candles[lo].timestamp + dt;
+  return lo + (ts - S.candles[lo].timestamp) / (nextTs - S.candles[lo].timestamp);
+}
+
+// Sync lock — prevents the mutual callbacks from looping.
+let _chartSyncInProgress = false;
+
+// True only while the user is actively touching the sub chart (drag or wheel).
+// Guards sub→main sync so programmatic setVisibleLogicalRange on sub never drives main.
+let _subUserInteracting = false;
+let _subInteractTimer   = null;
+
+function _initSubInteraction() {
+  const el = g('chartSub');
+  if (!el) return;
+  el.addEventListener('mousedown',  () => { _subUserInteracting = true; });
+  el.addEventListener('mouseup',    () => { _subUserInteracting = false; });
+  el.addEventListener('mouseleave', () => { _subUserInteracting = false; });
+  el.addEventListener('wheel', () => {
+    _subUserInteracting = true;
+    clearTimeout(_subInteractTimer);
+    _subInteractTimer = setTimeout(() => { _subUserInteracting = false; }, 300);
+  }, { passive: true });
+}
+
+// [leftTs, rightTs] of the sub chart's transparent anchor series.
+// Tracked here so _getSubTimeline() can include them in the merged timeline,
+// ensuring the sub chart's logical indices match what we compute.
+let _subAnchorTs = [];
+
+// Set (or update) the sub chart anchor to span the full loaded candle range.
+// Called once when candles load and when older candles are prepended.
+// Only updates if the range actually changed; guards setData with
+// _chartSyncInProgress so the triggered range-change event doesn't propagate.
+function _setSubAnchor() {
+  if (!S.series.subAnchor || !S.candles.length) return;
+  const leftTs  = S.candles[0].timestamp;
+  const rightTs = S.candles[S.candles.length - 1].timestamp;
+  if (_subAnchorTs[0] === leftTs && _subAnchorTs[1] === rightTs) return;
+  _subAnchorTs = [leftTs, rightTs];
+  _chartSyncInProgress = true;
+  try { S.series.subAnchor.setData([{ time: leftTs, value: 0 }, { time: rightTs, value: 0 }]); } catch (_) {}
+  _chartSyncInProgress = false;
+}
+
+// Merged sorted array of all active sub-panel timestamps PLUS anchor timestamps.
+// This exactly matches the sub chart's internal logical timeline so that our
+// computed logical indices agree with LightweightCharts' internal indices.
+function _getSubTimeline() {
+  const tsSet = new Set(_subAnchorTs);
+  for (const entry of S.activeInds.values()) {
+    if (entry.on && entry.displayType === 'sub_panel' && entry.data.length) {
+      for (const p of entry.data) tsSet.add(p.time);
+    }
+  }
+  if (!tsSet.size) return null;
+  const arr = Array.from(tsSet);
+  arr.sort((a, b) => a - b);
+  return arr;
+}
+
+// Convert a Unix timestamp → fractional logical index in the sub chart's timeline.
+function _mainTimeToSubLogical(ts, timeline) {
+  const n = timeline.length;
+  const dt = n > 1 ? timeline[n - 1] - timeline[n - 2] : 60;
+  if (ts <= timeline[0]) return (ts - timeline[0]) / dt;
+  if (ts >= timeline[n - 1]) return (n - 1) + (ts - timeline[n - 1]) / dt;
+  let lo = 0, hi = n - 1;
+  while (lo < hi) { const mid = (lo + hi + 1) >> 1; if (timeline[mid] <= ts) lo = mid; else hi = mid - 1; }
+  const nextTs = timeline[lo + 1] ?? timeline[lo] + dt;
+  return lo + (ts - timeline[lo]) / (nextTs - timeline[lo]);
+}
+
+// Convert a fractional logical index in the sub chart → Unix timestamp.
+function _subLogicalToTime(l, timeline) {
+  const n = timeline.length;
+  const dt = n > 1 ? timeline[n - 1] - timeline[n - 2] : 60;
+  if (l >= n - 1) return timeline[n - 1] + (l - (n - 1)) * dt;
+  if (l < 0) return timeline[0] + l * dt;
+  const lo = Math.floor(l);
+  const t0 = timeline[lo], t1 = timeline[lo + 1] ?? timeline[lo] + dt;
+  return t0 + (l - lo) * (t1 - t0);
+}
+
+// Sync sub chart to match main chart's current logical range.
+// Uses setVisibleLogicalRange — no anchor coverage required, no setData side-effects.
+function _syncSubChart(mainRange) {
+  if (!mainRange) return;
+  const timeline = _getSubTimeline();
+  if (!timeline) return;
+  const fromTime = _mainLogicalToTime(mainRange.from);
+  const toTime   = _mainLogicalToTime(mainRange.to);
+  if (fromTime === null || toTime === null) return;
+  const fromL = _mainTimeToSubLogical(fromTime, timeline);
+  const toL   = _mainTimeToSubLogical(toTime, timeline);
+  try { S.charts.sub.timeScale().setVisibleLogicalRange({ from: fromL, to: toL }); } catch (_) {}
+}
+
+// Sync main chart to match sub chart's visible window (user dragged sub chart).
+function _syncMainFromSub() {
+  const subRange = S.charts.sub.timeScale().getVisibleLogicalRange();
+  if (!subRange || !S.candles.length) return;
+  const timeline = _getSubTimeline();
+  if (!timeline) return;
+  const fromTime = _subLogicalToTime(subRange.from, timeline);
+  const toTime   = _subLogicalToTime(subRange.to, timeline);
+  const mFrom = _timeToMainLogical(fromTime);
+  const mTo   = _timeToMainLogical(toTime);
+  if (mFrom === null || mTo === null) return;
+  const span = mTo - mFrom;
+  if (span < 2 || span > S.candles.length * 3) return;
+  try { S.charts.main.timeScale().setVisibleLogicalRange({ from: mFrom, to: mTo }); } catch (_) {}
+}
+
 // ═══ Charts init ═════════════════════════════════════════════════════
 function initCharts() {
   // Full crosshair line specs — all properties explicit to avoid v3.8 null errors
@@ -595,39 +766,43 @@ function initCharts() {
     handleScale:  { axisPressedMouseMove: true, mouseWheel: true, pinch: true },
   };
   S.charts.main = LightweightCharts.createChart(g('chartMain'), { ...base });
-  S.charts.vol  = LightweightCharts.createChart(g('chartVolume'), {
-    ...base,
-    crosshair: { mode: LightweightCharts.CrosshairMode.Normal,
-                 vertLine: { ..._vLine }, horzLine: { ..._hLine, visible: false } },
-    timeScale: { visible: false },
-    rightPriceScale: { scaleMargins: { top: 0.05, bottom: 0 }, borderColor: '#2a2e39' },
-  });
+  // S.charts.vol intentionally omitted — volume is overlaid on main chart;
+  // creating a chart on a container that immediately gets display:none caused
+  // "Value is null" errors from lightweight-charts' internal ResizeObserver.
   S.charts.sub  = LightweightCharts.createChart(g('chartSub'), {
     ...base,
     crosshair: {
-      mode: LightweightCharts.CrosshairMode.Normal,
-      vertLine: { ..._vLine },
-      horzLine: { ..._hLine, visible: false },  // CSS #subHorzLine used instead
+      mode: LightweightCharts.CrosshairMode.Magnet,
+      vertLine: { ..._vLine, labelVisible: false },  // native time label hidden — custom #xhairTimeLabel used instead
+      horzLine: { ..._hLine },  // native dashed horzLine — Y is snapped to indicator value via priceToCoordinate
     },
     timeScale: { visible: false },
     rightPriceScale: { scaleMargins: { top: 0.1, bottom: 0.1 }, borderColor: '#2a2e39' },
+    handleScroll: { mouseWheel: true, pressedMouseMove: true },
+    handleScale:  false,
   });
 
-  // One-directional time sync: main → sub only.
-  // Sub chart has no visible time axis so the user cannot scroll it independently.
-  // Two-way sync caused jumps: when sub chart's data doesn't cover the full range
-  // of main, it auto-adjusts after setVisibleRange and fires a new event that
-  // shifts main back — removing the reverse direction eliminates that feedback loop.
-  S.charts.main.timeScale().subscribeVisibleTimeRangeChange(range => {
-    if (!range) return;
-    try { S.charts.sub.timeScale().setVisibleRange(range); } catch (_) {}
-  });
-
-  // lazy load on scroll to left edge — guarded by S.fitting to prevent loop after fitContent
+  // ── Bidirectional shared-time-axis sync ─────────────────────────────
+  // Main → Sub: map main's logical range to sub's logical range via data timeline.
   S.charts.main.timeScale().subscribeVisibleLogicalRangeChange(range => {
-    if (range && range.from < 20 && !S.loadingMore && !S.noMoreData && !S.fitting) loadMore();
+    if (_chartSyncInProgress || !range) return;
+    if (hasSubPanel()) {
+      _chartSyncInProgress = true;
+      _syncSubChart(range);
+      _chartSyncInProgress = false;
+    }
+    if (range.from < 20 && !S.loadingMore && !S.noMoreData && !S.fitting) loadMore();
   });
 
+  // Sub → Main: only when the user is physically interacting with the sub chart.
+  S.charts.sub.timeScale().subscribeVisibleLogicalRangeChange(() => {
+    if (_chartSyncInProgress || !_subUserInteracting) return;
+    _chartSyncInProgress = true;
+    _syncMainFromSub();
+    _chartSyncInProgress = false;
+  });
+
+  _initSubInteraction();
   initCrosshairSync();
   updatePanelOrder();
 
@@ -640,21 +815,31 @@ function relayout() {
   const W = g('chartArea').clientWidth, H = g('chartArea').clientHeight;
   const statusH = (g('status').offsetHeight || 18) + 8;  // status bar + breathing room for time labels
   const usableH = H - statusH;
-  const rsiVisible = hasRsi() && !g('chartSub').classList.contains('h');
-  const rsiH = rsiVisible ? S.panelH.sub : 0;
+  const subVisible = hasSubPanel() && !g('chartSub').classList.contains('h');
+  const subH       = subVisible ? S.panelH.sub : 0;
+  const resizerH   = subVisible ? (g('resizerSub').offsetHeight || 5) : 0;
 
   // Volume is an overlay on main chart — the separate vol panel stays hidden
   g('chartVolume').classList.add('h');
   g('resizerVol').classList.add('h');
-  g('chartSub').style.height = rsiH ? `${rsiH}px` : '';
-  g('resizerSub').classList.toggle('h', !rsiVisible);
+  g('chartSub').style.height = subH ? `${subH}px` : '';
+  g('resizerSub').classList.toggle('h', !subVisible);
 
-  try { S.charts.main.resize(W, Math.max(usableH - rsiH, 100)); } catch (_) {}
-  if (rsiH) { try { S.charts.sub.resize(W, rsiH); } catch (_) {} }
+  if (W > 0) {
+    try { S.charts.main.resize(W, Math.max(usableH - subH - resizerH, 100)); } catch (_) {}
+    if (subH) { try { S.charts.sub.resize(W, subH); } catch (_) {} }
+  }
   g('xhairLine').style.height = usableH + 'px';
   updateTimeAxes();
+  // Re-sync sub chart after resize/applyOptions (which can trigger deferred
+  // fitContent inside LightweightCharts). RAF ensures our sync fires after any
+  // such deferred resets.
+  if (subH && S.candles.length) {
+    const _r = S.charts.main.timeScale().getVisibleLogicalRange();
+    if (_r) requestAnimationFrame(() => { _syncSubChart(_r); });
+  }
 }
-function hasRsi() { return [...S.activeInds.values()].some(v => v.on && v.displayType === 'sub_panel'); }
+function hasSubPanel() { return [...S.activeInds.values()].some(v => v.on && v.displayType === 'sub_panel'); }
 
 function initResizers() {
   // panel: 'vol' | 'sub'
@@ -708,6 +893,17 @@ function initResizers() {
   setupResizer('resizerSub', 'sub', 90, 500);
 }
 
+function _formatTime(ts) {
+  if (!ts) return '';
+  const d = new Date(ts * 1000);
+  const mon = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'][d.getUTCMonth()];
+  const tfMins = tfMin(S.tf || '1h');
+  if (tfMins >= 1440) return `${d.getUTCDate()} ${mon} '${String(d.getUTCFullYear()).slice(2)}`;
+  const h = String(d.getUTCHours()).padStart(2,'0');
+  const m = String(d.getUTCMinutes()).padStart(2,'0');
+  return `${d.getUTCDate()} ${mon} '${String(d.getUTCFullYear()).slice(2)} ${h}:${m}`;
+}
+
 // ═══ Panel order (move buttons) ══════════════════════════════════
 function updatePanelOrder() {
   const map = {
@@ -739,51 +935,72 @@ function movePanel(key, dir) {
 
 // ═══ Time axes — only bottommost visible panel shows time ruler ══
 function updateTimeAxes() {
-  const subVis = hasRsi() && !g('chartSub').classList.contains('h');
+  const subVis = hasSubPanel() && !g('chartSub').classList.contains('h');
   const tsBase = { timeVisible: true, secondsVisible: false, borderColor: '#2a2e39' };
   try { S.charts.main.applyOptions({ timeScale: { ...tsBase, visible: !subVis } }); } catch (_) {}
   try { S.charts.sub.applyOptions({  timeScale: { ...tsBase, visible: subVis  } }); } catch (_) {}
 }
 
 // ═══ Crosshair sync + OHLCV legend ═══════════════════════════════
-// Return pixel-Y of the first active sub-panel series at `time`.
-// Used to position the horzLine at the actual indicator value, not chart centre.
-function subChartCrosshairY(time) {
+// Main chart: shown when cursor is on sub panel so candle close value stays on right axis
+let _mainXLine = null;
+let _mainXLineSeries = null;
+
+function updateMainValueLine(time) {
+  _removeMainValueLine();
+  if (!time || !S.series.candle || !S.candles.length) return;
+  let lo = 0, hi = S.candles.length - 1;
+  while (lo < hi) { const mid = (lo + hi + 1) >> 1; if (S.candles[mid].timestamp <= time) lo = mid; else hi = mid - 1; }
+  if (!S.candles[lo]) return;
+  try {
+    _mainXLine = S.series.candle.createPriceLine({
+      price: +S.candles[lo].close,
+      color: 'rgba(255,255,255,0.55)',
+      lineWidth: 1,
+      lineStyle: 2,  // LineStyle.Dashed
+      axisLabelVisible: true,
+      title: '',
+    });
+    _mainXLineSeries = S.series.candle;
+  } catch (_) {}
+}
+
+function _removeMainValueLine() {
+  if (_mainXLine && _mainXLineSeries) {
+    try { _mainXLineSeries.removePriceLine(_mainXLine); } catch (_) {}
+    _mainXLine = null; _mainXLineSeries = null;
+  }
+}
+
+// Returns the sub-chart Y pixel coordinate for the indicator value at `time`.
+// Used to position setCrossHairXY so the native dashed horzLine appears ON the indicator.
+function _getSubCrosshairY(time) {
+  const subEl = g('chartSub');
+  const fallback = subEl ? subEl.clientHeight / 2 : 0;
   for (const entry of S.activeInds.values()) {
     if (!entry.on || entry.displayType !== 'sub_panel' || !entry.series || !entry.data.length) continue;
     const data = entry.data;
-    // Binary search: last point with time ≤ target
     let lo = 0, hi = data.length - 1;
     while (lo < hi) { const mid = (lo + hi + 1) >> 1; if (data[mid].time <= time) lo = mid; else hi = mid - 1; }
     if (data[lo] && data[lo].time <= time) {
       try {
         const y = entry.series.priceToCoordinate(data[lo].value);
-        if (y !== null && y !== undefined && isFinite(y)) return y;
+        if (y !== null && y !== undefined) return y;
       } catch (_) {}
     }
     break;
   }
-  return null;  // no valid position — caller hides the CSS line
+  return fallback;
 }
 
 function initCrosshairSync() {
   let _xhairSync = false;
   const allCharts = [S.charts.main, S.charts.sub];
-  const xhairLine    = g('xhairLine');
-  const subHorzLine  = g('subHorzLine');
+  const xhairLine      = g('xhairLine');
+  const xhairTimeLabel = g('xhairTimeLabel');
 
   function chartEl(c) {
     return c === S.charts.main ? g('chartMain') : g('chartSub');
-  }
-
-  function updateSubHorzLine(time) {
-    const subEl = g('chartSub');
-    if (!subEl || subEl.classList.contains('h')) { subHorzLine.style.display = 'none'; return; }
-    const y = subChartCrosshairY(time);  // pixel Y within sub chart canvas
-    if (y === null || !isFinite(y)) { subHorzLine.style.display = 'none'; return; }
-    // offsetTop gives sub chart's top relative to #chartArea (its position:relative parent)
-    subHorzLine.style.top     = (subEl.offsetTop + y) + 'px';
-    subHorzLine.style.display = 'block';
   }
 
   allCharts.forEach(chart => {
@@ -799,7 +1016,8 @@ function initCrosshairSync() {
 
       if (!time) {
         xhairLine.style.display = 'none';
-        subHorzLine.style.display = 'none';
+        xhairTimeLabel.style.display = 'none';
+        _removeMainValueLine();
         others.forEach(c => {
           const el = chartEl(c);
           if (!el || el.classList.contains('h')) return;
@@ -808,11 +1026,25 @@ function initCrosshairSync() {
       } else if (param.point) {
         xhairLine.style.left    = param.point.x + 'px';
         xhairLine.style.display = 'block';
-        updateSubHorzLine(time);
+        // Show custom label whenever sub panel owns the time axis (native sub label is
+        // hidden via labelVisible:false, so custom label is the only one in both cases).
+        const _subOwnsAxis = hasSubPanel() && !g('chartSub').classList.contains('h');
+        if (_subOwnsAxis) {
+          xhairTimeLabel.textContent   = _formatTime(time);
+          xhairTimeLabel.style.display = 'block';
+        } else {
+          xhairTimeLabel.style.display = 'none';
+        }
+
+        updateMainValueLine(time);
+
         others.forEach(c => {
           const el = chartEl(c);
           if (!el || el.classList.contains('h')) return;
-          try { c.setCrossHairXY(param.point.x, el.clientHeight / 2, true); } catch (_) {}
+          // For sub chart: snap crosshair Y to indicator value so native dashed horzLine
+          // appears on the indicator line rather than at an arbitrary vertical position.
+          const syncY = (c === S.charts.sub) ? _getSubCrosshairY(time) : el.clientHeight / 2;
+          try { c.setCrossHairXY(param.point.x, syncY, true); } catch (_) {}
         });
       }
 
@@ -885,7 +1117,14 @@ async function loadChart() {
     const cRes = await api(`/api/chart?exchange=${S.ex}&symbol=${S.sym}&timeframe=${S.tf}&limit=${lim}`);
     if (gen !== S.chartGen) return; // superseded by a newer loadChart() call
 
-    S.candles    = (cRes.data || []).sort((a, b) => a.timestamp - b.timestamp);
+    // Drop candles with null/zero OHLC — they have valid timestamps in DB but no
+    // price data yet (race condition during ingestion). Keeping them in S.candles
+    // would stretch indTsParams() and clipToCandles() beyond the visible chart range,
+    // causing RSI/indicator desync.
+    S.candles    = (cRes.data || [])
+      .filter(c => c.timestamp && isFinite(+c.open) && isFinite(+c.high) && isFinite(+c.low) && isFinite(+c.close)
+                   && +c.open && +c.high && +c.low && +c.close)
+      .sort((a, b) => a.timestamp - b.timestamp);
     S.oldestTs   = S.candles.length ? S.candles[0].timestamp : null;
     S.noMoreData = false;
 
@@ -908,6 +1147,9 @@ async function loadChart() {
 
     // Load signals in background — don't block chart render
     fetchSignals();
+
+    // Start/restart realtime WS for the new exchange/symbol/timeframe
+    connectRealtimeWS();
   } catch (e) { showErr(e.message); }
   finally { if (gen === S.chartGen) load(false); }
 }
@@ -930,7 +1172,9 @@ async function loadMore() {
   try {
     const lim = smartLimit();
     const res = await api(`/api/chart?exchange=${S.ex}&symbol=${S.sym}&timeframe=${S.tf}&limit=${lim}&before_timestamp=${S.oldestTs}`);
-    const more = (res.data || []).filter(c => c.timestamp < S.oldestTs);
+    const more = (res.data || [])
+      .filter(c => c.timestamp && isFinite(+c.open) && isFinite(+c.high) && isFinite(+c.low) && isFinite(+c.close)
+                   && +c.open && +c.high && +c.low && +c.close && c.timestamp < S.oldestTs);
     if (!more.length) { S.noMoreData = true; S.loadingMore = false; g('loadMoreBar').classList.add('h'); return; }
 
     // Merge, sort ascending, deduplicate — prevents duplicate-timestamp crash in lightweight-charts
@@ -942,10 +1186,16 @@ async function loadMore() {
     const visRange = S.charts.main.timeScale().getVisibleLogicalRange();
     const offset = more.length;
 
-    if (S.series.candle) S.series.candle.setData(toOhlc(S.candles));
-    if (S.series.line)   S.series.line.setData(S.candles.map(c => ({ time: c.timestamp, value: +c.close })));
+    const ohlcData = toOhlc(S.candles);
+    if (S.series.candle) S.series.candle.setData(ohlcData);
+    if (S.series.line)   S.series.line.setData(ohlcData.map(c => ({ time: c.time, value: c.close })));
     if (S.series.vol)    S.series.vol.setData(volData());
-
+    if (ohlcData.length) {
+      S.displayedCandleT0 = ohlcData[0].time;
+      S.displayedCandleT1 = ohlcData[ohlcData.length - 1].time;
+    }
+    // Extend anchor left edge to cover newly prepended candles
+    _setSubAnchor();
     // Restore shifted viewport so the visible window doesn't jump
     if (visRange) {
       S.charts.main.timeScale().setVisibleLogicalRange({
@@ -970,6 +1220,10 @@ function renderCandles() {
   if (!S.layers.candles || !S.candles.length) return;
 
   const data = toOhlc(S.candles);
+  S.displayedCandleT0 = data.length ? data[0].time : null;
+  S.displayedCandleT1 = data.length ? data[data.length - 1].time : null;
+  _subAnchorTs = []; // reset so _setSubAnchor() rebuilds for new candle range
+  _setSubAnchor();
   S.series.candle = S.charts.main.addCandlestickSeries({
     upColor: '#26a69a', downColor: '#ef5350',
     borderUpColor: '#26a69a', borderDownColor: '#ef5350',
@@ -985,10 +1239,12 @@ function renderCandles() {
 
 // ═══ Render volume ════════════════════════════════════════════════════
 function volData() {
-  return S.candles.map(c => ({
-    time: c.timestamp, value: +c.volume || 0,
-    color: +c.close >= +c.open ? 'rgba(38,166,154,.45)' : 'rgba(239,83,80,.45)',
-  }));
+  return S.candles
+    .filter(c => c.timestamp)
+    .map(c => ({
+      time: c.timestamp, value: +c.volume || 0,
+      color: +c.close >= +c.open ? 'rgba(38,166,154,.45)' : 'rgba(239,83,80,.45)',
+    }));
 }
 function renderVolume() {
   if (!S.layers.volume) {
@@ -1265,16 +1521,29 @@ function addIndToChart(key, pts, meta) {
   if (!S.indColorMap.has(key))
     S.indColorMap.set(key, S.emaColors[S.emaColorIdx++ % S.emaColors.length]);
 
-  // Auto-detect scale: if indicator values differ wildly from price, force sub-panel
+  // Determine display type and whether to use the left Y-axis.
+  // • No explicit choice: auto-detect → sub_panel when values differ from price.
+  // • Explicit overlay + values differ from price → left Y-axis (TradingView pattern):
+  //   indicator stays on main chart but gets its own scale, candles keep right axis.
+  // • Explicit overlay + values in price range → right Y-axis (shared with candles).
   let displayType = meta.display_type || 'overlay';
+  let useLeftScale = false;
+
   if (displayType === 'overlay' && pts.length > 0 && S.candles.length > 0) {
     const lastPrice = +S.candles[S.candles.length - 1].close;
     const sample = pts.slice(-50).map(p => p.value);
     const avg = sample.reduce((a, b) => a + b, 0) / sample.length;
-    if (avg < lastPrice * 0.05 || avg > lastPrice * 3) displayType = 'sub_panel';
+    const scalesDiffer = avg < lastPrice * 0.05 || avg > lastPrice * 3;
+    if (scalesDiffer) {
+      if (meta.explicit_display) {
+        useLeftScale = true;   // user insisted on overlay → left axis
+      } else {
+        displayType = 'sub_panel';  // auto-detect → move to sub panel
+      }
+    }
   }
 
-  const entry = { on: true, series: null, rsiRefLines: [], data: pts, displayType,
+  const entry = { on: true, series: null, subRefLines: [], data: pts, displayType, useLeftScale,
                    meta: { name: key, exchange: meta.exchange, symbol: meta.symbol,
                            tf: meta.timeframe } };
   S.activeInds.set(key, entry);
@@ -1282,8 +1551,8 @@ function addIndToChart(key, pts, meta) {
   S.indMeta.set(key, { display_name: `${meta.type?.toUpperCase()} (${meta.period || ''}, ${meta.timeframe?.toUpperCase()})` });
 
   buildIndChips();
-  renderIndSeries(key, entry);
-  updateRsiPanel();
+  try { renderIndSeries(key, entry); } catch (e) { console.warn('renderIndSeries error:', e.message); }
+  updateSubPanel();
   relayout();
 }
 
@@ -1295,7 +1564,7 @@ async function toggleInd(name) {
     S.activeInds.delete(name);
     S.indColorMap.delete(name);
     buildIndChips();
-    updateRsiPanel();
+    updateSubPanel();
     relayout();
     return;
   }
@@ -1303,7 +1572,7 @@ async function toggleInd(name) {
   if (!meta) return;
   if (!S.indColorMap.has(name))
     S.indColorMap.set(name, S.emaColors[S.emaColorIdx++ % S.emaColors.length]);
-  S.activeInds.set(name, { on: true, series: null, rsiRefLines: [], data: [], meta });
+  S.activeInds.set(name, { on: true, series: null, subRefLines: [], data: [], meta });
   buildIndChips();
   try {
     const tsParams = indTsParams();
@@ -1315,7 +1584,7 @@ async function toggleInd(name) {
     if (!entry) return;
     entry.data = pts;
     renderIndSeries(name, entry);
-    updateRsiPanel();
+    updateSubPanel();
     relayout();
   } catch (e) { showErr(`Failed to load ${name}: ${e.message}`); }
 }
@@ -1341,9 +1610,33 @@ function renderIndSeries(name, entry) {
     // pre-size before removing .h to prevent layout jump
     g('chartSub').style.height = `${S.panelH.sub}px`;
     g('chartSub').classList.remove('h');
-    const s = S.charts.sub.addLineSeries({
-      color: col, lineWidth: 1, priceLineVisible: false, lastValueVisible: true, title: name,
-    });
+    // Sub chart was created while hidden (0×0). Resize it to real dimensions
+    // before adding series — lightweight-charts v3.8 throws "Value is null"
+    // when addLineSeries is called on a chart that has never been sized.
+    const subW = g('chartArea').clientWidth || window.innerWidth;
+    try { S.charts.sub.resize(subW, S.panelH.sub); } catch (_) {}
+    // Create the transparent anchor series once the chart has real dimensions.
+    // The anchor spans the full candle range so the time axis can resolve
+    // timestamps for any pixel x (including before the first indicator point).
+    if (!S.series.subAnchor) {
+      try {
+        S.series.subAnchor = S.charts.sub.addHistogramSeries({
+          color: 'transparent', priceScaleId: '',
+          priceFormat: { type: 'volume' }, lastValueVisible: false, priceLineVisible: false,
+        });
+        _setSubAnchor();
+      } catch (_) {}
+    }
+    let s;
+    try {
+      s = S.charts.sub.addLineSeries({
+        color: col, lineWidth: 1, priceLineVisible: false, lastValueVisible: true, title: name,
+      });
+    } catch (e) {
+      console.warn('renderIndSeries sub-panel addLineSeries error:', e.message);
+      S.fitting = prevFitting;
+      return;
+    }
     try {
       s.setData(data);
     } catch (e) {
@@ -1353,27 +1646,54 @@ function renderIndSeries(name, entry) {
       return;
     }
     entry.series = s;
-    // Restore main chart viewport — RSI setData fired sync subscription which may have scrolled main
     if (mainRange) {
+      // Restore main chart viewport (setData on indicator may shift logical indices).
       try { S.charts.main.timeScale().setVisibleLogicalRange(mainRange); } catch (_) {}
+      // relayout() called by addIndToChart applies correct sub viewport via RAF.
     }
-    // reference lines for bounded oscillators (0-100 range)
-    const maxVal = Math.max(...data.slice(-20).map(p => p.value));
-    if (maxVal <= 105 && data.length > 1) {
+    // reference lines only for true 0-100 bounded oscillators (RSI, Stoch, etc.)
+    // min >= 0 and max in [50, 105] indicates a 0-100 range oscillator
+    const sample20 = data.slice(-20).map(p => p.value);
+    const maxVal = Math.max(...sample20);
+    const minVal = Math.min(...sample20);
+    if (minVal >= 0 && maxVal >= 50 && maxVal <= 105 && data.length > 1) {
       const addRef = (v, c) => {
-        const rs = S.charts.sub.addLineSeries({ color: c, lineWidth: 1, lineStyle: 2,
-                                                 priceLineVisible: false, lastValueVisible: false });
+        let rs;
+        try { rs = S.charts.sub.addLineSeries({ color: c, lineWidth: 1, lineStyle: 2,
+                                                 priceLineVisible: false, lastValueVisible: false }); }
+        catch (_) { return; }
         const t0 = data[0].time, t1 = data[data.length-1].time;
-        try { rs.setData([{ time: t0, value: v }, { time: t1, value: v }]); } catch (_) { return; }
-        entry.rsiRefLines.push(rs);
+        try { rs.setData([{ time: t0, value: v }, { time: t1, value: v }]); } catch (_) { try { S.charts.sub.removeSeries(rs); } catch (_2) {} return; }
+        entry.subRefLines.push(rs);
       };
       addRef(70, 'rgba(239,83,80,.3)');
       addRef(30, 'rgba(38,166,154,.3)');
     }
   } else {
-    const s = S.charts.main.addLineSeries({
-      color: col, lineWidth: 1, priceLineVisible: false, lastValueVisible: true, title: name,
-    });
+    // Overlay: use left Y-axis when indicator values are in different units from price.
+    // This keeps candles on the right axis (undistorted) while the indicator still
+    // appears visually overlaid on the same chart pane.
+    const scaleId = entry.useLeftScale ? 'left' : 'right';
+    let s;
+    try {
+      s = S.charts.main.addLineSeries({
+        color: col, lineWidth: 1, priceLineVisible: false, lastValueVisible: true, title: name,
+        priceScaleId: scaleId,
+      });
+    } catch (e) {
+      console.warn('renderIndSeries overlay addLineSeries error:', e.message);
+      S.fitting = prevFitting;
+      return;
+    }
+    if (entry.useLeftScale) {
+      try {
+        S.charts.main.priceScale('left').applyOptions({
+          visible: true,
+          borderColor: '#2a2e39',
+          scaleMargins: { top: 0.1, bottom: 0.1 },
+        });
+      } catch (_) {}
+    }
     try {
       s.setData(data);
     } catch (e) {
@@ -1394,9 +1714,10 @@ function renderIndSeries(name, entry) {
 }
 
 function clipToCandles(data) {
-  if (!S.candles.length || !data.length) return data;
-  const t0 = S.candles[0].timestamp;
-  const t1 = S.candles[S.candles.length - 1].timestamp;
+  if (!data.length) return data;
+  const t0 = S.displayedCandleT0 ?? (S.candles.length ? S.candles[0].timestamp : null);
+  const t1 = S.displayedCandleT1 ?? (S.candles.length ? S.candles[S.candles.length - 1].timestamp : null);
+  if (!t0 || !t1) return data;
   return data.filter(p => p.time >= t0 && p.time <= t1);
 }
 
@@ -1404,19 +1725,28 @@ function removeIndSeries(name, entry) {
   const isSubPanel = (entry.displayType || 'overlay') === 'sub_panel';
   const chart = isSubPanel ? S.charts.sub : S.charts.main;
   if (entry.series) { try { chart.removeSeries(entry.series); } catch (_) {} }
-  entry.rsiRefLines.forEach(rs => { try { S.charts.sub.removeSeries(rs); } catch (_) {} });
-  entry.series = null; entry.rsiRefLines = [];
+  entry.subRefLines.forEach(rs => { try { S.charts.sub.removeSeries(rs); } catch (_) {} });
+  entry.series = null; entry.subRefLines = [];
+  // Hide left price scale if no other overlay indicators still use it
+  if (entry.useLeftScale) {
+    const anyLeft = [...S.activeInds.values()].some(
+      e => e !== entry && e.on && e.useLeftScale && e.series
+    );
+    if (!anyLeft) {
+      try { S.charts.main.priceScale('left').applyOptions({ visible: false }); } catch (_) {}
+    }
+  }
 }
 
-function updateRsiPanel() {
+function updateSubPanel() {
   const anySubPanel = [...S.activeInds.values()].some(v => v.on && v.displayType === 'sub_panel' && v.series);
   g('chartSub').classList.toggle('h', !anySubPanel);
 }
 
 function indTsParams() {
-  if (!S.candles.length) return '';
-  const st = S.candles[0].timestamp;
-  const et = S.candles[S.candles.length - 1].timestamp;
+  const st = S.displayedCandleT0 ?? (S.candles.length ? S.candles[0].timestamp : null);
+  const et = S.displayedCandleT1 ?? (S.candles.length ? S.candles[S.candles.length - 1].timestamp : null);
+  if (!st || !et) return '';
   return `&start_ts=${st}&end_ts=${et}`;
 }
 
@@ -1425,7 +1755,7 @@ async function refreshActiveIndicators(gen) {
   const tsParams = indTsParams();
   await Promise.all([...S.activeInds.entries()].map(async ([name, entry]) => {
     removeIndSeries(name, entry);
-    entry.series = null; entry.rsiRefLines = []; entry.data = [];
+    entry.series = null; entry.subRefLines = []; entry.data = [];
     try {
       const r = await api(`/api/indicators?indicator_name=${name}&exchange=${entry.meta.exchange}&symbol=${entry.meta.symbol}&timeframe=${entry.meta.tf}${tsParams}`);
       if (gen !== undefined && gen !== S.chartGen) return; // superseded
@@ -1436,7 +1766,7 @@ async function refreshActiveIndicators(gen) {
       if (entry.on) renderIndSeries(name, entry);
     } catch (_) {}
   }));
-  updateRsiPanel();
+  updateSubPanel();
 }
 
 // ═══ Chips ════════════════════════════════════════════════════════════
@@ -1462,13 +1792,13 @@ function flipInd(name) {
   const chart = entry.displayType === 'sub_panel' ? S.charts.sub : S.charts.main;
   if (!entry.on) {
     if (entry.series) { try { chart.removeSeries(entry.series); } catch (_) {} entry.series = null; }
-    entry.rsiRefLines.forEach(rs => { try { S.charts.sub.removeSeries(rs); } catch (_) {} });
-    entry.rsiRefLines = [];
+    entry.subRefLines.forEach(rs => { try { S.charts.sub.removeSeries(rs); } catch (_) {} });
+    entry.subRefLines = [];
   } else {
     renderIndSeries(name, entry);
   }
   buildIndChips();
-  updateRsiPanel();
+  updateSubPanel();
   relayout();
 }
 
@@ -1482,7 +1812,7 @@ function removeInd(e, name) {
   S.indColorMap.delete(name);
   buildIndChips();
   buildIndDropdown();
-  updateRsiPanel();
+  updateSubPanel();
   relayout();
 }
 
@@ -1504,6 +1834,7 @@ function tog(layer) {
 
 // ═══ Utils ════════════════════════════════════════════════════════════
 function clearMainSeries() {
+  _removeMainValueLine();
   rmSeries(S.charts.main, 'candle');
   rmSeries(S.charts.main, 'line');
   rmSeries(S.charts.main, 'vol');
@@ -1519,10 +1850,13 @@ function rmSeries(chart, key) {
 }
 
 function toOhlc(candles) {
+  const seen = new Set();
   return candles
     .map(c => ({ time: c.timestamp, open: +c.open, high: +c.high, low: +c.low, close: +c.close }))
-    .filter(c => c.open && c.high && c.low && c.close)
-    .sort((a, b) => a.time - b.time);
+    .filter(c => c.time && isFinite(c.open) && isFinite(c.high) && isFinite(c.low) && isFinite(c.close)
+                 && c.open && c.high && c.low && c.close)
+    .sort((a, b) => a.time - b.time)
+    .filter(c => { if (seen.has(c.time)) return false; seen.add(c.time); return true; });
 }
 
 function updatePrice() {
@@ -1643,10 +1977,11 @@ let monacoEditor = null;
 let editorParams = []; // [{key, type, default}]
 
 const EDITOR_TEMPLATE = `# Available: close open high low volume ts np ta
-# Available: ta.rsi() ta.ema() ta.sma() ta.macd() ... + custom primitives
-# Assign: result = np.ndarray (one value per candle)
+# ta.rsi() ta.ema() ta.sma() ta.macd() ta.bbands() ... + custom primitives
+# Assign your result to the variable:  result = np.ndarray (one value per candle)
 
-ema = ta.ema(close, period)
+# --- EMA deviation (% above / below EMA) ---
+ema    = ta.ema(close, period)
 result = (close - ema) / ema * 100
 `;
 
@@ -1680,7 +2015,6 @@ function initMonaco() {
 
 function createMonacoEditor() {
   const mount = g('monacoMount');
-  mount.style.height = '260px';
   monacoEditor = monaco.editor.create(mount, {
     value: EDITOR_TEMPLATE,
     language: 'python',
@@ -1725,25 +2059,55 @@ async function testCustomIndicator() {
   if (!monacoEditor) return;
   const code = monacoEditor.getValue();
   const name = g('editorName').value.trim() || 'preview';
-  const params_schema = editorParams;
   const paramDefaults = Object.fromEntries(editorParams.map(p => [p.key, p.default]));
 
+  const btnTest = document.querySelector('#editorModal .btn-apply[onclick*="testCustomIndicator"]');
+  const btnSave = document.querySelector('#editorModal .btn-apply[onclick*="saveCustomIndicator"]');
+  const origHtml = btnTest.innerHTML;
+  btnTest.disabled = true;
+  btnSave.disabled = true;
+  btnTest.innerHTML = '<span class="spin" style="width:11px;height:11px;display:inline-block;vertical-align:middle;margin-right:6px"></span>Computing…';
+
   try {
+    const fromVal = g('rangeFrom')?.value;
+    const toVal   = g('rangeTo')?.value;
+    const fromTs  = fromVal ? Math.floor(new Date(fromVal + 'T00:00:00Z').getTime() / 1000) : null;
+    const toTs    = toVal   ? Math.floor(new Date(toVal   + 'T23:59:59Z').getTime() / 1000) : null;
+
+    const reqBody = {
+      type: '__script__', timeframe: S.tf, exchange: S.ex, symbol: S.sym,
+      _code: code, ...paramDefaults,
+    };
+    if (fromTs) reqBody.start_ts = fromTs;
+    if (toTs)   reqBody.end_ts   = toTs;
+    // When date range is selected, bypass _TEST_LIMITS so all data in range is returned
+    if (fromTs || toTs) reqBody.limit = 0;
+
     const r = await fetch('/api/indicators/test', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        type: '__script__', timeframe: S.tf, exchange: S.ex, symbol: S.sym,
-        _code: code, ...paramDefaults,
-      }),
+      body: JSON.stringify(reqBody),
     });
     const data = await r.json();
     if (data.error) { showErr(data.error); return; }
-    addIndToChart(`preview_${name}`, data.data, {
+    const pts = (data.data || [])
+      .map(p => ({ time: p.timestamp, value: parseFloat(p.value) }))
+      .filter(p => p.time && isFinite(p.value))
+      .sort((a, b) => a.time - b.time);
+    if (!pts.length) { showErr('No data returned for the selected range'); return; }
+    const displayType = g('editorDisplay')?.value || 'sub_panel';
+    addIndToChart(`preview_${name}`, pts, {
       type: name, timeframe: S.tf, exchange: S.ex, symbol: S.sym,
+      display_type: displayType,
+      explicit_display: true,
     });
-    closeEditorModal();
-  } catch (e) { showErr(e.message); }
+  } catch (e) {
+    showErr(e.message);
+  } finally {
+    btnTest.innerHTML = origHtml;
+    btnTest.disabled = false;
+    btnSave.disabled = false;
+  }
 }
 
 async function saveCustomIndicator() {
@@ -1769,6 +2133,79 @@ async function saveCustomIndicator() {
 }
 
 window.addEventListener('DOMContentLoaded', boot);
+
+// ═══ Realtime WebSocket ═══════════════════════════════════════════════
+let _rtWS = null;
+let _rtCount = 0;
+
+function _wsLive(text, color) {
+  const el = g('wsLive');
+  if (el) { el.textContent = text; el.style.color = color; }
+}
+
+function connectRealtimeWS() {
+  if (_rtWS) { _rtWS.onclose = null; _rtWS.close(); _rtWS = null; }
+  if (!S.ex || !S.sym || !S.tf) return;
+
+  _wsLive('WS connecting…', '#555');
+  const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+  const ws = new WebSocket(
+    `${proto}://${location.host}/api/ws/candles` +
+    `?exchange=${encodeURIComponent(S.ex)}&symbol=${encodeURIComponent(S.sym)}&timeframe=${encodeURIComponent(S.tf)}`
+  );
+  _rtWS = ws;
+  _rtCount = 0;
+
+  ws.onopen = () => _wsLive('WS ●', '#26a69a');
+
+  ws.onmessage = (e) => {
+    let msg;
+    try { msg = JSON.parse(e.data); } catch (_) { return; }
+    if (msg.type !== 'candle') return;
+    const d = msg.data;
+    _rtCount++;
+    _wsLive(`${new Date().toLocaleTimeString('en-GB')} C=${(+d.close).toFixed(2)}`, '#26a69a');
+
+    // Update candlestick series
+    if (S.series.candle) {
+      try {
+        S.series.candle.update({ time: d.time, open: +d.open, high: +d.high, low: +d.low, close: +d.close });
+      } catch (_) {}
+    }
+    // Update invisible line series (used for markers)
+    if (S.series.line) {
+      try { S.series.line.update({ time: d.time, value: +d.close }); } catch (_) {}
+    }
+    // Update volume series
+    if (S.series.vol) {
+      try {
+        S.series.vol.update({
+          time: d.time, value: +d.volume,
+          color: +d.close >= +d.open ? 'rgba(38,166,154,.45)' : 'rgba(239,83,80,.45)',
+        });
+      } catch (_) {}
+    }
+
+    // Keep S.candles in sync so updatePrice/legend see current data
+    if (S.candles.length > 0) {
+      const last = S.candles[S.candles.length - 1];
+      if (d.time === last.timestamp) {
+        last.open = d.open; last.high = d.high; last.low = d.low;
+        last.close = d.close; last.volume = d.volume;
+      } else if (d.time > last.timestamp) {
+        S.candles.push({ timestamp: d.time, open: d.open, high: d.high,
+                         low: d.low, close: d.close, volume: d.volume });
+      }
+    }
+    updatePrice();
+  };
+
+  ws.onclose = () => {
+    _wsLive('WS reconnecting…', '#555');
+    if (_rtWS === ws) setTimeout(connectRealtimeWS, 3000);
+  };
+  ws.onerror = () => _wsLive('WS error', '#ef5350');
+}
 </script>
 </body>
 </html>

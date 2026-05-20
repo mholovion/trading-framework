@@ -4,6 +4,7 @@
 import os
 os.environ.setdefault("NUMBA_DISABLE_JIT", "1")  # pandas_ta numba caching fix in Docker
 
+import asyncio
 from aiohttp import web
 import aiohttp_jinja2
 import jinja2
@@ -20,6 +21,7 @@ from core.universal_config_manager import UniversalConfigManager
 from core.logging_config import setup_service_logging
 from core.clickhouse import ClickHouseManager, create_clickhouse_manager
 from core.resolver import DependencyResolver
+from core.live_feed import LiveFeed
 
 
 def convert_decimals(data):
@@ -43,6 +45,7 @@ class TradingBotAPI:
         self.config_manager: Optional[UniversalConfigManager] = None
         self.clickhouse:     Optional[ClickHouseManager]      = None
         self.resolver:       Optional[DependencyResolver]     = None
+        self.live_feed:      Optional[LiveFeed]               = None
 
     async def initialize(self):
         self.logger.info("Initializing Trading Bot API...")
@@ -55,6 +58,9 @@ class TradingBotAPI:
         await self.clickhouse.initialize()
         self.resolver   = DependencyResolver(self.clickhouse)
 
+        self.live_feed = LiveFeed(self.config_manager, self.logger)
+        await self.live_feed.initialize()
+
         self._setup_routes()
 
         _base_dir = Path(__file__).parent
@@ -62,6 +68,7 @@ class TradingBotAPI:
             self.app,
             loader=jinja2.FileSystemLoader(str(_base_dir / 'templates')),
             enable_async=True,
+            auto_reload=True,
         )
 
         self.logger.info("Trading Bot API initialized")
@@ -82,6 +89,7 @@ class TradingBotAPI:
         self.app.router.add_get('/api/strategies/status',       self.get_strategies_status)
         self.app.router.add_post('/api/strategies/compute',     self.compute_strategy)
         self.app.router.add_get('/api/progress',                self.get_progress)
+        self.app.router.add_get('/api/ws/candles',              self.ws_candles)
         self.app.router.add_get('/',                            self.dashboard)
         self.app.router.add_get('/dashboard',                   self.dashboard)
         self.app.router.add_get('/chart',                       self.trading_chart)
@@ -391,26 +399,34 @@ class TradingBotAPI:
             symbol   = body.pop("symbol")
             start_ts = body.pop("start_ts", None)
             end_ts   = body.pop("end_ts",   None)
+            limit    = body.pop("limit",    None)
             params   = IndicatorParams.create(type_, tf, period, source, **body)
 
-            candles = await self.clickhouse.fetch_candles(
-                exchange, symbol, tf, start_ts=start_ts, end_ts=end_ts
-            )
-            if not candles:
-                return web.json_response({"data": []})
+            plugin = load_indicator_plugin(type_, params.to_dict())
 
-            plugin  = load_indicator_plugin(type_, params.to_dict())
-            warmup  = plugin.get_required_periods()
-            results = await plugin.calculate_stream(candles, warmup)
+            from plugin_runner.client import RemoteIndicatorPlugin
+            if isinstance(plugin, RemoteIndicatorPlugin):
+                # Plugin-runner fetches candles itself — no payload size limit
+                data = await plugin.compute_for(
+                    exchange, symbol, tf,
+                    start_ts=start_ts, end_ts=end_ts, limit=limit,
+                )
+            else:
+                # Local fallback (dev without Docker)
+                candles = await self.clickhouse.fetch_candles(
+                    exchange, symbol, tf, start_ts=start_ts, end_ts=end_ts, limit=2000,
+                )
+                if not candles:
+                    return web.json_response({"data": []})
+                warmup  = plugin.get_required_periods()
+                results = await plugin.calculate_stream(candles, warmup)
+                data = []
+                for i, r in enumerate(results):
+                    if r and r.get("value") is not None:
+                        data.append({"timestamp": candles[warmup + i]["timestamp"],
+                                     "value": float(r["value"])})
 
-            data = []
-            for i, r in enumerate(results):
-                if r and r.get("value") is not None:
-                    data.append({"timestamp": candles[warmup + i]["timestamp"],
-                                  "value": float(r["value"])})
-
-            return web.json_response({"data": data,
-                                       "display_name": params.display_name()})
+            return web.json_response({"data": data, "display_name": params.display_name()})
         except Exception as e:
             self.logger.error(f"test_indicator error: {e}")
             return web.json_response({"error": str(e)}, status=500)
@@ -659,6 +675,123 @@ class TradingBotAPI:
                 'error': str(e)
             }
 
+    async def ws_candles(self, request):
+        """
+        GET /api/ws/candles?exchange=X&symbol=Y&timeframe=Z
+
+        Streams live candle updates directly from the exchange plugin (via LiveFeed),
+        bypassing ClickHouse.  Every tick from the exchange arrives here within
+        milliseconds.  The browser receives {type:'candle', data:{time,open,high,low,close,volume}}
+        and calls series.update() — LightweightCharts handles open vs closed candles
+        automatically (same time = update active, new time = close + open new).
+        Falls back to ClickHouse polling when no live plugin is configured.
+        """
+        exchange  = request.query.get('exchange', '')
+        symbol    = request.query.get('symbol', '')
+        timeframe = request.query.get('timeframe', '1m')
+
+        ws = web.WebSocketResponse(heartbeat=20)
+        await ws.prepare(request)
+
+        q = await self.live_feed.subscribe(exchange, symbol, timeframe) if self.live_feed else None
+
+        push_task = asyncio.create_task(
+            self._ws_push(ws, q, exchange, symbol, timeframe)
+        )
+        try:
+            async for _ in ws:
+                pass
+        finally:
+            push_task.cancel()
+            if q and self.live_feed:
+                self.live_feed.unsubscribe(exchange, symbol, timeframe, q)
+
+        return ws
+
+    async def _ws_push(self, ws, q, exchange: str, symbol: str, timeframe: str):
+        """Forward candle updates from LiveFeed queue (or ClickHouse fallback) to browser.
+
+        Always polls ClickHouse as a fallback when the live queue yields nothing within
+        1.5 s — covers the case where the dashboard's plugin WS fails to connect (DNS
+        flakiness at startup) while the launcher continues writing to ClickHouse.
+
+        For non-1m timeframes: dynamically aggregates from 1m candles so the current
+        bar's OHLCV updates in real-time instead of staying frozen until bar close.
+        """
+        _TF_SEC = {
+            '3m': 180, '5m': 300, '15m': 900, '30m': 1800,
+            '1h': 3600, '2h': 7200, '4h': 14400, '6h': 21600,
+            '8h': 28800, '12h': 43200, '1d': 86400, '3d': 259200, '1w': 604800,
+        }
+        tf_sec = _TF_SEC.get(timeframe, 0)
+
+        if tf_sec == 0:
+            # 1m or unknown: query directly
+            sql = (
+                "SELECT timestamp, open, high, low, close, volume "
+                "FROM candles FINAL "
+                "WHERE exchange=%(ex)s AND symbol=%(sym)s AND timeframe='1m' "
+                "ORDER BY timestamp DESC LIMIT 1"
+            )
+        else:
+            # Aggregate 1m candles into the current TF bar on-the-fly.
+            # intDiv(toUnixTimestamp(now()), tf_sec)*tf_sec = start of current bar.
+            sql = (
+                f"SELECT "
+                f"  intDiv(toUnixTimestamp(now()), {tf_sec}) * {tf_sec} AS bar_ts, "
+                f"  argMin(open, timestamp) AS open, "
+                f"  max(high) AS high, "
+                f"  min(low) AS low, "
+                f"  argMax(close, timestamp) AS close, "
+                f"  sum(volume) AS volume "
+                f"FROM candles FINAL "
+                f"WHERE exchange=%(ex)s AND symbol=%(sym)s AND timeframe='1m' "
+                f"  AND timestamp >= intDiv(toUnixTimestamp(now()), {tf_sec}) * {tf_sec} "
+                f"GROUP BY bar_ts "
+                f"ORDER BY bar_ts DESC LIMIT 1"
+            )
+
+        params    = {"ex": exchange, "sym": symbol}
+        last_snap = None
+
+        while not ws.closed:
+            sent = False
+
+            # ── Live path: exchange plugin → queue → browser ──────────────
+            if q is not None:
+                try:
+                    payload = await asyncio.wait_for(q.get(), timeout=1.5)
+                    await ws.send_json({'type': 'candle', 'data': payload})
+                    sent = True
+                except asyncio.TimeoutError:
+                    pass
+                except asyncio.CancelledError:
+                    break
+                except Exception as e:
+                    self.logger.error(f"ws_push live error: {e}")
+
+            # ── ClickHouse fallback: runs whenever live queue yields nothing ─
+            if not sent:
+                try:
+                    rows = await self.clickhouse._execute(sql, params)
+                    if rows and rows[0] != last_snap:
+                        last_snap = rows[0]
+                        r = rows[0]
+                        await ws.send_json({'type': 'candle', 'data': {
+                            'time':   int(r[0]),
+                            'open':   float(r[1]),
+                            'high':   float(r[2]),
+                            'low':    float(r[3]),
+                            'close':  float(r[4]),
+                            'volume': float(r[5]),
+                        }})
+                except asyncio.CancelledError:
+                    break
+                except Exception as e:
+                    self.logger.error(f"ws_push fallback error: {e}")
+                if q is None:
+                    await asyncio.sleep(0.25)
+
     async def start_server(self, host='0.0.0.0', port=8080):
         """Start the API server"""
         self.logger.info(f"Starting API server on {host}:{port}")
@@ -676,6 +809,8 @@ class TradingBotAPI:
         return runner
     
     async def cleanup(self):
+        if self.live_feed:
+            await self.live_feed.cleanup()
         if self.clickhouse:
             await self.clickhouse.close()
 

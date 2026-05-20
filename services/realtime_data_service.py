@@ -14,7 +14,7 @@ from typing import Dict, Any, Optional
 from datetime import datetime, timezone
 
 from core.universal_config_manager import UniversalConfigManager
-from rabbitmq.rabbitmq_client import RabbitMQClient, MessagePublisher
+from core.queue_client import InProcessQueueClient, MessagePublisher
 from core.exceptions import ConfigurationError, ExchangeError
 from core.logging_config import get_realtime_logger
 
@@ -26,7 +26,7 @@ class RealtimeDataService:
     
     def __init__(self, config_manager: UniversalConfigManager,
                  clickhouse: Any,
-                 queue_client: RabbitMQClient,
+                 queue_client: InProcessQueueClient,
                  exchange_plugins: Optional[Dict[str, Any]] = None):
         self.config_manager = config_manager
         self.clickhouse = clickhouse
@@ -91,7 +91,9 @@ class RealtimeDataService:
                 'error_count': 0,
                 'last_error': None,
                 'stream_start_time': None,
-                'last_processed_timestamp': 0
+                'last_processed_timestamp': 0,
+                'realtime_callback': None,
+                'last_reconnect_attempt': 0,
             }
             
             self.logger.info(f"Real-time data connection configured: {connection_name}")
@@ -162,7 +164,9 @@ class RealtimeDataService:
             # Create callback for real-time data
             async def realtime_callback(candle_data):
                 await self._process_realtime_candle(connection_name, candle_data)
-            
+
+            connection_info['realtime_callback'] = realtime_callback
+
             # Start WebSocket stream
             success = await plugin.start_realtime_stream(
                 config['symbol'],
@@ -348,19 +352,43 @@ class RealtimeDataService:
                 
                 self.logger.warning(f"Connection {connection_name} health check failed: {health.get('error')}")
             
-            # Check for stale data
+            # Check for stale data or stream never started
+            config = connection_info['config']
+            timeframe_seconds = self._get_timeframe_seconds(config['source_timeframe'])
             if connection_info['last_candle_time']:
                 time_since_last = int(datetime.now(timezone.utc).timestamp()) - connection_info['last_candle_time']
-                timeframe_seconds = self._get_timeframe_seconds(connection_info['config']['source_timeframe'])
-                
                 if time_since_last > timeframe_seconds * 3:  # 3 intervals without data
                     self.logger.warning(f"Stale data detected for {connection_name}: {time_since_last}s since last candle")
-                    
+                    self._maybe_trigger_reconnect(connection_name, connection_info, plugin)
+            elif not plugin.is_connected(config['symbol'], config['source_timeframe']):
+                # Never received any data and not connected — initial start must have failed
+                self.logger.warning(f"Stream {connection_name} never connected, triggering reconnect")
+                self._maybe_trigger_reconnect(connection_name, connection_info, plugin)
+
         except Exception as e:
             self.logger.error(f"Health check failed for {connection_name}: {e}")
             connection_info['error_count'] += 1
             connection_info['last_error'] = str(e)
-    
+
+    def _maybe_trigger_reconnect(self, connection_name: str, connection_info: dict, plugin) -> None:
+        """Spawn reconnection task if stream is dead and cooldown has passed."""
+        config = connection_info['config']
+        now = datetime.now(timezone.utc).timestamp()
+        cooldown = 120
+        if now - connection_info.get('last_reconnect_attempt', 0) < cooldown:
+            return
+        if plugin.is_connected(config['symbol'], config['source_timeframe']):
+            return
+        cb = connection_info.get('realtime_callback')
+        if cb is None:
+            self.logger.error(f"No callback for {connection_name}, cannot reconnect")
+            return
+        connection_info['last_reconnect_attempt'] = now
+        self.logger.warning(f"Health monitor triggering reconnect for {connection_name}")
+        asyncio.create_task(
+            plugin._attempt_reconnection(config['symbol'], config['source_timeframe'], cb)
+        )
+
     def _get_timeframe_seconds(self, timeframe: str) -> int:
         """Convert timeframe to seconds"""
         timeframe_map = {

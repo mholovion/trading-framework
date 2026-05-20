@@ -328,6 +328,10 @@
                         <div class="info-label">Time</div>
                         <div class="info-value" id="timeInfo">--</div>
                     </div>
+                    <div class="info-item">
+                        <div class="info-label">WS</div>
+                        <div class="info-value" id="wsStatus" style="color:#868b94">--</div>
+                    </div>
                 </div>
             </div>
             <div id="chart"></div>
@@ -341,6 +345,124 @@
         let currentExchange = null;
         let currentTimeframe = '4h';
         let preferAggregated = true;
+        let _realtimeWS = null;
+        let _wsGapReloading = false;
+        let _stalePollTimer = null;
+
+        function _tfSeconds() {
+            return (chartManager && chartManager.getTimeframeDurationSeconds(currentTimeframe)) || 60;
+        }
+
+        // Periodically check if chart is stale vs current wall-clock time.
+        // Handles the case where DNS fails (no WS), but gap_recovery filled ClickHouse.
+        function _startStalePoll() {
+            if (_stalePollTimer) clearInterval(_stalePollTimer);
+            _stalePollTimer = setInterval(async () => {
+                const ci = chartManager && chartManager.charts['chart'];
+                if (!ci || !ci.data || ci.data.length === 0 || _wsGapReloading) return;
+                const lastTime = ci.data[ci.data.length - 1].time;
+                const nowSec   = Math.floor(Date.now() / 1000);
+                if (nowSec > lastTime + _tfSeconds() * 3) {
+                    _wsGapReloading = true;
+                    showDebug('Stale chart detected, reloading from ClickHouse…');
+                    try { await loadChartData(); } catch(_) {}
+                    _wsGapReloading = false;
+                }
+            }, 30_000);
+        }
+
+        function _setWsStatus(text, color) {
+            const el = document.getElementById('wsStatus');
+            if (el) { el.textContent = text; el.style.color = color; }
+        }
+
+        function connectRealtimeWS() {
+            if (_realtimeWS) {
+                _realtimeWS.onclose = null;  // prevent auto-reconnect loop
+                _realtimeWS.close();
+                _realtimeWS = null;
+            }
+            if (!currentExchange || !currentSymbol || !currentTimeframe) return;
+
+            _setWsStatus('connecting…', '#868b94');
+
+            const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+            const url = `${proto}://${location.host}/api/ws/candles?exchange=${encodeURIComponent(currentExchange)}&symbol=${encodeURIComponent(currentSymbol)}&timeframe=${encodeURIComponent(currentTimeframe)}`;
+
+            const ws = new WebSocket(url);
+            _realtimeWS = ws;
+
+            ws.onopen = () => _setWsStatus('live ●', '#26a69a');
+
+            let _wsRecvCount = 0;
+            ws.onmessage = (e) => {
+                const msg = JSON.parse(e.data);
+                if (msg.type !== 'candle') return;
+                _wsRecvCount++;
+                const d = msg.data;
+
+                // Always update WS status counter so user can confirm data arriving
+                _setWsStatus(`#${_wsRecvCount} ${new Date(d.time*1000).toLocaleTimeString('en-GB')} C=${(+d.close).toFixed(2)}`, '#26a69a');
+
+                const ci = chartManager && chartManager.charts['chart'];
+                if (!ci) { showDebug(`WS #${_wsRecvCount}: chart not ready`); return; }
+
+                // Show debug for first 3 messages and every 20th after that
+                if (_wsRecvCount <= 3 || _wsRecvCount % 20 === 0) {
+                    showDebug(`WS #${_wsRecvCount}: ${new Date(d.time*1000).toLocaleTimeString()} C=${(+d.close).toFixed(2)}`);
+                }
+
+                // Gap detection: if incoming candle is far ahead of last chart candle,
+                // trigger a background reload to fill historical gaps in ClickHouse.
+                // We do NOT return early — series.update() still runs so the current
+                // candle appears immediately without waiting for the reload to finish.
+                const lastCandles = ci.data;
+                const lastTime = lastCandles && lastCandles.length > 0
+                    ? lastCandles[lastCandles.length - 1].time
+                    : null;
+                if (!_wsGapReloading && lastTime && d.time > lastTime + _tfSeconds() * 2) {
+                    _wsGapReloading = true;
+                    showDebug(`Gap detected (${new Date(lastTime*1000).toLocaleTimeString()} → ${new Date(d.time*1000).toLocaleTimeString()}), reloading…`);
+                    loadChartData()
+                        .then(() => { _wsGapReloading = false; })
+                        .catch(() => { _wsGapReloading = false; });
+                    // fall through — still update the series with the incoming candle
+                }
+
+                try {
+                    ci.candlestickSeries.update({ time: d.time, open: d.open, high: d.high, low: d.low, close: d.close });
+                    // Keep ci.data in sync so gap detection lastTime stays current
+                    if (ci.data && ci.data.length > 0) {
+                        const last = ci.data[ci.data.length - 1];
+                        if (d.time === last.time) {
+                            ci.data[ci.data.length - 1] = { time: d.time, open: d.open, high: d.high, low: d.low, close: d.close };
+                        } else if (d.time > last.time) {
+                            ci.data.push({ time: d.time, open: d.open, high: d.high, low: d.low, close: d.close });
+                        }
+                    }
+                } catch(err) {
+                    showDebug(`WS update error: ${err.message}`);
+                    _setWsStatus(`err: ${err.message}`, '#ef5350');
+                }
+                if (ci.volumeSeries) {
+                    ci.volumeSeries.update({ time: d.time, value: d.volume, color: d.close >= d.open ? '#26a69a' : '#ef5350' });
+                }
+                // Update price info panel with live tick data
+                chartManager.updateChartInfo('chart', {
+                    open: d.open, high: d.high, low: d.low, close: d.close,
+                    volume: d.volume, timestamp: d.time
+                }, {});
+            };
+
+            ws.onclose = () => {
+                _setWsStatus('reconnecting…', '#868b94');
+                if (_realtimeWS === ws) {
+                    setTimeout(connectRealtimeWS, 3000);
+                }
+            };
+
+            ws.onerror = (err) => { _setWsStatus('error', '#ef5350'); console.warn('Realtime WS error:', err); };
+        }
 
         // Initialize on page load
         document.addEventListener('DOMContentLoaded', async function() {
@@ -589,7 +711,8 @@
                 
                 // Load initial data
                 await loadChartData();
-                
+                connectRealtimeWS();
+                _startStalePoll();
                 showDebug('Chart created and data loaded successfully');
                 
             } catch (error) {
@@ -654,7 +777,7 @@
             }
             
             // Reload chart data
-            loadChartData().catch(error => {
+            loadChartData().then(() => connectRealtimeWS()).catch(error => {
                 console.error('Failed to set timeframe:', error);
                 showError('Failed to change timeframe');
             });
@@ -694,6 +817,7 @@
                 showLoading(true);
                 await loadChartData();
                 showLoading(false);
+                connectRealtimeWS();
             } catch (error) {
                 showLoading(false);
                 console.error('Failed to reload chart:', error);
@@ -753,6 +877,7 @@
         document.getElementById('limitInput').addEventListener('change', async function() {
             if (currentExchange && currentSymbol && currentTimeframe) {
                 await loadChartData();
+                connectRealtimeWS();
             }
         });
 

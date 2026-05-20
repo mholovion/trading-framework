@@ -17,7 +17,7 @@ from datetime import datetime, timezone
 
 from core.universal_config_manager import UniversalConfigManager
 from core.clickhouse import TIMEFRAME_SECONDS
-from rabbitmq.rabbitmq_client import RabbitMQClient, MessagePublisher
+from core.queue_client import InProcessQueueClient, MessagePublisher
 from core.exceptions import ConfigurationError, ExchangeError
 from core.logging_config import get_historical_logger
 
@@ -29,7 +29,7 @@ class HistoricalDataService:
     
     def __init__(self, config_manager: UniversalConfigManager,
                  clickhouse: Any,
-                 queue_client: RabbitMQClient):
+                 queue_client: InProcessQueueClient):
         self.config_manager = config_manager
         self.clickhouse = clickhouse
         self.queue_client = queue_client
@@ -213,7 +213,7 @@ class HistoricalDataService:
             timeframe = data['timeframe']
             start_timestamp = data['start_timestamp']
             end_timestamp = data['end_timestamp']
-            reason = data.get('reason', 'unknown')
+            reason = data.get('source', data.get('reason', 'unknown'))
             
             self.logger.info(f"Received historical data request: {exchange}/{symbol} {timeframe} "
                            f"from {datetime.fromtimestamp(start_timestamp, tz=timezone.utc)} "
@@ -319,7 +319,7 @@ class HistoricalDataService:
             count = await self.clickhouse.count_candles(
                 exchange, symbol, timeframe, start_ts=start_ts, end_ts=end_ts
             )
-            return count >= int(expected * 0.95)
+            return count >= expected - 1
         except Exception:
             return False
 
@@ -457,201 +457,3 @@ class HistoricalDataService:
         
         self.logger.info("Historical Data Service cleanup completed")
 
-    # async def start_all_historical_collection(self):
-    #     """Start historical data collection for all connections"""
-    #     self.logger.info("Starting historical data collection for all connections...")
-    #
-    #     tasks = []
-    #     for connection_name in self.active_connections.keys():
-    #         task = asyncio.create_task(
-    #             self.start_historical_collection(connection_name)
-    #         )
-    #         self.collection_tasks[connection_name] = task
-    #         tasks.append(task)
-    #
-    #     # Wait for all collections to complete
-    #     try:
-    #         await asyncio.gather(*tasks, return_exceptions=True)
-    #         self.logger.info("All historical data collections completed")
-    #     except Exception as e:
-    #         self.logger.error(f"Error during historical data collection: {e}")
-    #
-    # async def start_historical_collection(self, connection_name: str):
-    #     """Start historical data collection for specific connection"""
-    #     if connection_name not in self.active_connections:
-    #         raise ConfigurationError(f"Unknown connection: {connection_name}")
-    #    
-    #     connection_info = self.active_connections[connection_name]
-    #     config = connection_info['config']
-    #     plugin = connection_info['plugin']
-        
-    #     try:
-    #         self.logger.info(f"Starting historical data collection for {connection_name}")
-            
-    #         # Parse start date
-    #         start_date = datetime.fromisoformat(config['historical']['start_date'].replace('Z', '+00:00'))
-    #         start_timestamp = int(start_date.timestamp())
-            
-    #         # Use server time for end timestamp
-    #         current_server_time = await plugin.get_server_time()
-    #         end_timestamp = current_server_time
-            
-    #         # Align timestamps to timeframe boundaries
-    #         timeframe_seconds = self._get_timeframe_seconds(config['source_timeframe'])
-    #         start_timestamp = (start_timestamp // timeframe_seconds) * timeframe_seconds
-    #         end_timestamp = (end_timestamp // timeframe_seconds) * timeframe_seconds
-            
-    #         self.logger.info(f"Collection period: {datetime.fromtimestamp(start_timestamp, tz=timezone.utc)} to {datetime.fromtimestamp(end_timestamp, tz=timezone.utc)}")
-            
-    #         # Update progress tracking
-    #         progress = connection_info['collection_progress']
-    #         progress['start_timestamp'] = start_timestamp
-    #         progress['end_timestamp'] = end_timestamp
-    #         progress['current_timestamp'] = start_timestamp
-            
-    #         # Check existing data and resume from latest
-    #         latest_candle = self.database_manager.get_latest_candle(
-    #             config['exchange'],
-    #             config['symbol'],
-    #             config['source_timeframe']
-    #         )
-            
-    #         if latest_candle:
-    #             start_timestamp = latest_candle['timestamp'] + timeframe_seconds
-    #             progress['current_timestamp'] = start_timestamp
-    #             self.logger.info(f"Resuming from latest candle: {datetime.fromtimestamp(latest_candle['timestamp'], tz=timezone.utc)}")
-            
-    #         # Collect data in batches
-    #         batch_size = config['historical']['batch_size']
-    #         delay_ms = config['historical'].get('rate_limit_ms', 1000)
-            
-    #         current_start = start_timestamp
-    #         total_collected = 0
-    #         batch_count = 0
-            
-    #         while current_start < end_timestamp:
-    #             current_end = min(
-    #                 current_start + (batch_size * timeframe_seconds),
-    #                 end_timestamp
-    #             )
-                
-    #             try:
-    #                 # Wait for rate limit before making API call
-    #                 await self._wait_for_rate_limit(connection_name, config)
-                    
-    #                 candles = await plugin.get_historical_data(
-    #                     config['symbol'],
-    #                     config['source_timeframe'],
-    #                     current_start,
-    #                     current_end
-    #                 )
-                    
-    #                 if candles:
-    #                     # Store candles using ORM
-    #                     stored_count = self.database_manager.store_candles_batch(
-    #                         config['exchange'],
-    #                         config['symbol'],
-    #                         config['source_timeframe'],
-    #                         candles,
-    #                         current_server_time
-    #                     )
-                        
-    #                     total_collected += stored_count
-    #                     batch_count += 1
-                        
-    #                     # Update progress
-    #                     progress['current_timestamp'] = current_end
-    #                     progress['total_collected'] = total_collected
-    #                     progress['batches_processed'] = batch_count
-                        
-    #                     # Publish candle updates to queue for downstream processing
-    #                     for candle in candles:
-    #                         await self.message_publisher.publish_candle_update({
-    #                             'connection_name': connection_name,
-    #                             'exchange': config['exchange'],
-    #                             'symbol': config['symbol'],
-    #                             'timeframe': config['source_timeframe'],
-    #                             'timestamp': candle['timestamp'],
-    #                             'ohlcv': {
-    #                                 'open': float(candle['open']),
-    #                                 'high': float(candle['high']),
-    #                                 'low': float(candle['low']),
-    #                                 'close': float(candle['close']),
-    #                                 'volume': float(candle['volume'])
-    #                             },
-    #                             'source': 'historical',
-    #                             'is_closed': True  # Historical candles are always closed
-    #                         })
-                        
-    #                     self.logger.debug(f"Collected batch for {connection_name}: {len(candles)} candles (total: {total_collected})")
-                    
-    #                 current_start = current_end
-                    
-    #                 # Respect rate limits
-    #                 if delay_ms > 0:
-    #                     await asyncio.sleep(delay_ms / 1000.0)
-                        
-    #             except Exception as e:
-    #                 self.logger.error(f"Error collecting batch for {connection_name}: {e}")
-    #                 connection_info['error_count'] += 1
-    #                 connection_info['last_error'] = str(e)
-                    
-    #                 # Skip problematic batch and continue
-    #                 current_start = current_end
-            
-    #         connection_info['status'] = 'completed'
-    #         self.logger.info(f"Historical data collection completed for {connection_name}: {total_collected} candles")
-            
-    #     except Exception as e:
-    #         self.logger.error(f"Historical data collection failed for {connection_name}: {e}")
-    #         connection_info['status'] = 'error'
-    #         connection_info['last_error'] = str(e)
-    #         raise ExchangeError(f"Historical data collection failed: {e}")
-    #
-    # def _get_timeframe_seconds(self, timeframe: str) -> int:
-    #     """Convert timeframe to seconds"""
-    #     timeframe_map = {
-    #         '1m': 60, '3m': 180, '5m': 300, '15m': 900, '30m': 1800,
-    #         '1h': 3600, '2h': 7200, '4h': 14400, '6h': 21600, '8h': 28800, '12h': 43200,
-    #         '1d': 86400, '3d': 259200, '1w': 604800, '1M': 2592000
-    #     }
-    #    
-    #     seconds = timeframe_map.get(timeframe)
-    #     if seconds is None:
-    #         raise ConfigurationError(f"Unsupported timeframe: {timeframe}")
-    #    
-    #     return seconds
-    #
-    # async def get_collection_status(self) -> Dict[str, Any]:
-    #     """Get status of historical data collections"""
-    #     status = {}
-    #   
-    #     for connection_name, connection_info in self.active_connections.items():
-    #         config = connection_info['config']
-    #         progress = connection_info['collection_progress']
-            
-    #         # Calculate progress percentage
-    #         progress_pct = 0.0
-    #         if progress['start_timestamp'] and progress['end_timestamp']:
-    #             total_range = progress['end_timestamp'] - progress['start_timestamp']
-    #             if total_range > 0:
-    #                 completed_range = progress['current_timestamp'] - progress['start_timestamp']
-    #                 progress_pct = (completed_range / total_range) * 100
-            
-    #         status[connection_name] = {
-    #             'exchange': config['exchange'],
-    #             'symbol': config['symbol'],
-    #             'timeframe': config['source_timeframe'],
-    #             'status': connection_info['status'],
-    #             'progress_percentage': progress_pct,
-    #             'total_collected': progress['total_collected'],
-    #             'batches_processed': progress['batches_processed'],
-    #             'error_count': connection_info['error_count'],
-    #             'last_error': connection_info['last_error'],
-    #             'start_time': progress['start_timestamp'],
-    #             'current_time': progress['current_timestamp'],
-    #             'end_time': progress['end_timestamp']
-    #         }
-    #   
-    #     return status
-    

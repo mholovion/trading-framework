@@ -65,7 +65,21 @@ class DependencyResolver:
         from plugins.strategies.loader import load_strategy_plugin  # local import avoids circularity
 
         plugin = load_strategy_plugin(params.type, params.to_dict())
-        required: list[IndicatorParams] = plugin.get_required_indicators(params)
+
+        # get_required_indicators() may return IndicatorParams objects or hash strings.
+        # Hash strings: look up full params from params_meta table so we can ensure
+        # the indicator is computed and properly keyed.
+        raw_required = plugin.get_required_indicators(params)
+        required: list[IndicatorParams] = []
+        for item in raw_required:
+            if isinstance(item, str):
+                meta = await self.db.lookup_params(item)
+                if meta:
+                    required.append(IndicatorParams.from_dict(meta))
+                else:
+                    logger.warning(f"Unknown indicator hash '{item}' for strategy {params.type}")
+            else:
+                required.append(item)
 
         total = len(required)
         for i, ind_params in enumerate(required):
@@ -125,51 +139,56 @@ class DependencyResolver:
         await self._ensure_candles(params.timeframe, exchange, symbol, progress_cb)
 
         from plugins.indicators.loader import load_indicator_plugin
+        from plugin_runner.client import RemoteIndicatorPlugin
         plugin = load_indicator_plugin(params.type, params.to_dict())
         warmup = plugin.get_required_periods()
 
         tf_sec = TIMEFRAME_SECONDS.get(params.timeframe, 60)
 
-        if incremental and max_ind_ts:
-            # Load only the context window + new candles — warmup*3 periods back is enough
-            # for any indicator to converge from a known-good state.
-            context_start = max_ind_ts - warmup * tf_sec * 3
-            candles = await self.db.fetch_candles(
-                exchange, symbol, params.timeframe, start_ts=context_start
-            )
-            logger.info(
-                f"Incremental load: {len(candles)} candles from ts={context_start} "
-                f"for {params.display_name()}"
-            )
-        else:
-            total_candles = await self.db.count_candles(exchange, symbol, params.timeframe)
-            if progress_cb:
-                await progress_cb({"stage": "loading",
-                                    "message": f"Loading {total_candles:,} {params.timeframe} candles…"})
-            candles = await self.db.fetch_candles(exchange, symbol, params.timeframe)
-
-        if not candles:
-            logger.warning(f"No candles for {params.timeframe} {exchange} {symbol}")
-            return
-
-        if len(candles) < warmup:
-            logger.warning(f"Not enough candles for {params.display_name()}: "
-                           f"{len(candles)} < {warmup}")
-            return
-
         if progress_cb:
             await progress_cb({"stage": "computing",
                                 "message": f"Computing {params.display_name()}…"})
 
-        results = await plugin.calculate_stream(candles, warmup)
+        if isinstance(plugin, RemoteIndicatorPlugin):
+            # Plugin-runner fetches candles from ClickHouse itself — no large payload
+            start_ts_arg = (max_ind_ts - warmup * tf_sec * 3) if (incremental and max_ind_ts) else None
+            raw_data = await plugin.compute_for(
+                exchange, symbol, params.timeframe, start_ts=start_ts_arg, limit=0
+            )
+            values: list[tuple[int, float]] = [
+                (int(d["timestamp"]), float(d["value"]))
+                for d in raw_data
+                if max_ind_ts is None or int(d["timestamp"]) > max_ind_ts
+            ]
+        else:
+            # Local plugin (dev without Docker): fetch candles here
+            if incremental and max_ind_ts:
+                context_start = max_ind_ts - warmup * tf_sec * 3
+                candles = await self.db.fetch_candles(
+                    exchange, symbol, params.timeframe, start_ts=context_start
+                )
+            else:
+                total_candles = await self.db.count_candles(exchange, symbol, params.timeframe)
+                if progress_cb:
+                    await progress_cb({"stage": "loading",
+                                        "message": f"Loading {total_candles:,} {params.timeframe} candles…"})
+                candles = await self.db.fetch_candles(exchange, symbol, params.timeframe)
 
-        values: list[tuple[int, float]] = []
-        for i, r in enumerate(results):
-            if r is not None and r.get("value") is not None:
-                ts = candles[warmup + i]["timestamp"]
-                # Incremental: skip values already in cache
-                if max_ind_ts is None or ts > max_ind_ts:
-                    values.append((ts, float(r["value"])))
+            if not candles:
+                logger.warning(f"No candles for {params.timeframe} {exchange} {symbol}")
+                return
+            if len(candles) < warmup:
+                logger.warning(f"Not enough candles for {params.display_name()}: {len(candles)} < {warmup}")
+                return
+
+            results = await plugin.calculate_stream(candles, warmup)
+
+            values: list[tuple[int, float]] = []
+            for i, r in enumerate(results):
+                if r is not None and r.get("value") is not None:
+                    ts = candles[warmup + i]["timestamp"]
+                    if max_ind_ts is None or ts > max_ind_ts:
+                        values.append((ts, float(r["value"])))
 
         if values:
             if progress_cb:
@@ -223,61 +242,107 @@ class DependencyResolver:
         symbol: str,
     ) -> list[dict]:
         """
-        Fetch all required indicator data, run strategy.process() for each
-        candle timestamp, store and return signals.
-        """
-        required: list[IndicatorParams] = plugin.get_required_indicators(params)
+        Fetch all required indicator data, run strategy for each candle,
+        store and return signals.
 
-        # Gather indicator series keyed by params hash (or type) for lookup
+        When the plugin is a RemoteStrategyPlugin all candles are sent in one
+        batch request; local plugins are called per-candle as before.
+        """
+        from bisect import bisect_right
+        from plugin_runner.client import RemoteStrategyPlugin
+
+        raw_required = plugin.get_required_indicators(params)
+
+        # Normalise: may return strings (indicator hashes) or IndicatorParams
+        required: list[IndicatorParams] = []
+        for item in raw_required:
+            if isinstance(item, str):
+                meta = await self.db.lookup_params(item)
+                if meta:
+                    required.append(IndicatorParams.from_dict(meta))
+                else:
+                    logger.warning(f"Unknown indicator hash '{item}' in _compute_strategy")
+            else:
+                required.append(item)
+
+        if not required:
+            return []
+
+        # Gather indicator series keyed by params hash
         ind_series: dict[str, list[tuple[int, float]]] = {}
         for ind_p in required:
             ind_series[ind_p.to_hash()] = await self.db.fetch_indicator(
                 ind_p, exchange, symbol
             )
 
-        # Build a sorted list of timestamps where ALL indicators have values
-        from bisect import bisect_right
-
-        # Index each series by sorted timestamps for bisect lookup
-        ts_lists: dict[str, list[int]]   = {h: [r[0] for r in s] for h, s in ind_series.items()}
+        ts_lists: dict[str, list[int]]    = {h: [r[0] for r in s] for h, s in ind_series.items()}
         val_lists: dict[str, list[float]] = {h: [r[1] for r in s] for h, s in ind_series.items()}
 
-        # Use the hash of the first required indicator as the "base" timeline
-        if not required:
-            return []
         base_hash = required[0].to_hash()
         base_ts   = ts_lists.get(base_hash, [])
 
-        signals: list[dict] = []
+        # Pre-fetch ALL prices in one query instead of one per candle
+        all_prices = await self.db.fetch_candles(exchange, symbol, required[0].timeframe)
+        price_map: dict[int, float] = {c["timestamp"]: float(c["close"]) for c in all_prices}
 
+        # Build per-candle inputs
+        candle_inputs: list[dict] = []
         for ts in base_ts:
             indicators_data: dict[str, dict] = {}
+            skip = False
             for ind_p in required:
-                h = ind_p.to_hash()
+                h        = ind_p.to_hash()
                 ts_list  = ts_lists.get(h, [])
                 val_list = val_lists.get(h, [])
-                # Find the latest value at or before this timestamp
                 idx = bisect_right(ts_list, ts) - 1
                 if idx < 0:
+                    skip = True
                     break
-                indicators_data[ind_p.to_hash()] = {"value": val_list[idx]}
-            else:
-                # All indicators present — run strategy
-                price_data = await self.db.fetch_candles(
-                    exchange, symbol,
-                    required[0].timeframe,
-                    start_ts=ts, end_ts=ts, limit=1,
-                )
-                price = float(price_data[0]["close"]) if price_data else 0.0
+                indicators_data[h] = {"value": val_list[idx]}
+            if skip:
+                continue
+            candle_inputs.append({
+                "timestamp":       ts,
+                "indicators_data": indicators_data,
+                "current_price":   price_map.get(ts, 0.0),
+            })
 
+        if not candle_inputs:
+            return []
+
+        signals: list[dict] = []
+
+        if isinstance(plugin, RemoteStrategyPlugin):
+            # Single batch HTTP call — plugin-runner executes all candles
+            raw_signals = await plugin.process_batch(candle_inputs)
+            for inp, sig_dict in zip(candle_inputs, raw_signals):
+                if sig_dict is None:
+                    continue
+                ts    = inp["timestamp"]
+                price = inp["current_price"]
+                sig_dict["timestamp"] = ts
+                signals.append(sig_dict)
+                await self.db.store_signal(
+                    params, exchange, symbol,
+                    timestamp=ts,
+                    signal_type=sig_dict["signal_type"],
+                    confidence=sig_dict["confidence"],
+                    price=price,
+                    metadata=sig_dict.get("metadata", {}),
+                )
+        else:
+            # Local plugin — per-candle loop (existing behaviour)
+            for inp in candle_inputs:
+                ts    = inp["timestamp"]
+                price = inp["current_price"]
                 try:
                     signal = await plugin.process(
-                        indicators_data=indicators_data,
+                        indicators_data=inp["indicators_data"],
                         current_price=price,
                         signal_timestamp=ts,
                     )
-                except Exception as e:
-                    logger.debug(f"Strategy process error at {ts}: {e}")
+                except Exception as exc:
+                    logger.debug(f"Strategy process error at {ts}: {exc}")
                     signal = None
 
                 if signal is not None:
@@ -294,6 +359,7 @@ class DependencyResolver:
                     )
 
         await self.db.flush()
-        logger.info(f"Strategy {params.display_name()}: {len(signals)} signals "
-                    f"for {exchange} {symbol}")
+        logger.info(
+            f"Strategy {params.display_name()}: {len(signals)} signals for {exchange} {symbol}"
+        )
         return signals
