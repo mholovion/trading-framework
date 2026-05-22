@@ -212,17 +212,28 @@ class DependencyResolver:
         symbol: str,
         progress_cb: ProgressCb = None,
     ) -> None:
+        import time as _time
         if timeframe == "1m":
             return  # raw data — always present
 
-        raw_count  = await self.db.count_candles(exchange, symbol, "1m")
         tf_seconds = TIMEFRAME_SECONDS.get(timeframe, 60)
-        expected   = max(1, raw_count * 60 // tf_seconds)  # rough estimate
+
+        # Compute the start of the current (open) bar — we must NOT cache this
+        now_ts = int(_time.time())
+        current_bar_start = (now_ts // tf_seconds) * tf_seconds
+
+        raw_count  = await self.db.count_candles(exchange, symbol, "1m")
         existing   = await self.db.count_candles(exchange, symbol, timeframe)
+        # expected excludes the currently-open bar (it won't be cached)
+        expected   = max(1, (raw_count * 60 - tf_seconds) // tf_seconds)
 
         if existing >= int(expected * _CACHE_FRESH_RATIO):
-            logger.debug(f"Candle cache hit: {timeframe} {exchange} {symbol}")
-            return
+            # Count looks fresh — also verify the last cached bar is the most recent closed bar
+            _, max_cached_ts = await self.db.get_candle_range(exchange, symbol, timeframe)
+            last_closed_bar  = current_bar_start - tf_seconds
+            if max_cached_ts and max_cached_ts >= last_closed_bar:
+                logger.debug(f"Candle cache hit: {timeframe} {exchange} {symbol}")
+                return
 
         if progress_cb:
             await progress_cb({"stage": "aggregating", "timeframe": timeframe})

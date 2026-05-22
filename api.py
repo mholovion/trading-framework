@@ -61,6 +61,7 @@ class TradingBotAPI:
         self.live_feed = LiveFeed(self.config_manager, self.logger)
         await self.live_feed.initialize()
 
+        await self._ensure_library_table()
         self._setup_routes()
 
         _base_dir = Path(__file__).parent
@@ -88,6 +89,10 @@ class TradingBotAPI:
         self.app.router.add_get('/api/strategies/signals',      self.get_strategies_signals)
         self.app.router.add_get('/api/strategies/status',       self.get_strategies_status)
         self.app.router.add_post('/api/strategies/compute',     self.compute_strategy)
+        self.app.router.add_get('/api/library/{ltype}',           self.library_list)
+        self.app.router.add_get('/api/library/{ltype}/{name}',  self.library_get)
+        self.app.router.add_put('/api/library/{ltype}/{name}',  self.library_put)
+        self.app.router.add_delete('/api/library/{ltype}/{name}', self.library_delete)
         self.app.router.add_get('/api/progress',                self.get_progress)
         self.app.router.add_get('/api/ws/candles',              self.ws_candles)
         self.app.router.add_get('/',                            self.dashboard)
@@ -97,6 +102,7 @@ class TradingBotAPI:
         self.app.router.add_get('/strategies',                  self.strategies_chart)
         _base_dir = Path(__file__).parent
         self.app.router.add_static('/static', str(_base_dir / 'static'))
+        self.app.router.add_static('/img',    str(_base_dir / 'static' / 'img'))
     
     async def health_check(self, request):
         ch_ok = self.clickhouse and self.clickhouse._conn is not None
@@ -272,12 +278,12 @@ class TradingBotAPI:
                 if not p.stem.startswith("_")
             ) if primitives_dir.exists() else []
 
-            # User-created indicators from plugins/indicators/user/
-            user_dir = Path("/app/plugins/indicators/user")
-            user_inds = sorted(
-                p.stem for p in user_dir.glob("*.py")
-                if not p.stem.startswith("_")
-            ) if user_dir.exists() else []
+            # User-created indicators from ClickHouse plugin_library
+            lib_rows = await self.clickhouse._execute(
+                "SELECT name FROM plugin_library FINAL"
+                " WHERE namespace = 'shared' AND type = 'indicator' ORDER BY name"
+            )
+            user_inds = [r[0] for r in lib_rows]
 
             # Schema: well-known indicators with their default parameters
             INDICATOR_SCHEMA = {
@@ -434,8 +440,8 @@ class TradingBotAPI:
     async def save_custom_indicator(self, request):
         """
         POST /api/indicators/custom
-        Body: { name, code, params_schema: [{key, type, default, label}, ...] }
-        Saves to plugins/indicators/user/{name}.py
+        Body: { name, code }
+        Saves to plugin_library ClickHouse table.
         """
         try:
             body = await request.json()
@@ -447,20 +453,104 @@ class TradingBotAPI:
             if not name.replace("_", "").isalnum():
                 return web.json_response({"error": "name must be alphanumeric + underscores"}, status=400)
 
-            from pathlib import Path
-            user_dir = Path("/app/plugins/indicators/user")
-            user_dir.mkdir(parents=True, exist_ok=True)
-            (user_dir / f"{name}.py").write_text(code)
-
-            # Save params schema alongside as JSON sidecar
-            import json as _json
-            schema = body.get("params_schema", [])
-            (user_dir / f"{name}.json").write_text(_json.dumps(schema, indent=2))
-
+            await self.clickhouse._bulk_insert(
+                'plugin_library',
+                ['namespace', 'type', 'name', 'code', 'updated_at'],
+                [(self._LIBRARY_NS, 'indicator', name, code, datetime.utcnow())],
+            )
             return web.json_response({"status": "saved", "name": name})
         except Exception as e:
             self.logger.error(f"save_custom_indicator error: {e}")
             return web.json_response({"error": str(e)}, status=500)
+
+    # ------------------------------------------------------------------ #
+    # Plugin library endpoints (ClickHouse-backed)                        #
+    # ------------------------------------------------------------------ #
+
+    _LIBRARY_TYPES = {'indicators', 'strategies'}
+    _LIBRARY_NS    = 'shared'
+    _LTYPE_MAP     = {'indicators': 'indicator', 'strategies': 'strategy'}
+
+    async def _ensure_library_table(self) -> None:
+        """Create plugin_library table via HTTP interface (DDL must not go through binary cursor)."""
+        import aiohttp as _aiohttp
+        host = self.clickhouse.host
+        sql = (
+            "CREATE TABLE IF NOT EXISTS plugin_library "
+            "(namespace LowCardinality(String) DEFAULT 'shared', "
+            " type LowCardinality(String), name String, code String, "
+            " updated_at DateTime DEFAULT now()) "
+            "ENGINE = ReplacingMergeTree(updated_at) "
+            "ORDER BY (namespace, type, name)"
+        )
+        try:
+            async with _aiohttp.ClientSession() as sess:
+                async with sess.post(f"http://{host}:8123/", data=sql) as resp:
+                    if resp.status != 200:
+                        body = await resp.text()
+                        self.logger.warning(f"library table creation HTTP {resp.status}: {body[:200]}")
+        except Exception as e:
+            self.logger.warning(f"library table creation skipped: {e}")
+
+    async def library_list(self, request: web.Request) -> web.Response:
+        """GET /api/library/{ltype} — list library items from ClickHouse."""
+        ltype = request.match_info['ltype']
+        if ltype not in self._LIBRARY_TYPES:
+            return web.json_response({'error': 'unknown type'}, status=400)
+        rows = await self.clickhouse._execute(
+            "SELECT name, updated_at FROM plugin_library FINAL"
+            " WHERE namespace = %(ns)s AND type = %(tp)s ORDER BY name",
+            {'ns': self._LIBRARY_NS, 'tp': self._LTYPE_MAP[ltype]},
+        )
+        items = [{'name': r[0], 'updated_at': str(r[1])} for r in rows]
+        return web.json_response({'items': items})
+
+    async def library_get(self, request: web.Request) -> web.Response:
+        """GET /api/library/{ltype}/{name} — fetch item code from ClickHouse."""
+        ltype = request.match_info['ltype']
+        name  = request.match_info['name']
+        if ltype not in self._LIBRARY_TYPES:
+            return web.json_response({'error': 'unknown type'}, status=400)
+        rows = await self.clickhouse._execute(
+            "SELECT code FROM plugin_library FINAL"
+            " WHERE namespace = %(ns)s AND type = %(tp)s AND name = %(nm)s LIMIT 1",
+            {'ns': self._LIBRARY_NS, 'tp': self._LTYPE_MAP[ltype], 'nm': name},
+        )
+        if not rows:
+            return web.json_response({'error': 'not found'}, status=404)
+        return web.json_response({'name': name, 'type': ltype, 'code': rows[0][0]})
+
+    async def library_put(self, request: web.Request) -> web.Response:
+        """PUT /api/library/{ltype}/{name} — upsert item code into ClickHouse."""
+        ltype = request.match_info['ltype']
+        name  = request.match_info['name']
+        if ltype not in self._LIBRARY_TYPES:
+            return web.json_response({'error': 'unknown type'}, status=400)
+        if not name.replace('_', '').isalnum():
+            return web.json_response({'error': 'invalid name'}, status=400)
+        body = await request.json()
+        code = body.get('code', '')
+        tp   = self._LTYPE_MAP[ltype]
+        await self.clickhouse._bulk_insert(
+            'plugin_library',
+            ['namespace', 'type', 'name', 'code', 'updated_at'],
+            [(self._LIBRARY_NS, tp, name, code, datetime.utcnow())],
+        )
+        return web.json_response({'status': 'saved', 'name': name})
+
+    async def library_delete(self, request: web.Request) -> web.Response:
+        """DELETE /api/library/{ltype}/{name} — remove item from ClickHouse."""
+        ltype = request.match_info['ltype']
+        name  = request.match_info['name']
+        if ltype not in self._LIBRARY_TYPES:
+            return web.json_response({'error': 'unknown type'}, status=400)
+        tp = self._LTYPE_MAP[ltype]
+        await self.clickhouse._execute(
+            "ALTER TABLE plugin_library DELETE"
+            " WHERE namespace = %(ns)s AND type = %(tp)s AND name = %(nm)s",
+            {'ns': self._LIBRARY_NS, 'tp': tp, 'nm': name},
+        )
+        return web.json_response({'status': 'deleted'})
 
     # ------------------------------------------------------------------ #
     # On-demand strategy endpoint                                          #

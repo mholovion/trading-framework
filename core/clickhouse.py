@@ -410,6 +410,8 @@ class ClickHouseManager:
               AND c.symbol    = %(sym)s
               AND c.timeframe = %(src)s
               AND toStartOfInterval(toDateTime(c.timestamp), INTERVAL {interval})
+                  < toStartOfInterval(now(), INTERVAL {interval})
+              AND toStartOfInterval(toDateTime(c.timestamp), INTERVAL {interval})
                   NOT IN (
                       SELECT toDateTime(timestamp)
                       FROM candles
@@ -532,20 +534,41 @@ class ClickHouseManager:
         return re.sub(r"%\((\w+)\)s", _sub, sql)
 
     async def _execute(self, sql: str, params: dict | None = None) -> list:
-        if not self._conn:
-            return []
-        rendered = self._interpolate(sql, params)
-        async with self._lock:
-            try:
-                async with self._conn.cursor() as cur:
-                    await cur.execute(rendered)
-                    try:
-                        return await cur.fetchall()
-                    except Exception:
+        """
+        Execute SQL via ClickHouse HTTP interface (port 8123).
+
+        Using HTTP instead of the asynch binary cursor avoids a persistent
+        asynch bug: progress/profile packets sent after query results are left
+        in the TCP read buffer, corrupting all subsequent binary-protocol
+        cursors on the same connection.  Each HTTP request is fully independent.
+        """
+        import aiohttp as _aiohttp
+        rendered  = self._interpolate(sql, params)
+        first_word = rendered.lstrip().split()[0].upper() if rendered.strip() else ""
+        is_select  = first_word in ("SELECT", "WITH", "SHOW")
+
+        post_sql  = (rendered + " FORMAT JSONCompact") if is_select else rendered
+        # output_format_json_quote_64bit_integers=0 → UInt64/Int64 come back as
+        # JSON numbers, not quoted strings.  Safe for our timestamp values (~1.7B,
+        # well within JS Number.MAX_SAFE_INTEGER).
+        url       = f"http://{self.host}:8123/?output_format_json_quote_64bit_integers=0"
+        try:
+            async with _aiohttp.ClientSession() as sess:
+                async with sess.post(url, data=post_sql.encode()) as resp:
+                    if resp.status != 200:
+                        body = await resp.text()
+                        logger.error(
+                            f"ClickHouse query error: HTTP {resp.status}: "
+                            f"{body[:300]}\nSQL: {rendered[:300]}"
+                        )
                         return []
-            except Exception as e:
-                logger.error(f"ClickHouse query error: {e}\nSQL: {rendered[:300]}")
-                return []
+                    if is_select:
+                        result = await resp.json(content_type=None)
+                        return result.get("data", [])
+                    return []
+        except Exception as e:
+            logger.error(f"ClickHouse query error: {e}\nSQL: {rendered[:300]}")
+            return []
 
     async def _bulk_insert(self, table: str, columns: list[str], rows: list[tuple]) -> None:
         if not rows or not self._conn:

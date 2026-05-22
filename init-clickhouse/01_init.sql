@@ -47,6 +47,20 @@ CREATE TABLE IF NOT EXISTS params_meta
 ENGINE = ReplacingMergeTree()
 ORDER BY (params_hash);
 
+-- Plugin library — stores indicator/strategy source code per namespace.
+-- namespace: 'shared' for now; future: per-user namespace.
+-- ReplacingMergeTree on updated_at allows upsert semantics via FINAL.
+CREATE TABLE IF NOT EXISTS plugin_library
+(
+    namespace  LowCardinality(String) DEFAULT 'shared',
+    type       LowCardinality(String),  -- 'indicator' | 'strategy'
+    name       String,
+    code       String,
+    updated_at DateTime DEFAULT now()
+)
+ENGINE = ReplacingMergeTree(updated_at)
+ORDER BY (namespace, type, name);
+
 -- On-demand strategy signal cache
 -- Separate hash per strategy configuration version — old signals remain
 -- untouched when parameters change (new hash = new slot).

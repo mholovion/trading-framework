@@ -5,6 +5,9 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Trading Dashboard</title>
 <script src="https://unpkg.com/lightweight-charts@3.8.0/dist/lightweight-charts.standalone.production.js"></script>
+<link rel="stylesheet" href="/static/css/goldenlayout-base.css">
+<link rel="stylesheet" href="/static/css/goldenlayout-dark-theme.css">
+<script src="/static/js/golden-layout.js"></script>
 <style>
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
   :root {
@@ -12,7 +15,129 @@
     --text: #d1d4dc; --dim: #787b86; --accent: #2962ff; --green: #26a69a; --red: #ef5350;
   }
   html, body { height: 100%; background: var(--bg); color: var(--text); font-family: 'Segoe UI', system-ui, sans-serif; font-size: 13px; overflow: hidden; }
-  .layout { display: grid; grid-template-rows: 44px 1fr; height: 100vh; }
+  .layout { display: flex; flex-direction: column; height: 100vh; }
+  .main-row { display: flex; flex: 1; overflow: hidden; min-height: 0; position: relative; }
+  #glContainer { position: absolute; top: 0; right: 0; bottom: 0; overflow: hidden; }
+
+  /* ── Sidebar ── */
+  .sidebar {
+    width: 220px; flex-shrink: 0; background: var(--surface);
+    border-right: 1px solid var(--border);
+    display: flex; flex-direction: column; overflow: hidden;
+    transition: width .18s ease; z-index: 10;
+  }
+  .sidebar.collapsed { width: 40px; }
+  .sidebar-toggle {
+    display: flex; align-items: center; gap: 8px;
+    padding: 0 12px; height: 34px; cursor: pointer;
+    border-bottom: 1px solid var(--border);
+    color: var(--dim); font-size: 12px; user-select: none; flex-shrink: 0;
+  }
+  .sidebar-toggle:hover { color: var(--text); background: rgba(255,255,255,.03); }
+  .si-icon { font-size: 14px; flex-shrink: 0; line-height: 1; }
+  .si-label { white-space: nowrap; overflow: hidden; font-size: 11px; letter-spacing: .4px; text-transform: uppercase; }
+  .sidebar-tree { flex: 1; overflow-y: auto; padding: 4px 0; }
+  .sidebar-tree::-webkit-scrollbar { width: 4px; }
+  .sidebar-tree::-webkit-scrollbar-thumb { background: var(--muted); border-radius: 2px; }
+  .si-section-head {
+    padding: 4px 12px; font-size: 11px; color: var(--dim); cursor: pointer;
+    user-select: none; letter-spacing: .4px; text-transform: uppercase;
+    display: flex; align-items: center; gap: 5px;
+  }
+  .si-section-head:hover { color: var(--text); }
+  .si-file {
+    padding: 3px 12px 3px 24px; font-size: 12px; color: var(--text);
+    cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    display: flex; align-items: center; gap: 6px;
+  }
+  .si-file:hover { background: rgba(255,255,255,.04); }
+  .si-file.active { background: rgba(41,98,255,.15); color: var(--accent); }
+  .sidebar.collapsed .si-label,
+  .sidebar.collapsed .sidebar-tree { display: none; }
+
+  /* ── GoldenLayout dark theme overrides ── */
+  .lm_goldenlayout { background: var(--bg) !important; }
+  .lm_content { background: var(--bg) !important; overflow: hidden !important; }
+  .lm_header { background: var(--surface) !important; border-bottom: 1px solid var(--border) !important; }
+  .lm_tab { background: var(--surface) !important; border: 1px solid var(--border) !important; color: var(--dim) !important; font-size: 12px !important; }
+  .lm_tab.lm_active { color: var(--text) !important; border-bottom: 2px solid var(--accent) !important; }
+  .lm_tab:hover { color: var(--text) !important; }
+  .lm_tab .lm_close_tab { opacity: .5 !important; }
+  .lm_tab .lm_close_tab:hover { opacity: 1 !important; }
+  .lm_splitter { background: var(--border) !important; }
+  .lm_splitter:hover, .lm_splitter.lm_dragging { background: var(--accent) !important; }
+  .lm_controls .lm_close { display: none; }
+
+  /* ── Editor panel ── */
+  #editorPanelContent {
+    display: flex; flex-direction: column;
+    width: 100%; height: 100%; overflow: hidden;
+    background: var(--bg);
+  }
+  .ep-tabs {
+    display: flex; align-items: center; flex-shrink: 0;
+    background: var(--surface); border-bottom: 1px solid var(--border);
+    overflow-x: auto; padding: 0 4px; min-height: 35px;
+  }
+  .ep-tabs::-webkit-scrollbar { height: 3px; }
+  .ep-tabs::-webkit-scrollbar-thumb { background: var(--muted); }
+  .ep-tab {
+    display: flex; align-items: center; gap: 5px; padding: 0 10px;
+    height: 34px; cursor: pointer; white-space: nowrap; flex-shrink: 0;
+    color: var(--dim); font-size: 12px; border-right: 1px solid var(--border);
+    border-bottom: 2px solid transparent; user-select: none;
+    transition: color .1s, border-color .1s;
+  }
+  .ep-tab:hover { color: var(--text); }
+  .ep-tab.active { color: var(--text); border-bottom-color: var(--accent); background: rgba(41,98,255,.06); }
+  .ep-tab.dirty::before { content: '●'; font-size: 8px; color: var(--accent); margin-right: 3px; }
+  .ep-tab-close { background: none; border: none; color: var(--dim); cursor: pointer; font-size: 14px; padding: 0; line-height: 1; }
+  .ep-tab-close:hover { color: var(--red); }
+  .ep-new-tab {
+    padding: 0 10px; height: 34px; background: none; border: none;
+    color: var(--dim); font-size: 18px; cursor: pointer; flex-shrink: 0;
+  }
+  .ep-new-tab:hover { color: var(--text); }
+  .ep-toolbar {
+    display: flex; align-items: center; gap: 8px; padding: 6px 12px;
+    border-bottom: 1px solid var(--border); flex-shrink: 0;
+  }
+  .ep-toolbar input {
+    background: var(--bg); border: 1px solid var(--border); color: var(--text);
+    padding: 3px 8px; border-radius: 4px; font-size: 12px; outline: none; width: 160px;
+  }
+  .ep-toolbar input:focus { border-color: var(--accent); }
+  .ep-toolbar select {
+    background: var(--bg); color: var(--text); border: 1px solid var(--border);
+    padding: 3px 6px; border-radius: 4px; font-size: 12px; cursor: pointer; outline: none;
+  }
+  .ep-params {
+    padding: 5px 12px; border-bottom: 1px solid var(--border); flex-shrink: 0;
+    display: flex; flex-wrap: wrap; gap: 4px; align-items: center; min-height: 32px;
+  }
+  .ep-monaco { flex: 1; min-height: 0; overflow: hidden; }
+  .ep-hint {
+    padding: 3px 12px; font-size: 10px; color: var(--dim);
+    border-top: 1px solid var(--border); flex-shrink: 0;
+  }
+  .ep-range {
+    display: flex; align-items: center; gap: 6px; padding: 5px 12px;
+    border-top: 1px solid var(--border); flex-shrink: 0;
+    font-size: 11px; color: var(--dim);
+  }
+  .ep-range input[type="date"] {
+    background: var(--bg); color: var(--text); border: 1px solid var(--border);
+    border-radius: 4px; padding: 2px 5px; font-size: 11px; color-scheme: dark; outline: none;
+  }
+  .ep-range button {
+    padding: 2px 7px; border-radius: 4px; border: 1px solid var(--border);
+    background: transparent; color: var(--dim); font-size: 10px; cursor: pointer;
+  }
+  .ep-range button:hover { color: var(--text); border-color: var(--muted); }
+  .ep-actions {
+    display: flex; align-items: center; gap: 8px; padding: 8px 12px;
+    border-top: 1px solid var(--border); flex-shrink: 0;
+  }
 
   /* ── Topbar ── */
   .topbar {
@@ -152,36 +277,7 @@
   .ind-progress.on { display: flex; }
   .ind-progress .spin { width: 12px; height: 12px; margin: 0; }
 
-  /* ── Custom indicator editor modal ── */
-  .editor-modal {
-    position: fixed; inset: 0; background: rgba(0,0,0,.65); z-index: 400;
-    display: none; align-items: center; justify-content: center;
-  }
-  .editor-modal.open { display: flex; }
-  .editor-box {
-    background: var(--surface); border: 1px solid var(--border); border-radius: 8px;
-    width: 900px; height: min(680px, 88vh); display: flex; flex-direction: column;
-    box-shadow: 0 8px 32px rgba(0,0,0,.7); overflow: hidden;
-  }
-  .editor-head {
-    display: flex; align-items: center; gap: 10px; padding: 10px 14px;
-    border-bottom: 1px solid var(--border); flex-shrink: 0;
-  }
-  .editor-head-title { font-size: 13px; font-weight: 600; }
-  .editor-head input {
-    background: var(--bg); border: 1px solid var(--border); color: var(--text);
-    padding: 4px 8px; border-radius: 4px; font-size: 12px; outline: none; width: 160px;
-  }
-  .editor-head input:focus { border-color: var(--accent); }
-  .editor-close {
-    margin-left: auto; background: none; border: none; color: var(--dim);
-    font-size: 18px; cursor: pointer; padding: 0 4px;
-  }
-  .editor-close:hover { color: var(--text); }
-  .editor-params {
-    padding: 8px 14px; border-bottom: 1px solid var(--border); flex-shrink: 0;
-    display: flex; flex-wrap: wrap; gap: 6px; align-items: center;
-  }
+  /* ── Editor param chips (used by renderEditorParams) ── */
   .editor-param-chip {
     display: flex; align-items: center; gap: 4px; padding: 2px 8px;
     border: 1px solid var(--border); border-radius: 10px; font-size: 11px;
@@ -194,31 +290,6 @@
     background: transparent; color: var(--dim); font-size: 11px; cursor: pointer;
   }
   .editor-add-param:hover { color: var(--text); border-color: var(--text); }
-  #monacoMount { flex: 1; min-height: 320px; }
-  .editor-hint {
-    padding: 4px 14px; font-size: 10px; color: var(--dim);
-    border-top: 1px solid var(--border); flex-shrink: 0;
-  }
-  .editor-range {
-    display: flex; align-items: center; gap: 6px; padding: 6px 14px;
-    border-top: 1px solid var(--border); flex-shrink: 0; background: var(--panel);
-  }
-  .editor-range .range-label { font-size: 11px; color: var(--dim); flex-shrink: 0; }
-  .editor-range .range-sep   { font-size: 11px; color: var(--dim); }
-  .editor-range input[type="date"] {
-    background: var(--bg); color: var(--text); border: 1px solid var(--border);
-    border-radius: 4px; padding: 2px 6px; font-size: 11px; color-scheme: dark;
-  }
-  .editor-range .range-clear {
-    font-size: 10px; padding: 2px 7px; border-radius: 4px;
-    border: 1px solid var(--border); background: transparent; color: var(--dim);
-    cursor: pointer; margin-left: 2px;
-  }
-  .editor-range .range-clear:hover { color: var(--text); border-color: var(--muted); }
-  .editor-actions {
-    display: flex; align-items: center; gap: 8px; padding: 10px 14px;
-    border-top: 1px solid var(--border); flex-shrink: 0;
-  }
 
   /* price */
   .price-area { margin-left: auto; display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
@@ -234,12 +305,9 @@
   }
   .nav-btn:hover { color: var(--text); border-color: var(--muted); }
 
-  /* ── Chart area ── */
-  .chart-area { display: flex; flex-direction: column; overflow: hidden; position: relative; }
-  #chartMain   { width: 100%; flex: 1 1 auto; min-height: 0; }
-  #chartVolume { width: 100%; flex: 0 0 auto; }
-  #chartSub    { width: 100%; flex: 0 0 auto; }
-  #chartVolume.h, #chartSub.h { display: none; }
+  /* ── Chart area (inside GL ChartPanel) ── */
+  .chart-area { display: flex; flex-direction: column; overflow: hidden; position: relative; width: 100%; height: 100%; }
+  #chartMain { width: 100%; flex: 1 1 auto; min-height: 0; }
   .chart-resizer {
     width: 100%; height: 5px; flex-shrink: 0; cursor: row-resize; position: relative; z-index: 5;
     background: var(--border);
@@ -284,7 +352,7 @@
   #xhairLine {
     position: absolute; top: 0; left: 0;
     width: 0; border-left: 1px dashed rgba(255,255,255,0.35);
-    pointer-events: none; display: none; z-index: 4;
+    pointer-events: none; display: none; z-index: 20;
   }
   #xhairTimeLabel {
     position: absolute; bottom: 0; left: 0;
@@ -297,9 +365,9 @@
 
   /* error */
   #errBanner {
-    position: absolute; top: 8px; left: 50%; transform: translateX(-50%);
+    position: fixed; top: 8px; left: 50%; transform: translateX(-50%);
     background: #7f0000; color: #fff; padding: 5px 14px; border-radius: 4px;
-    font-size: 12px; z-index: 20; display: none;
+    font-size: 12px; z-index: 9999; display: none;
   }
 
   /* scrollbar */
@@ -316,73 +384,90 @@
   }
   #ohlcLegend .ol-lbl { color: var(--dim); font-size: 10px; }
 
-  /* ── Sub-panel move buttons ── */
-  #chartVolume, #chartSub { position: relative; }
-  .panel-hdr {
-    position: absolute; top: 3px; left: 4px; z-index: 10;
-    display: flex; align-items: center; gap: 2px;
-    opacity: 0.35; transition: opacity .15s; pointer-events: all;
+  /* ── Sub-chart panel system ── */
+  #subChartsArea { display: flex; flex-direction: column; flex-shrink: 0; overflow: hidden; }
+  .sub-chart-item { position: relative; flex-shrink: 0; cursor: grab; }
+  .sub-chart-item.drag-source { opacity: 0.4; }
+  .sub-chart-item.drag-over-top    { border-top: 2px solid var(--accent); }
+  .sub-chart-item.drag-over-bottom { border-bottom: 2px solid var(--accent); }
+  .sub-chart-inner { width: 100%; overflow: hidden; }
+  .sub-resizer {
+    width: 100%; height: 5px; cursor: row-resize; background: var(--border);
+    flex-shrink: 0; position: relative; z-index: 5; transition: background .12s;
   }
-  #chartVolume:hover .panel-hdr, #chartSub:hover .panel-hdr { opacity: 1; }
-  .panel-move-btn {
-    background: rgba(19,23,34,.85); border: 1px solid var(--muted); color: var(--dim);
-    width: 18px; height: 18px; border-radius: 3px; font-size: 10px; cursor: pointer;
-    padding: 0; line-height: 1; display: inline-flex; align-items: center; justify-content: center;
+  .sub-resizer::after {
+    content: ''; position: absolute; left: 50%; top: 50%; transform: translate(-50%,-50%);
+    width: 32px; height: 3px; border-radius: 2px; background: var(--muted);
+    opacity: 0; transition: opacity .15s;
   }
-  .panel-move-btn:hover { color: #fff; border-color: var(--text); background: var(--accent); }
-  .panel-move-btn:disabled { opacity: .25; cursor: default; }
+  .sub-resizer:hover::after, .sub-resizer.dragging::after { opacity: 1; }
+  .sub-resizer:hover, .sub-resizer.dragging { background: #2a3047; }
+  .sub-panel-header {
+    position: absolute; top: 5px; right: 58px; z-index: 10;
+    display: flex; align-items: center; gap: 5px; pointer-events: auto;
+    background: rgba(19,23,34,.75); border: 1px solid var(--border);
+    border-radius: 4px; padding: 2px 7px; opacity: 0; transition: opacity .15s;
+  }
+  .sub-chart-item:hover .sub-panel-header { opacity: 1; }
+  .sub-panel-drag { cursor: grab; color: var(--dim); font-size: 13px; user-select: none; line-height: 1; }
+  .sub-panel-drag:active { cursor: grabbing; }
+  .sub-panel-label { font-size: 11px; color: var(--text); white-space: nowrap; max-width: 160px; overflow: hidden; text-overflow: ellipsis; }
+  .sub-panel-close { background: none; border: none; color: var(--dim); cursor: pointer; font-size: 14px; padding: 0; line-height: 1; }
+  .sub-panel-close:hover { color: var(--red); }
 
   /* ── Strategy panel ── */
-  #stratPanel {
-    position: fixed; top: 44px; right: 0; bottom: 0; width: 360px;
-    background: var(--surface); border-left: 1px solid var(--border);
-    display: flex; flex-direction: column; z-index: 50;
-    transform: translateX(100%); transition: transform .2s ease;
-  }
-  #stratPanel.open { transform: translateX(0); }
-  .sp-header {
-    display: flex; align-items: center; justify-content: space-between;
-    padding: 12px 14px; border-bottom: 1px solid var(--border); flex-shrink: 0;
-  }
-  .sp-title { font-size: 13px; font-weight: 600; }
-  .sp-close {
-    background: none; border: none; color: var(--dim); font-size: 18px;
-    cursor: pointer; padding: 0 4px; line-height: 1;
-  }
-  .sp-close:hover { color: var(--text); }
-  .sp-body { flex: 1; overflow-y: auto; padding: 8px 0; }
-  .sp-body::-webkit-scrollbar { width: 4px; }
-  .sp-body::-webkit-scrollbar-thumb { background: var(--muted); border-radius: 2px; }
-  .strat-row {
-    padding: 8px 14px; cursor: pointer; border-bottom: 1px solid var(--border);
-    transition: background .1s;
-  }
-  .strat-row:hover { background: var(--border); }
-  .strat-row.active { background: rgba(41,98,255,.15); }
-  .strat-name { font-size: 12px; font-weight: 600; margin-bottom: 3px; }
-  .strat-meta { font-size: 11px; color: var(--dim); display: flex; gap: 10px; }
-  .strat-sig-count { color: var(--accent); }
-  .strat-last-sig { }
-  /* signal detail table */
-  .sig-detail { display: none; padding: 0; }
-  .sig-detail.open { display: block; }
-  .sig-table { width: 100%; border-collapse: collapse; font-size: 11px; }
-  .sig-table th {
-    padding: 5px 10px; text-align: left; color: var(--dim);
-    border-bottom: 1px solid var(--border); font-weight: 400; position: sticky; top: 0;
-    background: var(--surface);
-  }
-  .sig-table td { padding: 4px 10px; border-bottom: 1px solid rgba(42,46,57,.5); }
-  .sig-buy  { color: var(--green); }
-  .sig-sell { color: var(--red); }
-  .sp-back {
-    display: none; padding: 8px 14px; font-size: 12px; color: var(--accent);
-    cursor: pointer; border-bottom: 1px solid var(--border);
-  }
-  .sp-back:hover { background: var(--border); }
 </style>
 </head>
 <body>
+
+<!-- Chart area (moved into GL ChartPanel on init) -->
+<div class="chart-area" id="chartArea" style="display:none">
+  <div id="chartMain">
+    <div id="ohlcLegend"></div>
+  </div>
+  <div id="subChartsArea"></div>
+  <div id="xhairLine"><span id="xhairTimeLabel"></span></div>
+  <div id="loader"><div class="spin"></div><span id="loaderMsg">Loading…</span></div>
+  <div id="loadMoreBar" class="h"></div>
+  <div id="status"></div>
+</div>
+
+<!-- Editor panel content (moved into GL EditorPanel on init) -->
+<div id="editorPanelContent" style="display:none">
+  <div class="ep-tabs" id="epTabs">
+    <div class="ep-tab active" id="epTabNew">
+      <span class="ep-tab-title">New Indicator</span>
+    </div>
+    <button class="ep-new-tab" onclick="newEditorTab()" title="New file">+</button>
+  </div>
+  <div class="ep-toolbar">
+    <input id="editorName" type="text" placeholder="indicator_name">
+    <select id="editorDisplay">
+      <option value="sub_panel">Sub-panel</option>
+      <option value="overlay">Overlay on chart</option>
+    </select>
+  </div>
+  <div class="ep-params" id="editorParams">
+    <button class="editor-add-param" onclick="addEditorParam()">+ param</button>
+  </div>
+  <div class="ep-monaco" id="monacoMount"></div>
+  <div class="ep-hint">
+    Available: <code>close open high low volume ts np ta</code> + params above · assign <code>result</code>
+  </div>
+  <div class="ep-range">
+    <span>Range:</span>
+    <input type="date" id="rangeFrom">
+    <span>→</span>
+    <input type="date" id="rangeTo">
+    <button onclick="g('rangeFrom').value='';g('rangeTo').value=''">All history</button>
+  </div>
+  <div class="ep-actions">
+    <button class="btn-cancel" onclick="resetEditorPanel()">Clear</button>
+    <button class="btn-apply" id="btnEditorTest" onclick="testCustomIndicator()" style="background:var(--muted)">▶ Test Run</button>
+    <button class="btn-apply" id="btnEditorSave" onclick="saveCustomIndicator()">💾 Save to Library</button>
+  </div>
+</div>
+
 <div class="layout">
 
   <!-- Topbar -->
@@ -414,105 +499,54 @@
       <span id="priceChg" class="price-chg">—</span>
       <span id="wsLive" style="font-size:11px;margin-left:8px;color:#555;font-family:monospace">WS --</span>
     </div>
-    <a href="/progress" class="nav-btn">Progress</a>
-    <button class="nav-btn" id="btnStrat" onclick="toggleStratPanel()">Strategies</button>
+    <button class="nav-btn" id="btnEditor" onclick="openEditorModal()" title="Open code editor">Editor</button>
   </div>
 
-  <!-- Indicator library modal -->
-  <div class="ind-modal" id="indModal" onclick="onModalBgClick(event)">
-    <div class="ind-modal-box">
-      <div class="ind-modal-head">
-        <input id="indSearch" type="text" placeholder="Search indicators…" oninput="filterLibrary(this.value)" autofocus>
-        <button class="ind-modal-close" onclick="closeIndModal()">×</button>
+  <!-- Main area: sidebar + GL layout -->
+  <div class="main-row">
+    <!-- Sidebar -->
+    <div id="sidebar" class="sidebar">
+      <div class="sidebar-toggle" onclick="toggleSidebar()">
+        <span class="si-icon">▤</span>
+        <span class="si-label">Explorer</span>
       </div>
-      <div class="ind-modal-body">
-        <!-- Left: indicator list -->
-        <div class="ind-lib-list" id="indLibList"></div>
-        <!-- Right: settings panel -->
-        <div class="ind-settings" id="indSettings">
-          <div style="color:var(--dim);font-size:12px;margin-top:20px;text-align:center">
-            Select an indicator from the list
-          </div>
+      <div class="sidebar-tree" id="sidebarTree">
+        <div class="si-section">
+          <div class="si-section-head" onclick="toggleSiSection('si-indicators')">▾ Indicators</div>
+          <div id="si-indicators"></div>
+        </div>
+        <div class="si-section">
+          <div class="si-section-head" onclick="toggleSiSection('si-strategies')">▾ Strategies</div>
+          <div id="si-strategies"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- GoldenLayout container -->
+    <div id="glContainer"></div>
+  </div>
+
+</div>
+<div id="errBanner"></div>
+
+<!-- Indicator library modal (fixed overlay) -->
+<div class="ind-modal" id="indModal" onclick="onModalBgClick(event)">
+  <div class="ind-modal-box">
+    <div class="ind-modal-head">
+      <input id="indSearch" type="text" placeholder="Search indicators…" oninput="filterLibrary(this.value)" autofocus>
+      <button class="ind-modal-close" onclick="closeIndModal()">×</button>
+    </div>
+    <div class="ind-modal-body">
+      <div class="ind-lib-list" id="indLibList"></div>
+      <div class="ind-settings" id="indSettings">
+        <div style="color:var(--dim);font-size:12px;margin-top:20px;text-align:center">
+          Select an indicator from the list
         </div>
       </div>
     </div>
   </div>
-
-  <!-- Custom indicator editor modal -->
-  <div class="editor-modal" id="editorModal" onclick="onEditorBgClick(event)">
-    <div class="editor-box">
-      <div class="editor-head">
-        <span class="editor-head-title">New Indicator</span>
-        <input id="editorName" type="text" placeholder="indicator_name">
-        <button class="editor-close" onclick="closeEditorModal()">×</button>
-      </div>
-      <div class="editor-params" id="editorParams">
-        <button class="editor-add-param" onclick="addEditorParam()">+ param</button>
-      </div>
-      <div id="monacoMount"></div>
-      <div class="editor-hint">
-        Available: <code>close open high low volume ts np ta</code> + your params above · assign <code>result</code>
-      </div>
-      <div class="editor-range">
-        <span class="range-label">Range:</span>
-        <input type="date" id="rangeFrom" title="Start date (leave empty for all history)">
-        <span class="range-sep">→</span>
-        <input type="date" id="rangeTo" title="End date (leave empty for all history)">
-        <button class="range-clear" onclick="g('rangeFrom').value='';g('rangeTo').value=''">All history</button>
-      </div>
-      <div class="editor-actions">
-        <button class="btn-cancel" onclick="closeEditorModal()">Cancel</button>
-        <select id="editorDisplay" style="background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:4px 8px;font-size:12px;cursor:pointer">
-          <option value="sub_panel">Sub-panel</option>
-          <option value="overlay">Overlay on chart</option>
-        </select>
-        <button class="btn-apply" onclick="testCustomIndicator()" style="background:var(--muted)">▶ Test Run</button>
-        <button class="btn-apply" onclick="saveCustomIndicator()">💾 Save to Library</button>
-      </div>
-    </div>
-  </div>
-
-  <!-- Strategy panel -->
-  <div id="stratPanel">
-    <div class="sp-header">
-      <span class="sp-title" id="spTitle">Strategies</span>
-      <button class="sp-close" onclick="toggleStratPanel()">×</button>
-    </div>
-    <div class="sp-back" id="spBack" onclick="showStratList()">← Back</div>
-    <div class="sp-body" id="spBody">
-      <div style="padding:20px;text-align:center;color:var(--dim);font-size:12px">Loading…</div>
-    </div>
-  </div>
-
-  <!-- Charts -->
-  <div class="chart-area" id="chartArea">
-    <div id="chartMain">
-      <div id="ohlcLegend"></div>
-    </div>
-    <div class="chart-resizer h" id="resizerVol"></div>
-    <div id="chartVolume">
-      <div class="panel-hdr" id="volHdr">
-        <button class="panel-move-btn" id="volUpBtn" onclick="movePanel('vol',-1)" title="Move up">↑</button>
-        <button class="panel-move-btn" id="volDnBtn" onclick="movePanel('vol',1)"  title="Move down">↓</button>
-      </div>
-    </div>
-    <div class="chart-resizer h" id="resizerSub"></div>
-    <div id="chartSub" class="h">
-      <div class="panel-hdr" id="subHdr">
-        <button class="panel-move-btn" id="subUpBtn" onclick="movePanel('sub',-1)" title="Move up">↑</button>
-        <button class="panel-move-btn" id="subDnBtn" onclick="movePanel('sub',1)"  title="Move down">↓</button>
-      </div>
-    </div>
-
-    <!-- Single crosshair line spanning main+resizer+sub panels -->
-    <div id="xhairLine"><span id="xhairTimeLabel"></span></div>
-
-    <div id="loader"><div class="spin"></div><span id="loaderMsg">Loading…</span></div>
-    <div id="loadMoreBar" class="h"></div>
-    <div id="errBanner"></div>
-    <div id="status"></div>
-  </div>
 </div>
+
 
 <script>
 // ═══ State ═══════════════════════════════════════════════════════════
@@ -526,8 +560,9 @@ const S = {
   activeInds: new Map(), // key → { on, series, subRefLines, data, meta }
   indMeta: new Map(),    // key → { display_name } for on-demand computed inds
 
-  charts: { main: null, sub: null },
-  series: { candle: null, line: null, vol: null, subAnchor: null },
+  charts: { main: null },
+  subCharts: new Map(),  // key → { chart, anchor, anchorTs, height, el, chartEl, displayName }
+  series: { candle: null, line: null, vol: null },
   emaColors: ['#f6c90e','#a29bfe','#74b9ff','#fd79a8','#81ecec','#55efc4','#fdcb6e'],
   emaColorIdx: 0,
   indColorMap: new Map(),
@@ -539,9 +574,286 @@ const S = {
   chartGen: 0,
   displayedCandleT0: null,
   displayedCandleT1: null,
-  panelH: { sub: 140 },
-  panelOrder: ['sub'],
+  panelOrder: [],        // ordered array of sub-chart keys
 };
+
+// ═══ GoldenLayout ═══════════════════════════════════════════════════
+let glLayout = null;
+let glEditorContainer = null;
+
+// Refs captured before GL moves elements — survive detached-DOM fallback
+const _chartAreaEl       = document.getElementById('chartArea');
+const _editorPanelEl     = document.getElementById('editorPanelContent');
+
+function _registerGLComponents(gl) {
+  gl.registerComponentFactoryFunction('ChartPanel', glContainer => {
+    const el = glContainer.element;
+    el.style.cssText = 'overflow:hidden;position:relative;width:100%;height:100%';
+    _chartAreaEl.style.cssText = 'display:flex;flex-direction:column;overflow:hidden;position:relative;width:100%;height:100%';
+    el.appendChild(_chartAreaEl);
+    // GL calls factory before element is attached to DOM — defer until next frame
+    requestAnimationFrame(() => initChartsAndLoad());
+  });
+  gl.registerComponentFactoryFunction('EditorPanel', glContainer => {
+    glEditorContainer = glContainer;
+    const el = glContainer.element;
+    el.style.cssText = 'overflow:hidden;width:100%;height:100%';
+    _editorPanelEl.style.display = '';
+    el.appendChild(_editorPanelEl);
+    glContainer.on('destroy', () => {
+      // Rescue _editorPanelEl before GL removes the container element from DOM
+      if (_editorPanelEl.parentElement !== document.body) document.body.appendChild(_editorPanelEl);
+      glEditorContainer = null;
+    });
+    requestAnimationFrame(() => {
+      _renderTabs();
+      if (monacoEditor) {
+        monacoEditor.layout(); // re-measure after DOM move
+      } else {
+        initMonaco();
+      }
+    });
+  });
+}
+
+const _glDefaultLayout = {
+  root: { type: 'component', componentType: 'ChartPanel', title: 'Chart', isClosable: false }
+};
+
+function _syncGLContainerPos() {
+  const container = document.getElementById('glContainer');
+  const sidebar   = document.getElementById('sidebar');
+  if (!container) return;
+  container.style.left = (sidebar ? sidebar.offsetWidth : 0) + 'px';
+}
+
+function initGoldenLayout() {
+  if (typeof GoldenLayout === 'undefined') { initChartsAndLoad(); return; }
+
+  const container = document.getElementById('glContainer');
+
+  // #glContainer is position:absolute; its left edge tracks the sidebar width.
+  // top/right/bottom:0 are already set in CSS — GL gets exact pixel dimensions.
+  _syncGLContainerPos();
+
+  window.addEventListener('resize', () => {
+    _syncGLContainerPos();
+    if (glLayout) glLayout.updateSize(container.clientWidth, container.clientHeight);
+  });
+
+  const _GL_VERSION = 2; // bump to invalidate saved layouts on breaking changes
+  const saved = (() => {
+    try {
+      const raw = localStorage.getItem('tradingbot_gl_layout');
+      if (!raw) return null;
+      const parsed = JSON.parse(raw);
+      if (parsed?._v !== _GL_VERSION) { localStorage.removeItem('tradingbot_gl_layout'); return null; }
+      return parsed;
+    } catch (_) { return null; }
+  })();
+
+  const _initGL = (layout) => {
+    container.innerHTML = '';
+    glLayout = new GoldenLayout(container);
+    _registerGLComponents(glLayout);
+    glLayout.loadLayout(layout);
+  };
+
+  try {
+    _initGL(saved || _glDefaultLayout);
+  } catch (_) {
+    localStorage.removeItem('tradingbot_gl_layout');
+    if (!document.body.contains(_chartAreaEl))   document.body.appendChild(_chartAreaEl);
+    if (!document.body.contains(_editorPanelEl)) document.body.appendChild(_editorPanelEl);
+    try { _initGL(_glDefaultLayout); } catch (e2) { console.error('GL init failed:', e2); initChartsAndLoad(); return; }
+  }
+
+  window.addEventListener('beforeunload', () => {
+    try {
+      const layout = glLayout.saveLayout();
+      layout._v = _GL_VERSION;
+      localStorage.setItem('tradingbot_gl_layout', JSON.stringify(layout));
+    } catch (_) {}
+  });
+}
+
+function initChartsAndLoad() {
+  initCharts();
+  loadChart().catch(e => showErr(e.message)).finally(() => load(false));
+}
+
+function ensureEditorPanelVisible() {
+  if (!glLayout) return;
+
+  // Already open — just activate the tab
+  if (glEditorContainer) {
+    try { glEditorContainer.tab?.header?.parent?.setActiveContentItem?.(glEditorContainer.tab?.contentItem); } catch (_) {}
+    return;
+  }
+
+  // _editorPanelEl must be in body so the factory can adopt it
+  if (_editorPanelEl.parentElement !== document.body) document.body.appendChild(_editorPanelEl);
+
+  const editorConfig = { type: 'component', componentType: 'EditorPanel', title: 'Editor', isClosable: true };
+
+  // Find the ChartPanel's parent (a Stack/Row/Column) and add EditorPanel as sibling.
+  // This is more reliable than calling root.addItem() on a bare component root.
+  const root = glLayout.rootItem;
+  if (!root) return;
+
+  const findItem = (item, type) => {
+    if (item.componentType === type) return item;
+    if (item.contentItems) for (const c of item.contentItems) { const r = findItem(c, type); if (r) return r; }
+    return null;
+  };
+
+  const chartItem = findItem(root, 'ChartPanel');
+  const target = chartItem?.parent ?? root;
+  try {
+    target.addItem(editorConfig);
+  } catch (_) {
+    // Last resort: add directly to root (GL2 may auto-wrap into a row)
+    try { root.addItem(editorConfig); } catch (_2) {}
+  }
+}
+
+// ═══ Sidebar ══════════════════════════════════════════════════════════
+function toggleSidebar() {
+  const sb = g('sidebar');
+  sb.classList.toggle('collapsed');
+  // Sync GL container after the CSS transition (.18s) finishes
+  sb.addEventListener('transitionend', () => {
+    _syncGLContainerPos();
+    const container = document.getElementById('glContainer');
+    if (glLayout && container) glLayout.updateSize(container.clientWidth, container.clientHeight);
+  }, { once: true });
+}
+
+function toggleSiSection(id) {
+  const el = g(id);
+  if (!el) return;
+  el.style.display = el.style.display === 'none' ? '' : 'none';
+}
+
+async function loadSidebarFiles() {
+  const types = [
+    { key: 'indicators', elId: 'si-indicators' },
+    { key: 'strategies', elId: 'si-strategies' },
+  ];
+  for (const { key, elId } of types) {
+    try {
+      const r = await api(`/api/library/${key}`);
+      const el = g(elId);
+      if (!el) continue;
+      if (!r.items.length) {
+        el.innerHTML = `<div class="si-file" style="color:var(--dim);cursor:default">Empty library</div>`;
+        continue;
+      }
+      el.innerHTML = r.items.map(f => `
+        <div class="si-file" data-name="${f.name}" data-type="${key}"
+             onclick="openFileInEditor('${key}','${f.name}')"
+             oncontextmenu="siFileContextMenu(event,'${key}','${f.name}')">
+          <span style="color:var(--dim);font-size:11px">py</span>
+          <span>${f.name}</span>
+        </div>`).join('');
+    } catch (_) {}
+  }
+}
+
+// ═══ Editor Tabs ══════════════════════════════════════════════════════
+const editorTabs = new Map(); // tabId → { name, type, dirty }
+let activeTabId = 'new';
+
+function _renderTabs() {
+  const container = g('epTabs');
+  if (!container) return;
+  let html = '';
+  editorTabs.forEach((tab, id) => {
+    const isActive = id === activeTabId;
+    const dirty = tab.dirty ? ' dirty' : '';
+    html += `<div class="ep-tab${isActive ? ' active' : ''}${dirty}" data-tabid="${id}"
+               onclick="switchTab('${id}')">
+      <span class="ep-tab-title">${tab.name}</span>
+      <button class="ep-tab-close" onclick="closeTab(event,'${id}')" title="Close">×</button>
+    </div>`;
+  });
+  // Keep "new" tab and "+" button at end
+  const tabsArea = container.querySelector('.ep-tab[data-tabid="new"]')?.parentElement || container;
+  container.innerHTML = html +
+    `<div class="ep-tab${activeTabId === 'new' ? ' active' : ''}" data-tabid="new" onclick="switchTab('new')">
+       <span class="ep-tab-title">New Indicator</span>
+     </div>
+     <button class="ep-new-tab" onclick="newEditorTab()" title="New file">+</button>`;
+}
+
+function switchTab(id) {
+  if (id === activeTabId) return;
+  // Save current tab content
+  const prevTab = editorTabs.get(activeTabId);
+  if (prevTab && monacoEditor) prevTab.code = monacoEditor.getValue();
+
+  activeTabId = id;
+  const tab = editorTabs.get(id);
+  if (tab) {
+    g('editorName').value = tab.name;
+    if (monacoEditor) monacoEditor.setValue(tab.code || '');
+  } else {
+    g('editorName').value = '';
+    if (monacoEditor) monacoEditor.setValue(EDITOR_TEMPLATE);
+  }
+  _renderTabs();
+}
+
+function closeTab(e, id) {
+  e.stopPropagation();
+  editorTabs.delete(id);
+  if (activeTabId === id) {
+    const remaining = [...editorTabs.keys()];
+    activeTabId = remaining.length ? remaining[0] : 'new';
+  }
+  _renderTabs();
+  switchTab(activeTabId);
+}
+
+function newEditorTab() {
+  resetEditorPanel();
+  activeTabId = 'new';
+  _renderTabs();
+  ensureEditorPanelVisible();
+}
+
+async function openFileInEditor(type, name) {
+  ensureEditorPanelVisible();
+  initMonaco();
+
+  if (editorTabs.has(name)) {
+    switchTab(name);
+    return;
+  }
+
+  // Save current tab content before we overwrite activeTabId (same as switchTab does)
+  const prevTab = editorTabs.get(activeTabId);
+  if (prevTab && monacoEditor) prevTab.code = monacoEditor.getValue();
+
+  try {
+    const r = await api(`/api/library/${type}/${name}`);
+    editorTabs.set(name, { name, type, code: r.code, dirty: false });
+    document.querySelectorAll('.si-file').forEach(el => el.classList.remove('active'));
+    document.querySelector(`.si-file[data-name="${name}"][data-type="${type}"]`)?.classList.add('active');
+    activeTabId = name;
+    _renderTabs();
+    if (monacoEditor) monacoEditor.setValue(r.code);
+    g('editorName').value = name;
+  } catch (e) { showErr(`Failed to load ${name}: ${e.message}`); }
+}
+
+function siFileContextMenu(e, type, name) {
+  e.preventDefault();
+  if (!confirm(`Delete "${name}" from library?`)) return;
+  fetch(`/api/library/${type}/${name}`, { method: 'DELETE' })
+    .then(() => { editorTabs.delete(name); _renderTabs(); loadSidebarFiles(); })
+    .catch(err => showErr(err.message));
+}
 
 // ═══ Boot ════════════════════════════════════════════════════════════
 async function boot() {
@@ -553,16 +865,12 @@ async function boot() {
     ]);
     S.sources = srcRes.sources || [];
     S.allInds = (indRes.indicators || []).map(i => {
-      const parts = i.connection.split('_'); // e.g. "whitebit_SOL_USDT_5m"
-      // connection format: exchange_SYMBOL_tf (symbol may have underscore)
       return { name: i.name, connection: i.connection, count: i.count, ...parseConnection(i.connection) };
     });
     buildSelects();
-    initCharts();
-    initResizers();
-    await loadChart();
-  } catch (e) { showErr(e.message); }
-  finally { load(false); }
+    initGoldenLayout();
+    loadSidebarFiles();
+  } catch (e) { console.error('boot error:', e); showErr(e.message); load(false); }
 }
 
 function parseConnection(conn) {
@@ -604,293 +912,180 @@ function fill(id, vals) {
 }
 function tfMin(tf) { return ({1:1,3:3,5:5,15:15,30:30,'1h':60,'2h':120,'4h':240,'6h':360,'12h':720,'1d':1440,'1w':10080})[tf.replace('m','').replace('h','h').replace('d','d').replace('w','w')] || ({ '1m':1,'3m':3,'5m':5,'15m':15,'30m':30,'1h':60,'2h':120,'4h':240,'6h':360,'12h':720,'1d':1440,'1w':10080 })[tf] || 9999; }
 
+// ─── Module-level sync state ─────────────────────────────────────────
+let _chartSyncInProgress = false;
+let _xhairSync = false;
+let _handleCrosshairMove = null; // set by initCrosshairSync, used by dynamic sub-charts
+
 // ─── Shared time-axis sync helpers ───────────────────────────────────
 // All panels share a single logical time axis. Moving any chart moves all
 // others. Sync is bidirectional: main→sub and sub→main.
+//
+// Strategy: convert main logical range → timestamps → setVisibleRange on sub.
+// setVisibleRange(timestamps) is stable: no dependency on sub-chart logical
+// indices, which shift after loadMore. Sub→main uses getVisibleRange() directly
+// (timestamps), so no round-trip conversion that caused oscillation before.
 
-// Convert main-chart logical index → Unix timestamp (extrapolates outside data).
+// ─── Per-key sub-chart anchor helpers ────────────────────────────────
+// Dense anchor: one invisible histogram point per candle, matching main chart's
+// timeline. Without it, a sparse indicator series creates a non-uniform internal
+// time axis (huge gap between the two endpoints), so setVisibleRange with the same
+// timestamps maps timestamps→pixels at a different rate than the main chart.
+function _setSubAnchorForKey(key) {
+  const subData = S.subCharts.get(key);
+  if (!subData || !subData.anchor || !S.candles.length) return;
+  const leftTs  = S.candles[0].timestamp;
+  const rightTs = S.candles[S.candles.length - 1].timestamp;
+  if (subData.anchorTs[0] === leftTs && subData.anchorTs[1] === rightTs) return;
+  subData.anchorTs = [leftTs, rightTs];
+  _chartSyncInProgress = true;
+  // Alternating 0/1 values keep the left price scale non-degenerate (range [0,1]),
+  // preventing LWC's "Value is null" render error that occurs when min===max===0.
+  const anchorData = S.candles.map((c, i) => ({ time: c.timestamp, value: i & 1 }));
+  try { subData.anchor.setData(anchorData); } catch (_) {}
+  _chartSyncInProgress = false;
+}
+
+function _setAllSubAnchors() {
+  S.subCharts.forEach((_, key) => _setSubAnchorForKey(key));
+}
+
+// Main-chart logical index → Unix timestamp (extrapolates outside data range).
 function _mainLogicalToTime(logIdx) {
   const n = S.candles.length;
   if (!n) return null;
   const dt = n > 1 ? S.candles[n - 1].timestamp - S.candles[n - 2].timestamp : 60;
-  if (logIdx >= n - 1)
-    return Math.round(S.candles[n - 1].timestamp + (logIdx - (n - 1)) * dt);
-  if (logIdx < 0)
-    return Math.round(S.candles[0].timestamp + logIdx * dt);
+  if (logIdx >= n - 1) return Math.round(S.candles[n - 1].timestamp + (logIdx - (n - 1)) * dt);
+  if (logIdx < 0)      return Math.round(S.candles[0].timestamp + logIdx * dt);
   const lo = Math.floor(logIdx);
-  const frac = logIdx - lo;
-  return Math.round(S.candles[lo].timestamp + frac * (S.candles[lo + 1].timestamp - S.candles[lo].timestamp));
+  return Math.round(S.candles[lo].timestamp + (logIdx - lo) * (S.candles[lo + 1].timestamp - S.candles[lo].timestamp));
 }
 
-// Inverse: Unix timestamp → main-chart fractional logical index.
-function _timeToMainLogical(ts) {
-  const n = S.candles.length;
-  if (!n) return null;
-  const dt = n > 1 ? S.candles[n - 1].timestamp - S.candles[n - 2].timestamp : 60;
-  if (ts <= S.candles[0].timestamp) return (ts - S.candles[0].timestamp) / dt;
-  if (ts >= S.candles[n - 1].timestamp) return (n - 1) + (ts - S.candles[n - 1].timestamp) / dt;
-  let lo = 0, hi = n - 1;
-  while (lo < hi) { const mid = (lo + hi + 1) >> 1; if (S.candles[mid].timestamp <= ts) lo = mid; else hi = mid - 1; }
-  const nextTs = S.candles[lo + 1]?.timestamp ?? S.candles[lo].timestamp + dt;
-  return lo + (ts - S.candles[lo].timestamp) / (nextTs - S.candles[lo].timestamp);
+// Sync a sub-chart to the main chart's current logical range via timestamps.
+// setVisibleRange(timestamps) avoids passing out-of-bounds logical indices to
+// the sub-chart (which throws in LWC when priceScaleId:'' overlay is used).
+function _syncSubChartByKey(key, mainRange) {
+  if (!mainRange || mainRange.from == null || mainRange.to == null) return;
+  const fromTs = _mainLogicalToTime(mainRange.from);
+  const toTs   = _mainLogicalToTime(mainRange.to);
+  if (fromTs === null || toTs === null) return;
+  const subData = S.subCharts.get(key);
+  if (subData) try { subData.chart.timeScale().setVisibleRange({ from: fromTs, to: toTs }); } catch (_) {}
 }
 
-// Sync lock — prevents the mutual callbacks from looping.
-let _chartSyncInProgress = false;
-
-// True only while the user is actively touching the sub chart (drag or wheel).
-// Guards sub→main sync so programmatic setVisibleLogicalRange on sub never drives main.
-let _subUserInteracting = false;
-let _subInteractTimer   = null;
-
-function _initSubInteraction() {
-  const el = g('chartSub');
-  if (!el) return;
-  el.addEventListener('mousedown',  () => { _subUserInteracting = true; });
-  el.addEventListener('mouseup',    () => { _subUserInteracting = false; });
-  el.addEventListener('mouseleave', () => { _subUserInteracting = false; });
-  el.addEventListener('wheel', () => {
-    _subUserInteracting = true;
-    clearTimeout(_subInteractTimer);
-    _subInteractTimer = setTimeout(() => { _subUserInteracting = false; }, 300);
-  }, { passive: true });
+// Sync ALL sub-charts from main range.
+function _syncAllSubCharts(mainRange) {
+  S.subCharts.forEach((_, key) => _syncSubChartByKey(key, mainRange));
 }
 
-// [leftTs, rightTs] of the sub chart's transparent anchor series.
-// Tracked here so _getSubTimeline() can include them in the merged timeline,
-// ensuring the sub chart's logical indices match what we compute.
-let _subAnchorTs = [];
-
-// Set (or update) the sub chart anchor to span the full loaded candle range.
-// Called once when candles load and when older candles are prepended.
-// Only updates if the range actually changed; guards setData with
-// _chartSyncInProgress so the triggered range-change event doesn't propagate.
-function _setSubAnchor() {
-  if (!S.series.subAnchor || !S.candles.length) return;
-  const leftTs  = S.candles[0].timestamp;
-  const rightTs = S.candles[S.candles.length - 1].timestamp;
-  if (_subAnchorTs[0] === leftTs && _subAnchorTs[1] === rightTs) return;
-  _subAnchorTs = [leftTs, rightTs];
-  _chartSyncInProgress = true;
-  try { S.series.subAnchor.setData([{ time: leftTs, value: 0 }, { time: rightTs, value: 0 }]); } catch (_) {}
-  _chartSyncInProgress = false;
-}
-
-// Merged sorted array of all active sub-panel timestamps PLUS anchor timestamps.
-// This exactly matches the sub chart's internal logical timeline so that our
-// computed logical indices agree with LightweightCharts' internal indices.
-function _getSubTimeline() {
-  const tsSet = new Set(_subAnchorTs);
-  for (const entry of S.activeInds.values()) {
-    if (entry.on && entry.displayType === 'sub_panel' && entry.data.length) {
-      for (const p of entry.data) tsSet.add(p.time);
-    }
-  }
-  if (!tsSet.size) return null;
-  const arr = Array.from(tsSet);
-  arr.sort((a, b) => a - b);
-  return arr;
-}
-
-// Convert a Unix timestamp → fractional logical index in the sub chart's timeline.
-function _mainTimeToSubLogical(ts, timeline) {
-  const n = timeline.length;
-  const dt = n > 1 ? timeline[n - 1] - timeline[n - 2] : 60;
-  if (ts <= timeline[0]) return (ts - timeline[0]) / dt;
-  if (ts >= timeline[n - 1]) return (n - 1) + (ts - timeline[n - 1]) / dt;
-  let lo = 0, hi = n - 1;
-  while (lo < hi) { const mid = (lo + hi + 1) >> 1; if (timeline[mid] <= ts) lo = mid; else hi = mid - 1; }
-  const nextTs = timeline[lo + 1] ?? timeline[lo] + dt;
-  return lo + (ts - timeline[lo]) / (nextTs - timeline[lo]);
-}
-
-// Convert a fractional logical index in the sub chart → Unix timestamp.
-function _subLogicalToTime(l, timeline) {
-  const n = timeline.length;
-  const dt = n > 1 ? timeline[n - 1] - timeline[n - 2] : 60;
-  if (l >= n - 1) return timeline[n - 1] + (l - (n - 1)) * dt;
-  if (l < 0) return timeline[0] + l * dt;
-  const lo = Math.floor(l);
-  const t0 = timeline[lo], t1 = timeline[lo + 1] ?? timeline[lo] + dt;
-  return t0 + (l - lo) * (t1 - t0);
-}
-
-// Sync sub chart to match main chart's current logical range.
-// Uses setVisibleLogicalRange — no anchor coverage required, no setData side-effects.
-function _syncSubChart(mainRange) {
-  if (!mainRange) return;
-  const timeline = _getSubTimeline();
-  if (!timeline) return;
-  const fromTime = _mainLogicalToTime(mainRange.from);
-  const toTime   = _mainLogicalToTime(mainRange.to);
-  if (fromTime === null || toTime === null) return;
-  const fromL = _mainTimeToSubLogical(fromTime, timeline);
-  const toL   = _mainTimeToSubLogical(toTime, timeline);
-  try { S.charts.sub.timeScale().setVisibleLogicalRange({ from: fromL, to: toL }); } catch (_) {}
-}
-
-// Sync main chart to match sub chart's visible window (user dragged sub chart).
-function _syncMainFromSub() {
-  const subRange = S.charts.sub.timeScale().getVisibleLogicalRange();
-  if (!subRange || !S.candles.length) return;
-  const timeline = _getSubTimeline();
-  if (!timeline) return;
-  const fromTime = _subLogicalToTime(subRange.from, timeline);
-  const toTime   = _subLogicalToTime(subRange.to, timeline);
-  const mFrom = _timeToMainLogical(fromTime);
-  const mTo   = _timeToMainLogical(toTime);
-  if (mFrom === null || mTo === null) return;
-  const span = mTo - mFrom;
-  if (span < 2 || span > S.candles.length * 3) return;
-  try { S.charts.main.timeScale().setVisibleLogicalRange({ from: mFrom, to: mTo }); } catch (_) {}
+// Sync main chart from a specific sub-chart (user dragged that sub).
+// Get sub-chart's timestamp range and apply it directly — no round-trip conversion.
+function _syncMainFromSubKey(key) {
+  const subData = S.subCharts.get(key);
+  if (!subData) return;
+  const subRange = subData.chart.timeScale().getVisibleRange();
+  if (!subRange || subRange.from == null || subRange.to == null) return;
+  try { S.charts.main.timeScale().setVisibleRange(subRange); } catch (_) {}
 }
 
 // ═══ Charts init ═════════════════════════════════════════════════════
 function initCharts() {
-  // Full crosshair line specs — all properties explicit to avoid v3.8 null errors
-  // when a partial object is merged with uninitialised internal defaults.
   const _vLine = { visible: false, labelVisible: true,  color: '#758696', width: 1, style: 3, labelBackgroundColor: '#4c525e' };
   const _hLine = { visible: true,  labelVisible: true,  color: '#758696', width: 1, style: 2, labelBackgroundColor: '#4c525e' };
 
-  const base = {
+  S.charts.main = LightweightCharts.createChart(g('chartMain'), {
     layout: { background: { color: '#131722' }, textColor: '#c0c3cc' },
     grid:   { vertLines: { color: '#1a1e2a' }, horzLines: { color: '#1a1e2a' } },
     crosshair: {
       mode: LightweightCharts.CrosshairMode.Magnet,
-      vertLine: { ..._vLine },  // native vertLine hidden — CSS #xhairLine overlay used instead
-      horzLine: { ..._hLine },  // main chart shows horzLine at current price level
+      vertLine: { ..._vLine },
+      horzLine: { ..._hLine },
     },
     timeScale: { timeVisible: true, secondsVisible: false, borderColor: '#2a2e39' },
     rightPriceScale: { borderColor: '#2a2e39' },
     handleScroll: { mouseWheel: true, pressedMouseMove: true },
     handleScale:  { axisPressedMouseMove: true, mouseWheel: true, pinch: true },
-  };
-  S.charts.main = LightweightCharts.createChart(g('chartMain'), { ...base });
-  // S.charts.vol intentionally omitted — volume is overlaid on main chart;
-  // creating a chart on a container that immediately gets display:none caused
-  // "Value is null" errors from lightweight-charts' internal ResizeObserver.
-  S.charts.sub  = LightweightCharts.createChart(g('chartSub'), {
-    ...base,
-    crosshair: {
-      mode: LightweightCharts.CrosshairMode.Magnet,
-      vertLine: { ..._vLine, labelVisible: false },  // native time label hidden — custom #xhairTimeLabel used instead
-      horzLine: { ..._hLine },  // native dashed horzLine — Y is snapped to indicator value via priceToCoordinate
-    },
-    timeScale: { visible: false },
-    rightPriceScale: { scaleMargins: { top: 0.1, bottom: 0.1 }, borderColor: '#2a2e39' },
-    handleScroll: { mouseWheel: true, pressedMouseMove: true },
-    handleScale:  false,
   });
 
-  // ── Bidirectional shared-time-axis sync ─────────────────────────────
-  // Main → Sub: map main's logical range to sub's logical range via data timeline.
   S.charts.main.timeScale().subscribeVisibleLogicalRangeChange(range => {
     if (_chartSyncInProgress || !range) return;
-    if (hasSubPanel()) {
+    if (S.subCharts.size > 0) {
       _chartSyncInProgress = true;
-      _syncSubChart(range);
+      _syncAllSubCharts(range);
       _chartSyncInProgress = false;
     }
     if (range.from < 20 && !S.loadingMore && !S.noMoreData && !S.fitting) loadMore();
   });
 
-  // Sub → Main: only when the user is physically interacting with the sub chart.
-  S.charts.sub.timeScale().subscribeVisibleLogicalRangeChange(() => {
-    if (_chartSyncInProgress || !_subUserInteracting) return;
-    _chartSyncInProgress = true;
-    _syncMainFromSub();
-    _chartSyncInProgress = false;
-  });
-
-  _initSubInteraction();
   initCrosshairSync();
-  updatePanelOrder();
 
-  new ResizeObserver(relayout).observe(g('chartArea'));
-  // Size charts correctly after creation (important: chartVolume is visible at init)
+  new ResizeObserver(relayout).observe(_chartAreaEl);
   relayout();
 }
 
 function relayout() {
-  const W = g('chartArea').clientWidth, H = g('chartArea').clientHeight;
-  const statusH = (g('status').offsetHeight || 18) + 8;  // status bar + breathing room for time labels
+  const W = _chartAreaEl.clientWidth, H = _chartAreaEl.clientHeight;
+  const statusH = (g('status').offsetHeight || 18) + 8;
   const usableH = H - statusH;
-  const subVisible = hasSubPanel() && !g('chartSub').classList.contains('h');
-  const subH       = subVisible ? S.panelH.sub : 0;
-  const resizerH   = subVisible ? (g('resizerSub').offsetHeight || 5) : 0;
 
-  // Volume is an overlay on main chart — the separate vol panel stays hidden
-  g('chartVolume').classList.add('h');
-  g('resizerVol').classList.add('h');
-  g('chartSub').style.height = subH ? `${subH}px` : '';
-  g('resizerSub').classList.toggle('h', !subVisible);
+  let subTotalH = 0;
+  S.subCharts.forEach(subData => { subTotalH += subData.height + 5; }); // +5 for resizer
+
+  const mainH = Math.max(usableH - subTotalH, 100);
 
   if (W > 0) {
-    try { S.charts.main.resize(W, Math.max(usableH - subH - resizerH, 100)); } catch (_) {}
-    if (subH) { try { S.charts.sub.resize(W, subH); } catch (_) {} }
+    try { S.charts.main.resize(W, mainH); } catch (_) {}
+    S.subCharts.forEach((subData, key) => {
+      subData.chartEl.style.height = `${subData.height}px`;
+      try { subData.chart.resize(W, subData.height); } catch (_) {}
+    });
   }
   g('xhairLine').style.height = usableH + 'px';
   updateTimeAxes();
-  // Re-sync sub chart after resize/applyOptions (which can trigger deferred
-  // fitContent inside LightweightCharts). RAF ensures our sync fires after any
-  // such deferred resets.
-  if (subH && S.candles.length) {
+  if (S.subCharts.size > 0 && S.candles.length) {
     const _r = S.charts.main.timeScale().getVisibleLogicalRange();
-    if (_r) requestAnimationFrame(() => { _syncSubChart(_r); });
+    if (_r) requestAnimationFrame(() => { _syncAllSubCharts(_r); });
   }
 }
-function hasSubPanel() { return [...S.activeInds.values()].some(v => v.on && v.displayType === 'sub_panel'); }
 
-function initResizers() {
-  // panel: 'vol' | 'sub'
-  // dragging the handle UP shrinks the panel, DOWN grows it
-  function setupResizer(id, panel, minH, maxH) {
-    const el = g(id);
-    if (!el) return;
-    let startY, startH;
+function hasSubPanel() { return S.subCharts.size > 0; }
 
-    function onDown(clientY) {
-      startY = clientY;
-      startH = S.panelH[panel];
-      el.classList.add('dragging');
-      document.body.style.cursor = 'row-resize';
-      document.body.style.userSelect = 'none';
-    }
-    function onMove(clientY) {
-      // drag UP (startY > clientY) → expand panel; drag DOWN → shrink panel
-      const delta = startY - clientY;
-      S.panelH[panel] = Math.max(minH, Math.min(maxH, startH + delta));
-      relayout();
-    }
-    function onUp() {
-      el.classList.remove('dragging');
-      document.body.style.cursor = '';
-      document.body.style.userSelect = '';
-    }
-
-    // Mouse
-    el.addEventListener('mousedown', e => {
-      e.preventDefault();
-      onDown(e.clientY);
-      const mv = e2 => onMove(e2.clientY);
-      const up = () => { onUp(); document.removeEventListener('mousemove', mv); document.removeEventListener('mouseup', up); };
-      document.addEventListener('mousemove', mv);
-      document.addEventListener('mouseup', up);
-    });
-
-    // Touch
-    el.addEventListener('touchstart', e => {
-      e.preventDefault();
-      onDown(e.touches[0].clientY);
-      const mv = e2 => onMove(e2.touches[0].clientY);
-      const up = () => { onUp(); document.removeEventListener('touchmove', mv); document.removeEventListener('touchend', up); };
-      document.addEventListener('touchmove', mv, { passive: false });
-      document.addEventListener('touchend', up);
-    }, { passive: false });
+function setupSubResizer(resizerEl, key) {
+  let startY, startH;
+  function onDown(clientY) {
+    startY = clientY;
+    startH = S.subCharts.get(key)?.height || 140;
+    resizerEl.classList.add('dragging');
+    document.body.style.cursor = 'row-resize';
+    document.body.style.userSelect = 'none';
   }
-
-  setupResizer('resizerVol', 'vol', 70, 250);
-  setupResizer('resizerSub', 'sub', 90, 500);
+  function onMove(clientY) {
+    const delta = startY - clientY;
+    const subData = S.subCharts.get(key);
+    if (subData) subData.height = Math.max(60, Math.min(500, startH + delta));
+    relayout();
+  }
+  function onUp() {
+    resizerEl.classList.remove('dragging');
+    document.body.style.cursor = '';
+    document.body.style.userSelect = '';
+  }
+  resizerEl.addEventListener('mousedown', e => {
+    e.preventDefault();
+    onDown(e.clientY);
+    const mv = e2 => onMove(e2.clientY);
+    const up = () => { onUp(); document.removeEventListener('mousemove', mv); document.removeEventListener('mouseup', up); };
+    document.addEventListener('mousemove', mv);
+    document.addEventListener('mouseup', up);
+  });
+  resizerEl.addEventListener('touchstart', e => {
+    e.preventDefault();
+    onDown(e.touches[0].clientY);
+    const mv = e2 => onMove(e2.touches[0].clientY);
+    const up = () => { onUp(); document.removeEventListener('touchmove', mv); document.removeEventListener('touchend', up); };
+    document.addEventListener('touchmove', mv, { passive: false });
+    document.addEventListener('touchend', up);
+  }, { passive: false });
 }
 
 function _formatTime(ts) {
@@ -904,47 +1099,165 @@ function _formatTime(ts) {
   return `${d.getUTCDate()} ${mon} '${String(d.getUTCFullYear()).slice(2)} ${h}:${m}`;
 }
 
-// ═══ Panel order (move buttons) ══════════════════════════════════
-function updatePanelOrder() {
-  const map = {
-    vol: { resizer: g('resizerVol'), panel: g('chartVolume') },
-    sub: { resizer: g('resizerSub'), panel: g('chartSub') },
-  };
-  S.panelOrder.forEach((k, i) => {
-    map[k].resizer.style.order = i * 2 + 1;
-    map[k].panel.style.order   = i * 2 + 2;
-  });
-  // Update disabled state of move buttons
-  S.panelOrder.forEach((k, i) => {
-    const upBtn = g(k + 'UpBtn'), dnBtn = g(k + 'DnBtn');
-    if (upBtn) upBtn.disabled = (i === 0);
-    if (dnBtn) dnBtn.disabled = (i === S.panelOrder.length - 1);
-  });
-}
-
-function movePanel(key, dir) {
-  const idx = S.panelOrder.indexOf(key);
-  const newIdx = idx + dir;
-  if (newIdx < 0 || newIdx >= S.panelOrder.length) return;
-  const other = S.panelOrder[newIdx];
-  S.panelOrder[idx] = other;
-  S.panelOrder[newIdx] = key;
-  updatePanelOrder();
-  updateTimeAxes();
-}
-
-// ═══ Time axes — only bottommost visible panel shows time ruler ══
+// ═══ Time axes — only bottommost visible panel shows time ruler ══════
 function updateTimeAxes() {
-  const subVis = hasSubPanel() && !g('chartSub').classList.contains('h');
   const tsBase = { timeVisible: true, secondsVisible: false, borderColor: '#2a2e39' };
-  try { S.charts.main.applyOptions({ timeScale: { ...tsBase, visible: !subVis } }); } catch (_) {}
-  try { S.charts.sub.applyOptions({  timeScale: { ...tsBase, visible: subVis  } }); } catch (_) {}
+  const hasSubs = S.panelOrder.length > 0;
+  try { S.charts.main.applyOptions({ timeScale: { ...tsBase, visible: !hasSubs } }); } catch (_) {}
+  S.panelOrder.forEach((key, i) => {
+    const subData = S.subCharts.get(key);
+    if (!subData) return;
+    const isLast = i === S.panelOrder.length - 1;
+    try { subData.chart.applyOptions({ timeScale: { ...tsBase, visible: isLast } }); } catch (_) {}
+  });
+}
+
+// ═══ Sub-chart creation / destruction ════════════════════════════════
+function _subBaseOptions() {
+  return {
+    layout: { background: { color: '#131722' }, textColor: '#c0c3cc' },
+    grid:   { vertLines: { color: '#1a1e2a' }, horzLines: { color: '#1a1e2a' } },
+    crosshair: {
+      mode: LightweightCharts.CrosshairMode.Magnet,
+      vertLine: { visible: false, labelVisible: false, color: '#758696', width: 1, style: 3, labelBackgroundColor: '#4c525e' },
+      horzLine: { visible: true,  labelVisible: true,  color: '#758696', width: 1, style: 2, labelBackgroundColor: '#4c525e' },
+    },
+    timeScale: { visible: false },
+    rightPriceScale: { scaleMargins: { top: 0.1, bottom: 0.1 }, borderColor: '#2a2e39' },
+    leftPriceScale:  { visible: false },
+    handleScroll: { mouseWheel: true, pressedMouseMove: true },
+    handleScale:  false,
+  };
+}
+
+function createSubChart(key, displayName) {
+  if (S.subCharts.has(key)) return S.subCharts.get(key);
+  const height = 140;
+
+  const item = document.createElement('div');
+  item.className = 'sub-chart-item';
+  item.dataset.key = key;
+  item.draggable = true;
+  item.innerHTML = `
+    <div class="sub-resizer" data-key="${key}"></div>
+    <div class="sub-chart-inner" id="sub-inner-${key}" style="height:${height}px"></div>
+    <div class="sub-panel-header">
+      <span class="sub-panel-drag" title="Drag to reorder">⠿</span>
+      <span class="sub-panel-label" title="${displayName}">${displayName}</span>
+      <button class="sub-panel-close" title="Remove indicator">×</button>
+    </div>`;
+
+  item.querySelector('.sub-panel-close').addEventListener('click', e => {
+    e.stopPropagation();
+    removeInd(e, key);
+  });
+
+  g('subChartsArea').appendChild(item);
+
+  const chartEl = item.querySelector(`#sub-inner-${key}`);
+  const chart = LightweightCharts.createChart(chartEl, _subBaseOptions());
+
+  const subData = { chart, anchor: null, anchorTs: [], height, el: item, chartEl, displayName };
+  S.subCharts.set(key, subData);
+  S.panelOrder.push(key);
+
+  setupSubResizer(item.querySelector('.sub-resizer'), key);
+  setupSubDrag(item, key);
+  setupSubChartSync(chart, key);
+
+  const W = _chartAreaEl.clientWidth || window.innerWidth;
+  try { chart.resize(W, height); } catch (_) {}
+
+  if (_handleCrosshairMove) {
+    chart.subscribeCrosshairMove(param => _handleCrosshairMove(chart, param));
+  }
+
+  return subData;
+}
+
+function destroySubChart(key) {
+  const subData = S.subCharts.get(key);
+  if (!subData) return;
+  const xl = _subXLines.get(key);
+  if (xl) { try { xl.series.removePriceLine(xl.line); } catch (_) {} _subXLines.delete(key); }
+  try { subData.chart.remove(); } catch (_) {}
+  subData.el.remove();
+  S.subCharts.delete(key);
+  const idx = S.panelOrder.indexOf(key);
+  if (idx >= 0) S.panelOrder.splice(idx, 1);
+}
+
+function setupSubChartSync(chart, key) {
+  let interacting = false;
+  let interactTimer = null;
+  const setInteracting = v => { interacting = v; };
+
+  const subData = S.subCharts.get(key);
+  if (subData) {
+    subData.el.addEventListener('mousedown', () => setInteracting(true));
+    subData.el.addEventListener('mouseup',   () => setInteracting(false));
+    subData.el.addEventListener('mouseleave',() => setInteracting(false));
+    subData.el.addEventListener('wheel', () => {
+      setInteracting(true);
+      clearTimeout(interactTimer);
+      interactTimer = setTimeout(() => setInteracting(false), 300);
+    }, { passive: true });
+  }
+
+  chart.timeScale().subscribeVisibleLogicalRangeChange(() => {
+    if (_chartSyncInProgress || !interacting) return;
+    _chartSyncInProgress = true;
+    _syncMainFromSubKey(key);
+    const mainRange = S.charts.main.timeScale().getVisibleLogicalRange();
+    if (mainRange) {
+      S.subCharts.forEach((_, k) => { if (k !== key) _syncSubChartByKey(k, mainRange); });
+    }
+    _chartSyncInProgress = false;
+  });
+}
+
+function setupSubDrag(item, key) {
+  item.addEventListener('dragstart', e => {
+    e.dataTransfer.effectAllowed = 'move';
+    e.dataTransfer.setData('text/plain', key);
+    setTimeout(() => item.classList.add('drag-source'), 0);
+  });
+  item.addEventListener('dragend', () => {
+    item.classList.remove('drag-source');
+    g('subChartsArea').querySelectorAll('.sub-chart-item').forEach(el => {
+      el.classList.remove('drag-over-top', 'drag-over-bottom');
+    });
+  });
+  item.addEventListener('dragover', e => {
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'move';
+    const rect = item.getBoundingClientRect();
+    g('subChartsArea').querySelectorAll('.sub-chart-item').forEach(el => el.classList.remove('drag-over-top', 'drag-over-bottom'));
+    item.classList.add(e.clientY < rect.top + rect.height / 2 ? 'drag-over-top' : 'drag-over-bottom');
+  });
+  item.addEventListener('dragleave', () => item.classList.remove('drag-over-top', 'drag-over-bottom'));
+  item.addEventListener('drop', e => {
+    e.preventDefault();
+    const fromKey = e.dataTransfer.getData('text/plain');
+    if (fromKey === key) return;
+    const area = g('subChartsArea');
+    const fromEl = area.querySelector(`[data-key="${fromKey}"]`);
+    if (!fromEl) return;
+    const rect = item.getBoundingClientRect();
+    area.insertBefore(fromEl, e.clientY < rect.top + rect.height / 2 ? item : item.nextSibling);
+    item.classList.remove('drag-over-top', 'drag-over-bottom');
+    S.panelOrder.length = 0;
+    area.querySelectorAll('.sub-chart-item').forEach(el => S.panelOrder.push(el.dataset.key));
+    updateTimeAxes();
+    relayout();
+  });
 }
 
 // ═══ Crosshair sync + OHLCV legend ═══════════════════════════════
 // Main chart: shown when cursor is on sub panel so candle close value stays on right axis
 let _mainXLine = null;
 let _mainXLineSeries = null;
+const _subXLines = new Map(); // key → { line, series }
 
 function updateMainValueLine(time) {
   _removeMainValueLine();
@@ -972,85 +1285,103 @@ function _removeMainValueLine() {
   }
 }
 
-// Returns the sub-chart Y pixel coordinate for the indicator value at `time`.
-// Used to position setCrossHairXY so the native dashed horzLine appears ON the indicator.
-function _getSubCrosshairY(time) {
-  const subEl = g('chartSub');
-  const fallback = subEl ? subEl.clientHeight / 2 : 0;
-  for (const entry of S.activeInds.values()) {
-    if (!entry.on || entry.displayType !== 'sub_panel' || !entry.series || !entry.data.length) continue;
+function updateSubValueLines(time) {
+  _removeSubValueLines();
+  if (!time) return;
+  S.subCharts.forEach((subData, key) => {
+    const entry = S.activeInds.get(key);
+    if (!entry || !entry.on || !entry.series || !entry.data.length) return;
     const data = entry.data;
     let lo = 0, hi = data.length - 1;
     while (lo < hi) { const mid = (lo + hi + 1) >> 1; if (data[mid].time <= time) lo = mid; else hi = mid - 1; }
-    if (data[lo] && data[lo].time <= time) {
-      try {
-        const y = entry.series.priceToCoordinate(data[lo].value);
-        if (y !== null && y !== undefined) return y;
-      } catch (_) {}
-    }
-    break;
+    if (!data[lo] || data[lo].time > time) return;
+    try {
+      const line = entry.series.createPriceLine({
+        price: data[lo].value,
+        color: 'rgba(255,255,255,0.55)',
+        lineWidth: 1, lineStyle: 2, axisLabelVisible: true, title: '',
+      });
+      _subXLines.set(key, { line, series: entry.series });
+    } catch (_) {}
+  });
+}
+
+function _removeSubValueLines() {
+  _subXLines.forEach(({ line, series }) => { try { series.removePriceLine(line); } catch (_) {} });
+  _subXLines.clear();
+}
+
+// Returns the Y coordinate for the indicator in a specific sub-chart at `time`.
+function _getSubCrosshairY(time, key) {
+  const subData = S.subCharts.get(key);
+  const fallback = subData ? subData.chartEl.clientHeight / 2 : 0;
+  const entry = S.activeInds.get(key);
+  if (!entry || !entry.on || entry.displayType !== 'sub_panel' || !entry.series || !entry.data.length) return fallback;
+  const data = entry.data;
+  let lo = 0, hi = data.length - 1;
+  while (lo < hi) { const mid = (lo + hi + 1) >> 1; if (data[mid].time <= time) lo = mid; else hi = mid - 1; }
+  if (data[lo] && data[lo].time <= time) {
+    try {
+      const y = entry.series.priceToCoordinate(data[lo].value);
+      if (y !== null && y !== undefined) return y;
+    } catch (_) {}
   }
   return fallback;
 }
 
 function initCrosshairSync() {
-  let _xhairSync = false;
-  const allCharts = [S.charts.main, S.charts.sub];
   const xhairLine      = g('xhairLine');
   const xhairTimeLabel = g('xhairTimeLabel');
 
-  function chartEl(c) {
-    return c === S.charts.main ? g('chartMain') : g('chartSub');
-  }
-
-  allCharts.forEach(chart => {
-    chart.subscribeCrosshairMove(param => {
-      if (_xhairSync) return;
-      _xhairSync = true;
-
-      if (chart === S.charts.main) updateOhlcLegend(param);
-      if (chart !== S.charts.main && !param.time) updateOhlcLegend(null);
+  _handleCrosshairMove = function(sourceChart, param) {
+    if (_xhairSync) return;
+    _xhairSync = true;
+    try {
+      if (sourceChart === S.charts.main) updateOhlcLegend(param);
+      else if (!param.time) updateOhlcLegend(null);
 
       const time = param.time;
-      const others = allCharts.filter(c => c !== chart);
 
       if (!time) {
         xhairLine.style.display = 'none';
         xhairTimeLabel.style.display = 'none';
         _removeMainValueLine();
-        others.forEach(c => {
-          const el = chartEl(c);
-          if (!el || el.classList.contains('h')) return;
-          try { c.setCrossHairXY(-1, -1, false); } catch (_) {}
+        _removeSubValueLines();
+        if (sourceChart !== S.charts.main) try { S.charts.main.setCrossHairXY(-1, -1, false); } catch (_) {}
+        S.subCharts.forEach((subData) => {
+          if (subData.chart !== sourceChart) try { subData.chart.setCrossHairXY(-1, -1, false); } catch (_) {}
         });
       } else if (param.point) {
+        // Keep xhairLine height in sync with current layout (sub-charts may have been added)
+        const statusH = (g('status').offsetHeight || 18) + 8;
+        xhairLine.style.height  = (_chartAreaEl.clientHeight - statusH) + 'px';
         xhairLine.style.left    = param.point.x + 'px';
         xhairLine.style.display = 'block';
-        // Show custom label whenever sub panel owns the time axis (native sub label is
-        // hidden via labelVisible:false, so custom label is the only one in both cases).
-        const _subOwnsAxis = hasSubPanel() && !g('chartSub').classList.contains('h');
-        if (_subOwnsAxis) {
+        if (S.panelOrder.length > 0) {
           xhairTimeLabel.textContent   = _formatTime(time);
           xhairTimeLabel.style.display = 'block';
         } else {
           xhairTimeLabel.style.display = 'none';
         }
-
         updateMainValueLine(time);
-
-        others.forEach(c => {
-          const el = chartEl(c);
-          if (!el || el.classList.contains('h')) return;
-          // For sub chart: snap crosshair Y to indicator value so native dashed horzLine
-          // appears on the indicator line rather than at an arbitrary vertical position.
-          const syncY = (c === S.charts.sub) ? _getSubCrosshairY(time) : el.clientHeight / 2;
-          try { c.setCrossHairXY(param.point.x, syncY, true); } catch (_) {}
+        updateSubValueLines(time);
+        if (sourceChart !== S.charts.main) {
+          const mainH = g('chartMain').clientHeight;
+          try { S.charts.main.setCrossHairXY(param.point.x, mainH / 2, true); } catch (_) {}
+        }
+        S.subCharts.forEach((subData, k) => {
+          if (subData.chart !== sourceChart) {
+            const syncY = _getSubCrosshairY(time, k);
+            try { subData.chart.setCrossHairXY(param.point.x, syncY, true); } catch (_) {}
+          }
         });
       }
-
+    } finally {
       _xhairSync = false;
-    });
-  });
+    }
+  };
+
+  S.charts.main.subscribeCrosshairMove(param => _handleCrosshairMove(S.charts.main, param));
 }
 
 function updateOhlcLegend(param) {
@@ -1195,7 +1526,7 @@ async function loadMore() {
       S.displayedCandleT1 = ohlcData[ohlcData.length - 1].time;
     }
     // Extend anchor left edge to cover newly prepended candles
-    _setSubAnchor();
+    _setAllSubAnchors();
     // Restore shifted viewport so the visible window doesn't jump
     if (visRange) {
       S.charts.main.timeScale().setVisibleLogicalRange({
@@ -1203,6 +1534,14 @@ async function loadMore() {
         to:   visRange.to  + offset,
       });
     }
+    // Force sub-chart sync in next frame — LWC may have already auto-compensated
+    // the viewport shift, so setVisibleLogicalRange above might not fire the
+    // subscribeVisibleLogicalRangeChange callback (no change detected). Explicit
+    // timestamp-based sync guarantees sub-charts show the correct window.
+    requestAnimationFrame(() => {
+      const r = S.charts.main.timeScale().getVisibleLogicalRange();
+      if (r && S.subCharts.size > 0) _syncAllSubCharts(r);
+    });
 
     renderSignals();
     updateStatus();
@@ -1222,8 +1561,8 @@ function renderCandles() {
   const data = toOhlc(S.candles);
   S.displayedCandleT0 = data.length ? data[0].time : null;
   S.displayedCandleT1 = data.length ? data[data.length - 1].time : null;
-  _subAnchorTs = []; // reset so _setSubAnchor() rebuilds for new candle range
-  _setSubAnchor();
+  S.subCharts.forEach(subData => { subData.anchorTs = []; });
+  _setAllSubAnchors();
   S.series.candle = S.charts.main.addCandlestickSeries({
     upColor: '#26a69a', downColor: '#ef5350',
     borderUpColor: '#26a69a', borderDownColor: '#ef5350',
@@ -1579,7 +1918,7 @@ async function toggleInd(name) {
     const r = await api(`/api/indicators?indicator_name=${name}&exchange=${meta.exchange}&symbol=${meta.symbol}&timeframe=${meta.tf}${tsParams}`);
     const pts = (r.data?.indicators || [])
       .map(p => ({ time: p.timestamp, value: parseFloat(p.value) }))
-      .filter(p => p.value > 0).sort((a, b) => a.time - b.time);
+      .filter(p => p.time && isFinite(p.value)).sort((a, b) => a.time - b.time);
     const entry = S.activeInds.get(name);
     if (!entry) return;
     entry.data = pts;
@@ -1607,29 +1946,25 @@ function renderIndSeries(name, entry) {
   S.fitting = true;
 
   if (isSubPanel) {
-    // pre-size before removing .h to prevent layout jump
-    g('chartSub').style.height = `${S.panelH.sub}px`;
-    g('chartSub').classList.remove('h');
-    // Sub chart was created while hidden (0×0). Resize it to real dimensions
-    // before adding series — lightweight-charts v3.8 throws "Value is null"
-    // when addLineSeries is called on a chart that has never been sized.
-    const subW = g('chartArea').clientWidth || window.innerWidth;
-    try { S.charts.sub.resize(subW, S.panelH.sub); } catch (_) {}
-    // Create the transparent anchor series once the chart has real dimensions.
-    // The anchor spans the full candle range so the time axis can resolve
-    // timestamps for any pixel x (including before the first indicator point).
-    if (!S.series.subAnchor) {
+    // Get or create dedicated sub-chart for this indicator
+    const displayName = S.indMeta.get(name)?.display_name || name.toUpperCase();
+    const subData = S.subCharts.has(name) ? S.subCharts.get(name) : createSubChart(name, displayName);
+    if (!subData) { S.fitting = prevFitting; return; }
+
+    // Create anchor series if not yet done (spans full candle range for time-axis sync)
+    if (!subData.anchor) {
       try {
-        S.series.subAnchor = S.charts.sub.addHistogramSeries({
-          color: 'transparent', priceScaleId: '',
-          priceFormat: { type: 'volume' }, lastValueVisible: false, priceLineVisible: false,
+        subData.anchor = subData.chart.addHistogramSeries({
+          color: 'rgba(0,0,0,0)', priceScaleId: 'left',
+          lastValueVisible: false, priceLineVisible: false,
         });
-        _setSubAnchor();
+        _setSubAnchorForKey(name);
       } catch (_) {}
     }
+
     let s;
     try {
-      s = S.charts.sub.addLineSeries({
+      s = subData.chart.addLineSeries({
         color: col, lineWidth: 1, priceLineVisible: false, lastValueVisible: true, title: name,
       });
     } catch (e) {
@@ -1642,28 +1977,29 @@ function renderIndSeries(name, entry) {
     } catch (e) {
       console.warn('renderIndSeries sub-panel setData error:', e.message);
       S.fitting = prevFitting;
-      try { S.charts.sub.removeSeries(s); } catch (_) {}
+      try { subData.chart.removeSeries(s); } catch (_) {}
       return;
     }
     entry.series = s;
     if (mainRange) {
-      // Restore main chart viewport (setData on indicator may shift logical indices).
       try { S.charts.main.timeScale().setVisibleLogicalRange(mainRange); } catch (_) {}
-      // relayout() called by addIndToChart applies correct sub viewport via RAF.
+      // setVisibleLogicalRange(same value) doesn't fire visibleLogicalRangeChange,
+      // so the new sub-chart never gets synced — call explicitly
+      try { _syncSubChartByKey(name, mainRange); } catch (_) {}
     }
-    // reference lines only for true 0-100 bounded oscillators (RSI, Stoch, etc.)
-    // min >= 0 and max in [50, 105] indicates a 0-100 range oscillator
+    // Reference lines for 0-100 bounded oscillators
     const sample20 = data.slice(-20).map(p => p.value);
     const maxVal = Math.max(...sample20);
     const minVal = Math.min(...sample20);
     if (minVal >= 0 && maxVal >= 50 && maxVal <= 105 && data.length > 1) {
       const addRef = (v, c) => {
         let rs;
-        try { rs = S.charts.sub.addLineSeries({ color: c, lineWidth: 1, lineStyle: 2,
-                                                 priceLineVisible: false, lastValueVisible: false }); }
+        try { rs = subData.chart.addLineSeries({ color: c, lineWidth: 1, lineStyle: 2,
+                                                  priceLineVisible: false, lastValueVisible: false }); }
         catch (_) { return; }
         const t0 = data[0].time, t1 = data[data.length-1].time;
-        try { rs.setData([{ time: t0, value: v }, { time: t1, value: v }]); } catch (_) { try { S.charts.sub.removeSeries(rs); } catch (_2) {} return; }
+        try { rs.setData([{ time: t0, value: v }, { time: t1, value: v }]); }
+        catch (_) { try { subData.chart.removeSeries(rs); } catch (_2) {} return; }
         entry.subRefLines.push(rs);
       };
       addRef(70, 'rgba(239,83,80,.3)');
@@ -1723,25 +2059,24 @@ function clipToCandles(data) {
 
 function removeIndSeries(name, entry) {
   const isSubPanel = (entry.displayType || 'overlay') === 'sub_panel';
-  const chart = isSubPanel ? S.charts.sub : S.charts.main;
-  if (entry.series) { try { chart.removeSeries(entry.series); } catch (_) {} }
-  entry.subRefLines.forEach(rs => { try { S.charts.sub.removeSeries(rs); } catch (_) {} });
-  entry.series = null; entry.subRefLines = [];
-  // Hide left price scale if no other overlay indicators still use it
-  if (entry.useLeftScale) {
-    const anyLeft = [...S.activeInds.values()].some(
-      e => e !== entry && e.on && e.useLeftScale && e.series
-    );
-    if (!anyLeft) {
-      try { S.charts.main.priceScale('left').applyOptions({ visible: false }); } catch (_) {}
+  if (isSubPanel) {
+    const subData = S.subCharts.get(name);
+    if (subData) {
+      if (entry.series) { try { subData.chart.removeSeries(entry.series); } catch (_) {} }
+      entry.subRefLines.forEach(rs => { try { subData.chart.removeSeries(rs); } catch (_) {} });
+      destroySubChart(name);
+    }
+  } else {
+    if (entry.series) { try { S.charts.main.removeSeries(entry.series); } catch (_) {} }
+    if (entry.useLeftScale) {
+      const anyLeft = [...S.activeInds.values()].some(e => e !== entry && e.on && e.useLeftScale && e.series);
+      if (!anyLeft) try { S.charts.main.priceScale('left').applyOptions({ visible: false }); } catch (_) {}
     }
   }
+  entry.series = null; entry.subRefLines = [];
 }
 
-function updateSubPanel() {
-  const anySubPanel = [...S.activeInds.values()].some(v => v.on && v.displayType === 'sub_panel' && v.series);
-  g('chartSub').classList.toggle('h', !anySubPanel);
-}
+function updateSubPanel() { /* sub-charts are shown/hidden by createSubChart/destroySubChart */ }
 
 function indTsParams() {
   const st = S.displayedCandleT0 ?? (S.candles.length ? S.candles[0].timestamp : null);
@@ -1751,17 +2086,34 @@ function indTsParams() {
 }
 
 async function refreshActiveIndicators(gen) {
-  // Re-fetch data for all active indicators when chart params change
+  // Re-fetch data for all active indicators when chart params change.
+  // Preview indicators (added via Test Run) are removed on timeframe/symbol change
+  // since they were computed for a specific tf — keeping them with a mismatched tf
+  // causes sub-chart ↔ main chart sync to go haywire (1m indicator vs 4h candles).
   const tsParams = indTsParams();
+  const toRemove = [];
+  for (const [name, entry] of S.activeInds) {
+    if (name.startsWith('preview_') || entry.meta.tf !== S.tf) {
+      toRemove.push(name);
+    }
+  }
+  for (const name of toRemove) {
+    const entry = S.activeInds.get(name);
+    if (entry) removeIndSeries(name, entry);
+    S.activeInds.delete(name);
+    S.indColorMap.delete(name);
+  }
+  if (toRemove.length) buildIndChips();
+
   await Promise.all([...S.activeInds.entries()].map(async ([name, entry]) => {
     removeIndSeries(name, entry);
     entry.series = null; entry.subRefLines = []; entry.data = [];
     try {
-      const r = await api(`/api/indicators?indicator_name=${name}&exchange=${entry.meta.exchange}&symbol=${entry.meta.symbol}&timeframe=${entry.meta.tf}${tsParams}`);
+      const r = await api(`/api/indicators?indicator_name=${name}&exchange=${entry.meta.exchange}&symbol=${entry.meta.symbol}&timeframe=${S.tf}${tsParams}`);
       if (gen !== undefined && gen !== S.chartGen) return; // superseded
       entry.data = (r.data?.indicators || [])
         .map(p => ({ time: p.timestamp, value: parseFloat(p.value) }))
-        .filter(p => p.value > 0)
+        .filter(p => p.time && isFinite(p.value))
         .sort((a, b) => a.time - b.time);
       if (entry.on) renderIndSeries(name, entry);
     } catch (_) {}
@@ -1789,11 +2141,18 @@ function flipInd(name) {
   const entry = S.activeInds.get(name);
   if (!entry) return;
   entry.on = !entry.on;
-  const chart = entry.displayType === 'sub_panel' ? S.charts.sub : S.charts.main;
   if (!entry.on) {
-    if (entry.series) { try { chart.removeSeries(entry.series); } catch (_) {} entry.series = null; }
-    entry.subRefLines.forEach(rs => { try { S.charts.sub.removeSeries(rs); } catch (_) {} });
-    entry.subRefLines = [];
+    if (entry.displayType === 'sub_panel') {
+      const subData = S.subCharts.get(name);
+      if (subData) {
+        if (entry.series) { try { subData.chart.removeSeries(entry.series); } catch (_) {} entry.series = null; }
+        entry.subRefLines.forEach(rs => { try { subData.chart.removeSeries(rs); } catch (_) {} });
+        entry.subRefLines = [];
+        destroySubChart(name);
+      }
+    } else {
+      if (entry.series) { try { S.charts.main.removeSeries(entry.series); } catch (_) {} entry.series = null; }
+    }
   } else {
     renderIndSeries(name, entry);
   }
@@ -1878,11 +2237,14 @@ function updateStatus() {
 }
 
 function load(on, msg) {
-  g('loader').classList.toggle('h', !on);
-  if (msg) g('loaderMsg').textContent = msg;
+  const ld = g('loader'); if (ld) ld.classList.toggle('h', !on);
+  if (msg) { const lm = g('loaderMsg'); if (lm) lm.textContent = msg; }
 }
 function showErr(msg) {
-  const el = g('errBanner'); el.textContent = msg; el.style.display = 'block';
+  console.error('[TradingBot]', msg);
+  const el = g('errBanner');
+  if (!el) return;
+  el.textContent = msg; el.style.display = 'block';
   setTimeout(() => { el.style.display = 'none'; }, 6000);
 }
 async function api(url) {
@@ -1974,6 +2336,7 @@ function showStratSignals(stratName) {
 
 // ═══ Monaco editor (custom indicators) ══════════════════════════════
 let monacoEditor = null;
+let _monacoLoading = false;
 let editorParams = []; // [{key, type, default}]
 
 const EDITOR_TEMPLATE = `# Available: close open high low volume ts np ta
@@ -1987,20 +2350,28 @@ result = (close - ema) / ema * 100
 
 function openEditorModal() {
   closeIndModal();
-  g('editorModal').classList.add('open');
+  resetEditorPanel();
+  ensureEditorPanelVisible();
+  initMonaco();
+  if (monacoEditor) monacoEditor.setValue(EDITOR_TEMPLATE);
+}
+
+function resetEditorPanel() {
   g('editorName').value = '';
   editorParams = [{ key: 'period', type: 'int', default: 14 }];
   renderEditorParams();
-  initMonaco();
+  if (monacoEditor) monacoEditor.setValue(EDITOR_TEMPLATE);
 }
 
-function closeEditorModal() { g('editorModal').classList.remove('open'); }
-function onEditorBgClick(e) { if (e.target === g('editorModal')) closeEditorModal(); }
+function closeEditorModal() { /* editor panel is permanent; closing handled by GL */ }
+function onEditorBgClick(e) { /* no-op: editor is a panel, not a modal */ }
+
+function newEditorTab() { openEditorModal(); }
 
 function initMonaco() {
-  if (monacoEditor) { return; }
+  if (monacoEditor || _monacoLoading) return;
+  _monacoLoading = true;
   if (typeof require === 'undefined') {
-    // Lazy-load Monaco from CDN
     const script = document.createElement('script');
     script.src = 'https://cdn.jsdelivr.net/npm/monaco-editor@0.45.0/min/vs/loader.js';
     script.onload = () => {
@@ -2015,8 +2386,13 @@ function initMonaco() {
 
 function createMonacoEditor() {
   const mount = g('monacoMount');
+  if (!mount || mount.dataset.monacoInit) return;
+  mount.dataset.monacoInit = '1';
+  // Show the active tab's code immediately, not the generic template
+  const activeTab = editorTabs.get(activeTabId);
+  const initialCode = activeTab?.code ?? EDITOR_TEMPLATE;
   monacoEditor = monaco.editor.create(mount, {
-    value: EDITOR_TEMPLATE,
+    value: initialCode,
     language: 'python',
     theme: 'vs-dark',
     fontSize: 12,
@@ -2061,8 +2437,8 @@ async function testCustomIndicator() {
   const name = g('editorName').value.trim() || 'preview';
   const paramDefaults = Object.fromEntries(editorParams.map(p => [p.key, p.default]));
 
-  const btnTest = document.querySelector('#editorModal .btn-apply[onclick*="testCustomIndicator"]');
-  const btnSave = document.querySelector('#editorModal .btn-apply[onclick*="saveCustomIndicator"]');
+  const btnTest = g('btnEditorTest');
+  const btnSave = g('btnEditorSave');
   const origHtml = btnTest.innerHTML;
   btnTest.disabled = true;
   btnSave.disabled = true;
@@ -2117,18 +2493,32 @@ async function saveCustomIndicator() {
   const code = monacoEditor.getValue();
 
   try {
-    const r = await fetch('/api/indicators/custom', {
-      method: 'POST',
+    const r = await fetch(`/api/library/indicators/${name}`, {
+      method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name, code, params_schema: editorParams }),
+      body: JSON.stringify({ code }),
     });
     const data = await r.json();
     if (data.error) { showErr(data.error); return; }
-    // Refresh library and reopen modal
-    L_loaded = false;
-    await loadLibrary();
-    openIndModal();
-    closeEditorModal();
+
+    // Identify the currently active tab entry (by activeTabId, not by name from input).
+    if (activeTabId !== 'new' && editorTabs.has(activeTabId)) {
+      if (activeTabId !== name) {
+        // Name was changed in the input field — rename the tab entry
+        editorTabs.delete(activeTabId);
+        editorTabs.set(name, { name, type: 'indicators', code, dirty: false });
+        activeTabId = name;
+      } else {
+        const tab = editorTabs.get(activeTabId);
+        tab.dirty = false; tab.type = 'indicators'; tab.code = code;
+      }
+    } else {
+      // "New Indicator" tab — promote it to a named tab entry
+      editorTabs.set(name, { name, type: 'indicators', code, dirty: false });
+      activeTabId = name;
+    }
+    _renderTabs();
+    loadSidebarFiles();
   } catch (e) { showErr(e.message); }
 }
 
