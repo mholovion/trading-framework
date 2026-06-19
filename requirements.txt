@@ -24,9 +24,12 @@ aiohttp-jinja2==1.5.1
 
 # Numeric and data processing
 numpy>=2.2.6
-pandas>=2.0.0,<3.0.0
 pyarrow>=14.0.0
+polars>=0.20
 
-# Indicator DSL
-pandas-ta==0.4.71b0
+# Sandbox / subprocess executor
+RestrictedPython>=7
+
+# Indicator DSL — TA-Lib (C library; requires libta-lib-dev system package)
+TA-Lib>=0.4.0
 numba>=0.59.0

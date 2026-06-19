@@ -1,0 +1,23 @@
+{
+  "defaultAction": "SCMP_ACT_KILL",
+  "syscalls": [
+    {
+      "names": [
+        "read", "write", "readv", "writev",
+        "open", "openat", "close", "fstat", "lstat", "stat",
+        "mmap", "mprotect", "munmap", "brk",
+        "rt_sigaction", "rt_sigprocmask", "rt_sigreturn",
+        "lseek", "pread64", "pwrite64",
+        "access", "dup", "dup2",
+        "getpid", "getuid", "getgid", "geteuid", "getegid",
+        "arch_prctl", "set_tid_address", "set_robust_list",
+        "futex", "clone", "wait4", "exit", "exit_group",
+        "nanosleep", "clock_gettime", "gettimeofday",
+        "uname", "getcwd",
+        "madvise", "msync",
+        "getrandom"
+      ],
+      "action": "SCMP_ACT_ALLOW"
+    }
+  ]
+}
