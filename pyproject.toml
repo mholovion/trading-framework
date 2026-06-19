@@ -1,0 +1,58 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.backends.legacy:build"
+
+[project]
+name = "tradingkit"
+version = "0.1.0"
+description = "Async trading framework with Polars, ClickHouse, and pluggable executors"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+dependencies = [
+    "aiohttp>=3.9.0,<4.0.0",
+    "aiohttp-jinja2==1.5.1",
+    "jinja2==3.1.2",
+    "polars>=0.20",
+    "pyarrow>=14.0.0",
+    "numpy>=2.2.0",
+    "TA-Lib>=0.4.0",
+    "numba>=0.59.0",
+    "asynch>=0.2.0",
+    "RestrictedPython>=7",
+    "pydantic>=2.6.0,<3.0.0",
+    "pyyaml>=6.0.1,<7.0.0",
+    "python-dateutil>=2.8.2,<3.0.0",
+    "pytz>=2023.3",
+    "rich>=13.7.0,<14.0.0",
+    "websockets>=12.0,<13.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "pytest-asyncio>=0.23", "mypy>=1.9", "ruff>=0.4"]
+cpp = ["docker>=7.0.0"]
+
+[project.scripts]
+tradingkit-runner = "tradingkit.runner.server:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["tradingkit*"]
+
+[tool.setuptools.package-data]
+"tradingkit" = [
+    "py.typed",
+    "_docker/runner/Dockerfile",
+    "_docker/runner/runner_worker.py",
+    "_docker/runner/seccomp.json",
+    "_docker/compiler/Dockerfile",
+    "_docker/compiler/compile.sh",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.mypy]
+python_version = "3.11"
+strict = false
+ignore_missing_imports = true
