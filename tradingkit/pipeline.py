@@ -168,7 +168,7 @@ class Pipeline:
             if signal is not None:
                 if signal.timestamp is None:
                     signal.timestamp = row.get("timestamp")
-                if signal.price is None:
+                if getattr(signal, "price", None) is None:
                     signal.price = row.get("close")
                 signals.append(signal)
 
@@ -209,7 +209,7 @@ class Pipeline:
             if signal is not None:
                 if signal.timestamp is None:
                     signal.timestamp = row.get("timestamp")
-                if signal.price is None:
+                if getattr(signal, "price", None) is None:
                     signal.price = row.get("close")
                 yield signal
 

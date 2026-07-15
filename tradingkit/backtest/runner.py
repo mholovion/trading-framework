@@ -87,7 +87,7 @@ class BacktestRunner:
             if signal is not None:
                 if signal.timestamp is None:
                     signal.timestamp = row.get("timestamp")
-                if signal.price is None:
+                if getattr(signal, "price", None) is None:
                     signal.price = row.get("close")
                 d = signal.to_dict()
                 d["timestamp"] = signal.timestamp

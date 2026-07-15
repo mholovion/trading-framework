@@ -102,7 +102,7 @@ class BarContext:
             return _row[name]
         raise AttributeError(
             f"BarContext has no attribute '{name}'. "
-            f"Indicators: {list(self._indicators)}. Row keys: {list(self._row)}"
+            f"Indicators: {list(_ind or [])}. Row keys: {list(_row or [])}"
         )
 
     def series(self, name: str) -> pl.Series:
