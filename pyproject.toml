@@ -1,6 +1,6 @@
 [build-system]
 requires = ["setuptools>=68", "wheel"]
-build-backend = "setuptools.backends.legacy:build"
+build-backend = "setuptools.build_meta"
 
 [project]
 name = "tradingkit"
@@ -14,11 +14,10 @@ dependencies = [
     "jinja2==3.1.2",
     "polars>=0.20",
     "pyarrow>=14.0.0",
-    "numpy>=2.2.0",
+    "numpy>=2.2.6",
     "TA-Lib>=0.4.0",
     "numba>=0.59.0",
     "asynch>=0.2.0",
-    "RestrictedPython>=7",
     "pydantic>=2.6.0,<3.0.0",
     "pyyaml>=6.0.1,<7.0.0",
     "python-dateutil>=2.8.2,<3.0.0",

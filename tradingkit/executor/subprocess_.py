@@ -4,7 +4,10 @@ tradingkit.executor.subprocess_ — SubprocessExecutor.
 Runs plugins in isolated subprocesses:
   - Data transfer via Apache Arrow IPC (zero-copy shared memory where possible)
   - Memory limit enforced via resource module
-  - Import restrictions via RestrictedPython (for ScriptIndicator/ScriptStrategy)
+  - Process-boundary isolation only — no import/builtin restrictions inside the
+    subprocess. ScriptIndicator/ScriptStrategy/ScriptSource/AggregationScript code
+    runs with full interpreter privileges; only run code you wrote or reviewed
+    yourself. See the "Security model" section in the top-level README.
   - Timeout per computation
 """
 from __future__ import annotations
