@@ -2,11 +2,17 @@
 tradingkit.executor.remote — RemoteExecutor.
 
 Delegates all computation to a tradingkit-runner HTTP server.
-Run the server anywhere: locally, in Docker, Kubernetes, or the cloud.
+Run the server anywhere: locally, in Docker, Kubernetes, or a private network reachable
+by the runner's --token holder — see the top-level README's "Security model" section
+before binding the runner to anything other than 127.0.0.1.
 
-    tradingkit-runner --host 0.0.0.0 --port 8082
+    tradingkit-runner --token "$(openssl rand -hex 32)"
 
-    executor = RemoteExecutor("http://localhost:8082")
+    executor = RemoteExecutor("http://localhost:8082", token="...")
+
+Responses come from a tradingkit-runner process you configured and authenticated to, so
+they're unpickled with plain pickle.loads() here — the restricted unpickler lives on the
+server side, where *inbound* (potentially attacker-reachable) payloads are decoded.
 """
 from __future__ import annotations
 
@@ -51,13 +57,17 @@ class RemoteExecutor(PluginExecutor):
     Arrow-encoded results.
 
     Usage:
-        executor = RemoteExecutor("http://tradingkit-runner:8082")
+        executor = RemoteExecutor("http://tradingkit-runner:8082", token="...")
         result = await executor.compute_indicator(indicator, ctx)
+
+    token must match the runner's --token / TRADINGKIT_RUNNER_TOKEN. Omit it only when
+    the runner is bound to 127.0.0.1 without a token configured.
     """
 
-    def __init__(self, url: str, timeout: int = 120) -> None:
+    def __init__(self, url: str, timeout: int = 120, token: str | None = None) -> None:
         self._url = url.rstrip("/")
         self._timeout = timeout
+        self._token = token
         self._session: Any = None
 
     async def start(self) -> None:
@@ -73,17 +83,27 @@ class RemoteExecutor(PluginExecutor):
 
     async def _post(self, path: str, data: bytes) -> bytes:
         import aiohttp
-        session = self._session
-        if session is None:
-            # Auto-start for convenience (no explicit start() call)
-            session = aiohttp.ClientSession(
+        if self._session is None:
+            # Auto-start for convenience (no explicit start() call) — kept on
+            # self._session so it's reused across calls and closed by stop().
+            self._session = aiohttp.ClientSession(
                 timeout=aiohttp.ClientTimeout(total=self._timeout)
             )
+        session = self._session
+        headers = {"Content-Type": "application/octet-stream"}
+        if self._token:
+            headers["Authorization"] = f"Bearer {self._token}"
         async with session.post(
             f"{self._url}{path}",
             data=data,
-            headers={"Content-Type": "application/octet-stream"},
+            headers=headers,
         ) as resp:
+            if resp.status == 401:
+                raise PermissionError(
+                    f"RemoteExecutor: {self._url}{path} rejected the request (401) — "
+                    "token missing or doesn't match the runner's --token/"
+                    "TRADINGKIT_RUNNER_TOKEN."
+                )
             resp.raise_for_status()
             return await resp.read()
 
