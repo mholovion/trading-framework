@@ -10,7 +10,7 @@ from __future__ import annotations
 import numpy as np
 import polars as pl
 from abc import ABC, abstractmethod
-from typing import Any, AsyncIterator, Optional
+from typing import Any, AsyncIterator
 
 
 # ------------------------------------------------------------------ #
@@ -177,8 +177,10 @@ class ConnectionScriptSource:
     """
 
     def __init__(self, code: str, config: dict | None = None) -> None:
+        from tradingkit.core.script_ast import ScriptAST
         self._code   = code
         self._config = config or {}
+        self._ast = ScriptAST(code)
         self._params_cache: dict | None = None
 
     # ------------------------------------------------------------------
@@ -189,19 +191,7 @@ class ConnectionScriptSource:
         """Return the __params__ dict declared in the script, or {}."""
         if self._params_cache is not None:
             return self._params_cache
-        import ast
-        try:
-            tree = ast.parse(self._code)
-            for node in ast.walk(tree):
-                if (isinstance(node, ast.Assign)
-                        and len(node.targets) == 1
-                        and isinstance(node.targets[0], ast.Name)
-                        and node.targets[0].id == "__params__"):
-                    self._params_cache = ast.literal_eval(node.value)
-                    return self._params_cache
-        except Exception:
-            pass
-        self._params_cache = {}
+        self._params_cache = self._ast.get_literal("__params__") or {}
         return self._params_cache
 
     def merged_config(self) -> dict:
@@ -248,26 +238,10 @@ class ConnectionScriptSource:
             yield row
 
     def has_historical(self) -> bool:
-        import ast
-        try:
-            tree = ast.parse(self._code)
-            return any(
-                isinstance(n, (ast.AsyncFunctionDef, ast.FunctionDef)) and n.name == "historical"
-                for n in ast.walk(tree)
-            )
-        except Exception:
-            return False
+        return self._ast.has_function("historical")
 
     def has_realtime(self) -> bool:
-        import ast
-        try:
-            tree = ast.parse(self._code)
-            return any(
-                isinstance(n, (ast.AsyncFunctionDef, ast.FunctionDef)) and n.name == "realtime"
-                for n in ast.walk(tree)
-            )
-        except Exception:
-            return False
+        return self._ast.has_function("realtime")
 
     # ------------------------------------------------------------------
     # DataUnit / AggSpec — new-style source plugin declarations
@@ -275,20 +249,7 @@ class ConnectionScriptSource:
 
     def get_table_name(self) -> str | None:
         """Return TABLE_NAME declared at module level in the script (AST only, no exec)."""
-        import ast
-        try:
-            tree = ast.parse(self._code)
-            for node in ast.walk(tree):
-                if (
-                    isinstance(node, ast.Assign)
-                    and len(node.targets) == 1
-                    and isinstance(node.targets[0], ast.Name)
-                    and node.targets[0].id == "TABLE_NAME"
-                ):
-                    return ast.literal_eval(node.value)
-        except Exception:
-            pass
-        return None
+        return self._ast.get_literal("TABLE_NAME")
 
 
 __all__ = [

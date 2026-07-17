@@ -255,70 +255,28 @@ class AggregationScript:
     """
 
     def __init__(self, code: str) -> None:
-        import ast as _ast
+        from tradingkit.core.script_ast import ScriptAST
         self._code = code
-        self._tree: _ast.Module | None = None
-
-    def _get_tree(self):
-        import ast as _ast
-        if self._tree is None:
-            self._tree = _ast.parse(self._code)
-        return self._tree
+        self._ast = ScriptAST(code)
 
     def is_ch_mv(self) -> bool:
-        return self._has_fn("aggregation")
+        return self._ast.has_function("aggregation")
 
     def is_python(self) -> bool:
-        return self._has_fn("aggregate")
-
-    def _has_fn(self, name: str) -> bool:
-        import ast as _ast
-        try:
-            return any(
-                isinstance(n, (_ast.AsyncFunctionDef, _ast.FunctionDef)) and n.name == name
-                for n in _ast.walk(self._get_tree())
-            )
-        except Exception:
-            return False
+        return self._ast.has_function("aggregate")
 
     def get_source_table(self) -> str | None:
-        return self._ast_str("SOURCE_TABLE")
+        return self._ast.get_literal("SOURCE_TABLE")
 
     def get_output_table(self) -> str | None:
-        return self._ast_str("OUTPUT_TABLE")
+        return self._ast.get_literal("OUTPUT_TABLE")
 
     def get_output_schema(self) -> dict | None:
-        return self._ast_literal("OUTPUT_SCHEMA")
+        return self._ast.get_literal("OUTPUT_SCHEMA")
 
     def get_interval_s(self) -> int:
-        v = self._ast_literal("INTERVAL_S")
+        v = self._ast.get_literal("INTERVAL_S")
         return int(v) if isinstance(v, (int, float)) else 60
-
-    def _ast_str(self, var: str) -> str | None:
-        import ast as _ast
-        try:
-            for node in _ast.walk(self._get_tree()):
-                if (isinstance(node, _ast.Assign)
-                        and len(node.targets) == 1
-                        and isinstance(node.targets[0], _ast.Name)
-                        and node.targets[0].id == var):
-                    return _ast.literal_eval(node.value)
-        except Exception:
-            pass
-        return None
-
-    def _ast_literal(self, var: str) -> Any:
-        import ast as _ast
-        try:
-            for node in _ast.walk(self._get_tree()):
-                if (isinstance(node, _ast.Assign)
-                        and len(node.targets) == 1
-                        and isinstance(node.targets[0], _ast.Name)
-                        and node.targets[0].id == var):
-                    return _ast.literal_eval(node.value)
-        except Exception:
-            pass
-        return None
 
     def get_agg_spec_for_unit(self, unit: Any) -> Any | None:
         ns: dict = {}
