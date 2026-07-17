@@ -1,5 +1,7 @@
 # tradingkit
 
+[![CI](https://github.com/mholovion/trading-framework/actions/workflows/ci.yml/badge.svg)](https://github.com/mholovion/trading-framework/actions/workflows/ci.yml)
+
 Async trading strategy framework built on [Polars](https://pola.rs), [ClickHouse](https://clickhouse.com),
 and pluggable executors. Write an `Indicator`/`Strategy`/`DataSource` once, then run it
 in-process, in a sandboxed subprocess, on a remote worker, or against historical data in
@@ -212,10 +214,27 @@ defines `aggregate()`) and runs each on `INTERVAL_S`, writing results to `OUTPUT
 ```bash
 pip install -e ".[dev]"
 ruff check .
-mypy tradingkit
+pytest
+mypy tradingkit   # non-blocking in CI — existing type-coverage gaps, not enforced yet
 ```
 
-There is no automated test suite yet — treat changes accordingly until one lands.
+CI (`.github/workflows/ci.yml`) runs `ruff` and `pytest` on Python 3.11 and 3.12 for every
+push/PR, including a real ClickHouse service container and (on Docker-capable runners) a
+real `CppRunnerPool` container.
+
+Most of the suite needs nothing beyond `pip install -e ".[dev]"`. Two groups of tests
+auto-skip unless their dependency is actually reachable, and light up locally too if you
+have it running:
+
+```bash
+# tests/test_clickhouse_integration.py — real ClickHouse instead of a mocked transport
+docker run --rm -p 8123:8123 -p 9000:9000 clickhouse/clickhouse-server
+CLICKHOUSE_HOST=localhost pytest tests/test_clickhouse_integration.py
+
+# tests/test_cpp_pool.py — SubprocessRunnerLauncher tier needs only g++ (runs by default);
+# the DockerRunnerLauncher tier additionally needs `pip install -e ".[dev,cpp]"` and Docker
+pytest tests/test_cpp_pool.py
+```
 
 ---
 

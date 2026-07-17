@@ -1,0 +1,75 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12"]
+
+    # Real ClickHouse for tests/test_clickhouse_integration.py (skipped automatically if
+    # unreachable — this makes it reachable). clickhouse-client ships in the image itself,
+    # so the health check doesn't depend on anything else being installed.
+    services:
+      clickhouse:
+        image: clickhouse/clickhouse-server:latest
+        ports:
+          - 8123:8123
+          - 9000:9000
+        options: >-
+          --health-cmd "clickhouse-client --query 'SELECT 1'"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      CLICKHOUSE_HOST: localhost
+      CLICKHOUSE_HTTP_PORT: "8123"
+      CLICKHOUSE_PORT: "9000"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Cache TA-Lib build
+        id: cache-ta-lib
+        uses: actions/cache@v4
+        with:
+          path: /usr/lib/libta_lib*
+          key: ta-lib-0.6.4-${{ runner.os }}
+
+      - name: Build TA-Lib from source
+        if: steps.cache-ta-lib.outputs.cache-hit != 'true'
+        run: |
+          curl -fsSL https://github.com/ta-lib/ta-lib/releases/download/v0.6.4/ta-lib-0.6.4-src.tar.gz | tar xz
+          cd ta-lib-0.6.4
+          ./configure --prefix=/usr
+          make -j$(nproc)
+          sudo make install
+          cd ..
+          rm -rf ta-lib-0.6.4
+
+      - name: Refresh linker cache
+        run: sudo ldconfig
+
+      - name: Install tradingkit (dev + cpp extras)
+        run: pip install -e ".[dev,cpp]"
+
+      - name: Lint (ruff)
+        run: ruff check .
+
+      - name: Test (pytest)
+        run: pytest
+
+      - name: Type-check (mypy, non-blocking)
+        run: mypy tradingkit || true
