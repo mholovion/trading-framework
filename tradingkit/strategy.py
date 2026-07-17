@@ -220,6 +220,9 @@ class ScriptStrategy(Strategy):
         self._code = code
         self._inds = indicators or {}
         self.params = params
+        self._exec_ns()
+
+    def _exec_ns(self) -> None:
         # Execute script once so top-level definitions (get_required_indicators,
         # process, process_batch) persist across calls.
         # on_bar-style scripts reference `bar` / `Signal` which aren't defined here —
@@ -229,6 +232,21 @@ class ScriptStrategy(Strategy):
             exec(compile(self._code, "<strategy_script>", "exec"), self._ns)  # noqa: S102
         except (NameError, AttributeError):
             pass
+
+    def __getstate__(self) -> dict:
+        # exec() always populates the namespace's '__builtins__' with the full
+        # builtins dict (eval, exec, open, __import__, ...) — pickling that would
+        # embed every builtin as a reference in the stream. _ns is a derived cache
+        # of self._code, not fundamental state, so exclude it and rebuild it in
+        # __setstate__ instead (same pattern as JitIndicator.__getstate__ in
+        # indicator.py, which clears its numba compile cache for the same reason).
+        state = self.__dict__.copy()
+        state.pop("_ns", None)
+        return state
+
+    def __setstate__(self, state: dict) -> None:
+        self.__dict__.update(state)
+        self._exec_ns()
 
     async def on_bar(self, bar: BarContext) -> Optional[Signal]:
         namespace: dict[str, Any] = {

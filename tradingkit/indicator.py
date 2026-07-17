@@ -6,6 +6,9 @@ Usage:
 """
 from __future__ import annotations
 
+import ast as _ast
+import re as _re
+
 import numpy as np
 import polars as pl
 from abc import ABC, abstractmethod
@@ -303,10 +306,6 @@ ta_indicator = _TAIndicatorNS()
 # Factory helpers — moved from plugins/indicators/loader.py            #
 # ------------------------------------------------------------------ #
 
-import ast as _ast
-import re as _re
-
-
 def _extract_defaults(code: str) -> dict[str, Any]:
     """Parse ``__params__ = {...}`` literal from indicator code and return defaults."""
     match = _re.search(r"__params__\s*=\s*(\{.*?\})", code, _re.DOTALL)
@@ -428,6 +427,11 @@ class JitIndicator(Indicator):
             assign = _ast2.parse(f"{k} = {v!r}", mode="exec").body[0]
             param_assigns.append(assign)
 
+        # User code assigns to `result` (same convention as ScriptIndicator) but
+        # never returns it — this is a real function, not an exec()'d namespace, so
+        # the compiled body needs an explicit return or numba always yields None.
+        return_result = _ast2.Return(value=_ast2.Name(id="result", ctx=_ast2.Load()))
+
         fn_def = _ast2.FunctionDef(
             name="_jit_fn",
             args=_ast2.arguments(
@@ -436,7 +440,7 @@ class JitIndicator(Indicator):
                 vararg=None, kwonlyargs=[], kw_defaults=[],
                 kwarg=None, defaults=[],
             ),
-            body=param_assigns + tree.body,
+            body=param_assigns + tree.body + [return_result],
             decorator_list=[],
             returns=None,
             lineno=1, col_offset=0,
@@ -446,7 +450,12 @@ class JitIndicator(Indicator):
 
         ns: dict = {"np": np}
         exec(compile(module, "<jit_indicator>", "exec"), ns)  # noqa: S102
-        return numba.jit(nopython=True, cache=True)(ns["_jit_fn"])
+        # cache=True requires a real on-disk source file to key numba's persistent
+        # cache against; _jit_fn is built from a dynamically-generated AST with no
+        # such file, which makes numba raise at call time. self._jit_cache above is
+        # already this indicator's own (in-process) memoization of the compiled
+        # dispatcher, so a persistent disk cache adds nothing here.
+        return numba.jit(nopython=True, cache=False)(ns["_jit_fn"])
 
     def compute(self, ctx: IndicatorContext) -> np.ndarray:
         cols = tuple(ctx.df.columns)
