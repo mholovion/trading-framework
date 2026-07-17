@@ -23,10 +23,66 @@ PyFold — Python/Polars aggregation (explicit RAM, no MV; use only when CH cann
 """
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field as dc_field
 from typing import Any
 
 import polars as pl
+
+# ---------------------------------------------------------------------------
+# Fold safety — fn/field/args get interpolated straight into DDL/MV SQL
+# (ch_agg_type/ch_state_expr/ch_merge_expr below), so they need the same
+# treatment as table/column identifiers in core/clickhouse.py. A full allowlist
+# of ClickHouse aggregate functions would need constant upkeep (90+ functions
+# plus -If/-Array/-Merge/-State combinators); a charset check on the function-
+# name *position* gets the same security property (can't break out of the
+# token) without it — an unrecognized function just fails at query time in
+# ClickHouse, which is a safe failure mode, not a hole.
+# ---------------------------------------------------------------------------
+_CH_IDENT_RE  = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+# unit.price.mul(unit.qty).sum() -> Fold(field="price * qty") via _ArithProxy —
+# the only non-identifier `field` shape the framework itself produces.
+_CH_ARITH_RE  = re.compile(r"^[A-Za-z_][A-Za-z0-9_]* \* [A-Za-z_][A-Za-z0-9_]*$")
+# Best-effort structural guard for string args (e.g. sumIf("side = 1")): these
+# are genuinely arbitrary boolean expressions, not identifiers, so this is a
+# blocklist rather than an allowlist — same trust model as ScriptIndicator/
+# exec(): write these yourself, don't pipe in untrusted text. It only catches
+# statement-injection shapes (extra statements, comments, DDL/DML keywords),
+# not every conceivable malicious expression.
+_CH_ARG_DANGER_RE = re.compile(
+    r";|--|/\*|\*/|\b(DROP|ALTER|INSERT|DELETE|ATTACH|DETACH|GRANT|REVOKE|"
+    r"UNION|EXEC|CREATE|TRUNCATE|RENAME|KILL|SYSTEM)\b",
+    re.IGNORECASE,
+)
+
+
+def _validate_ch_token(value: str, *, kind: str) -> str:
+    if not isinstance(value, str) or not _CH_IDENT_RE.match(value):
+        raise ValueError(
+            f"Invalid Fold {kind}: {value!r}. Expected a plain identifier "
+            f"matching {_CH_IDENT_RE.pattern!r}."
+        )
+    return value
+
+
+def _validate_ch_field(value: str) -> str:
+    if isinstance(value, str) and (_CH_IDENT_RE.match(value) or _CH_ARITH_RE.match(value)):
+        return value
+    raise ValueError(
+        f"Invalid Fold field: {value!r}. Expected a plain identifier or a "
+        f"'<name> * <name>' expression (from Field.mul())."
+    )
+
+
+def _validate_ch_arg(value: Any) -> Any:
+    if isinstance(value, (int, float, bool)):
+        return value
+    if isinstance(value, str):
+        if _CH_ARG_DANGER_RE.search(value):
+            raise ValueError(f"Fold arg rejected (looks like a statement/comment injection): {value!r}")
+        return value
+    raise ValueError(f"Invalid Fold arg type {type(value).__name__}: {value!r}. Expected str/int/float/bool.")
+
 
 POLARS_TO_CH: dict[Any, str] = {
     pl.Float64: "Float64",
@@ -57,6 +113,22 @@ class Fold:
     by_ch_type: str | None = None
     args:       list = dc_field(default_factory=list)  # extra literal args: quantile level, cond
     _alias:     str | None = None
+
+    def __post_init__(self) -> None:
+        # fn/field/by/ch_type/by_ch_type/_alias/args all get interpolated as raw SQL
+        # syntax by ch_agg_type/ch_state_expr/ch_merge_expr — validate once here so
+        # a bad Fold fails at construction, not deep inside SQL generation.
+        _validate_ch_token(self.fn, kind="function name")
+        _validate_ch_field(self.field)
+        _validate_ch_token(self.ch_type, kind="ch_type")
+        if self.by is not None:
+            _validate_ch_token(self.by, kind="by")
+        if self.by_ch_type is not None:
+            _validate_ch_token(self.by_ch_type, kind="by_ch_type")
+        if self._alias is not None:
+            _validate_ch_token(self._alias, kind="alias")
+        for a in self.args:
+            _validate_ch_arg(a)
 
     def alias(self, name: str) -> "Fold":
         return Fold(self.fn, self.field, self.ch_type, self.by,
