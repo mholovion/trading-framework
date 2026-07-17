@@ -16,12 +16,10 @@ Usage:
 """
 from __future__ import annotations
 
-import asyncio
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, AsyncIterator, Optional
 
-import numpy as np
 import polars as pl
 
 from tradingkit.indicator import Indicator, IndicatorContext
@@ -215,7 +213,8 @@ class Pipeline:
 
     def to_dict(self) -> dict:
         """Serialize to JSON-compatible dict for ClickHouse storage."""
-        import pickle, base64
+        import pickle
+        import base64
         return {
             "name":       self.name,
             "source":     base64.b64encode(pickle.dumps(self.source)).decode(),
@@ -228,16 +227,24 @@ class Pipeline:
 
     @classmethod
     def from_dict(cls, data: dict, executor: Any = None) -> "Pipeline":
-        """Deserialize from dict (loaded from ClickHouse)."""
-        import pickle, base64
+        """
+        Deserialize from dict (loaded from ClickHouse plugin_library).
+
+        Uses the same allowlisting unpickler as tradingkit-runner
+        (tradingkit.runner._safe_pickle) rather than raw pickle.loads() — a saved
+        pipeline is application-controlled data (editable via plugin_library), not
+        a hardcoded trust boundary, so it gets the same treatment as network input.
+        """
+        import base64
+        from tradingkit.runner import _safe_pickle
         return cls(
             name=data["name"],
-            source=pickle.loads(base64.b64decode(data["source"])),
+            source=_safe_pickle.loads(base64.b64decode(data["source"])),
             indicators={
-                k: pickle.loads(base64.b64decode(v))
+                k: _safe_pickle.loads(base64.b64decode(v))
                 for k, v in data.get("indicators", {}).items()
             },
-            strategy=pickle.loads(base64.b64decode(data["strategy"])),
+            strategy=_safe_pickle.loads(base64.b64decode(data["strategy"])),
             executor=executor,
         )
 
