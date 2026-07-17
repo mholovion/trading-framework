@@ -15,7 +15,7 @@ import asyncio
 import json
 import logging
 import time
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Any
 
 from tradingkit.core.clickhouse import ClickHouseManager
@@ -381,7 +381,6 @@ class _ConnectionWorker:
             )
             if min_ts is None:
                 return False
-            expected = max(1, (end_ts - start_ts) // self._unit_interval_s)
             # Rough check: if range covers the window, assume complete
             return min_ts <= start_ts and max_ts >= end_ts - self._unit_interval_s * 2
         except Exception:

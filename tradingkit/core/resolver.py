@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import logging
 from bisect import bisect_right
 from typing import Any, Callable, Optional, TYPE_CHECKING
@@ -214,7 +213,7 @@ class DependencyResolver:
         from tradingkit.core.timeframe import parse_timeframe
         from tradingkit.core.clickhouse import _to_ch_interval
 
-        src_seconds = parse_timeframe(src)
+        parse_timeframe(src)  # validates src is a well-formed timeframe string; raises if not
         dst_seconds = parse_timeframe(dst)
         interval = _to_ch_interval(dst_seconds)
 

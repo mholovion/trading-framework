@@ -137,6 +137,8 @@ __all__ = [
     # Aggregation
     "AggregationContext",
     "AggregationWorker",
+    "AggregationScript",
+    "load_aggregation_script",
     # Application
     "TradingContext",
     "ClickHouseManager",

@@ -4,7 +4,6 @@ tradingkit.backtest.result — BacktestResult and Trade.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional
 
 import polars as pl
 

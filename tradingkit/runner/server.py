@@ -47,6 +47,9 @@ logger = logging.getLogger(__name__)
 _TOKEN_ENV_VAR = "TRADINGKIT_RUNNER_TOKEN"
 _TRUST_MODULE_ENV_VAR = "TRADINGKIT_RUNNER_TRUST_MODULES"  # comma-separated
 
+_TOKEN_KEY: web.AppKey[str] = web.AppKey("tradingkit.runner.token")
+_TRUSTED_MODULES_KEY: web.AppKey[list[str]] = web.AppKey("tradingkit.runner.trusted_modules")
+
 
 def _arrow_bytes_to_df(data: bytes) -> pl.DataFrame:
     buf = pa.py_buffer(data)
@@ -78,7 +81,7 @@ def _is_loopback(host: str) -> bool:
 
 @web.middleware
 async def _auth_middleware(request: web.Request, handler):
-    token = request.app.get("token")
+    token = request.app.get(_TOKEN_KEY)
     if token is None or request.path == "/health":
         return await handler(request)
 
@@ -100,10 +103,10 @@ async def _auth_middleware(request: web.Request, handler):
 async def compute_indicator(request: web.Request) -> web.Response:
     try:
         raw = await request.read()
-        payload = _safe_pickle.loads(raw, trusted_modules=request.app["trusted_modules"])
+        payload = _safe_pickle.loads(raw, trusted_modules=request.app[_TRUSTED_MODULES_KEY])
 
         indicator = _safe_pickle.loads(
-            payload["indicator"], trusted_modules=request.app["trusted_modules"]
+            payload["indicator"], trusted_modules=request.app[_TRUSTED_MODULES_KEY]
         )
         df = _arrow_bytes_to_df(payload["data"])
 
@@ -132,12 +135,12 @@ async def compute_indicator(request: web.Request) -> web.Response:
 async def compute_strategy(request: web.Request) -> web.Response:
     try:
         raw = await request.read()
-        payload = _safe_pickle.loads(raw, trusted_modules=request.app["trusted_modules"])
+        payload = _safe_pickle.loads(raw, trusted_modules=request.app[_TRUSTED_MODULES_KEY])
 
         strategy = _safe_pickle.loads(
-            payload["strategy"], trusted_modules=request.app["trusted_modules"]
+            payload["strategy"], trusted_modules=request.app[_TRUSTED_MODULES_KEY]
         )
-        bar = _safe_pickle.loads(payload["bar"], trusted_modules=request.app["trusted_modules"])
+        bar = _safe_pickle.loads(payload["bar"], trusted_modules=request.app[_TRUSTED_MODULES_KEY])
 
         signal = await strategy.on_bar(bar)
         result = {"signal": signal.to_dict() if signal is not None else None}
@@ -161,10 +164,10 @@ async def compute_strategy(request: web.Request) -> web.Response:
 async def compute_source(request: web.Request) -> web.Response:
     try:
         raw = await request.read()
-        payload = _safe_pickle.loads(raw, trusted_modules=request.app["trusted_modules"])
+        payload = _safe_pickle.loads(raw, trusted_modules=request.app[_TRUSTED_MODULES_KEY])
 
         source = _safe_pickle.loads(
-            payload["source"], trusted_modules=request.app["trusted_modules"]
+            payload["source"], trusted_modules=request.app[_TRUSTED_MODULES_KEY]
         )
         df: pl.DataFrame = await source.get_historical_data(
             symbol=payload["symbol"],
@@ -209,8 +212,8 @@ def _safe_pickle_dumps(obj) -> bytes:
 
 def create_app(token: str | None = None, trusted_modules: list[str] | None = None) -> web.Application:
     app = web.Application(client_max_size=256 * 1024 * 1024, middlewares=[_auth_middleware])
-    app["token"] = token
-    app["trusted_modules"] = trusted_modules or []
+    app[_TOKEN_KEY] = token
+    app[_TRUSTED_MODULES_KEY] = trusted_modules or []
     app.router.add_post("/compute/indicator", compute_indicator)
     app.router.add_post("/compute/strategy", compute_strategy)
     app.router.add_post("/compute/source", compute_source)

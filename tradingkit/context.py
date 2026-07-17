@@ -12,7 +12,7 @@ Usage in routes:
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Optional, TYPE_CHECKING
+from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from tradingkit.core.clickhouse import ClickHouseManager

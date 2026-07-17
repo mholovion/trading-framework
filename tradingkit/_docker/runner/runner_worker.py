@@ -19,7 +19,6 @@ from __future__ import annotations
 
 import asyncio
 import ctypes
-import json
 import logging
 import os
 import pickle

@@ -8,7 +8,6 @@ parse_timeframe(3600)  → 3600
 from __future__ import annotations
 
 import re
-from datetime import datetime, timezone, timedelta
 from typing import Union
 
 
