@@ -141,13 +141,23 @@ class Fold:
         return f"AggregateFunction({fn_part}, {', '.join(type_args)})"
 
     def ch_state_expr(self, alias: str) -> str:
-        """MV SELECT fragment: argMinState(open, timestamp) AS open"""
+        """
+        MV SELECT fragment: argMinState(open, timestamp) AS open
+
+        KNOWN LIMITATION: for parametric functions (fn with args, e.g. quantile,
+        sumIf), the combinator suffix is placed after the argument list --
+        "quantile(0.95)State(price)" -- which ClickHouse rejects; the correct form
+        is "quantileState(0.95)(price)". Argument-less functions (sum, count, avg,
+        min, max, ...) are unaffected and covered by real-server integration tests.
+        See README.md's Aggregation section for the full note. Not fixed yet.
+        """
         fn_part  = self.fn if not self.args else f"{self.fn}({', '.join(str(a) for a in self.args)})"
         col_args = self.field if not self.by else f"{self.field}, {self.by}"
         return f"{fn_part}State({col_args}) AS {alias}"
 
     def ch_merge_expr(self, col: str) -> str:
-        """Query SELECT fragment: argMinMerge(open) AS open"""
+        """Query SELECT fragment: argMinMerge(open) AS open. Same combinator-placement
+        limitation for parametric functions as ch_state_expr above."""
         fn_part = self.fn if not self.args else f"{self.fn}({', '.join(str(a) for a in self.args)})"
         return f"{fn_part}Merge({col}) AS {col}"
 

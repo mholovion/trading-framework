@@ -207,6 +207,18 @@ async def aggregate(ctx, start_ts: int, end_ts: int) -> list[dict]:
 `AggregationWorker` polls `plugin_library` for scripts like this one (`type="aggregation"`,
 defines `aggregate()`) and runs each on `INTERVAL_S`, writing results to `OUTPUT_TABLE`.
 
+**Known limitation — parametric ClickHouse aggregates.** Separately from the Python-script
+path above, `tradingkit.core.clickhouse` also has a lower-level, ClickHouse-native
+aggregation path (`Fold` in `tradingkit/schema.py`, plus `ensure_agg_table`/`ensure_mv`/
+`backfill_agg`/`query_agg`), backed by `AggregatingMergeTree` tables and materialized
+views using ClickHouse's `-State`/`-Merge` combinators. Argument-less functions (`sum`,
+`count`, `avg`, `min`, `max`, ...) generate correct SQL and are covered by integration
+tests against a real server. Parametric functions (`quantile`, `sumIf`, ...) don't yet —
+the combinator suffix gets placed incorrectly relative to the function's own arguments,
+producing SQL ClickHouse won't accept as written. This needs an actual syntax-generation
+fix, not a quick patch, and isn't done yet — don't rely on `Fold` with parametric
+functions until this is resolved.
+
 **Registering named builtins.** `plugin_library` (ClickHouse-stored, per-project) is the
 primary way to add aggregation/strategy scripts, but a host app can additionally register
 its own named builtins — e.g. a curated set it always wants available regardless of
