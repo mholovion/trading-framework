@@ -120,7 +120,14 @@ async def main() -> None:
         os.unlink(SOCK_PATH)
 
     server = await asyncio.start_unix_server(handle_client, path=SOCK_PATH)
-    os.chmod(SOCK_PATH, 0o660)
+    try:
+        os.chmod(SOCK_PATH, 0o660)
+    except OSError as exc:
+        # Defense-in-depth hardening, not the primary boundary (that's network=none +
+        # seccomp + which processes can even see this path) -- some bind-mount backends
+        # (observed: Docker Desktop's virtiofs) reject chmod on socket special files
+        # with EINVAL. Not worth crashing the runner over.
+        logger.warning("Could not chmod %s to 0o660: %s", SOCK_PATH, exc)
     logger.info("Runner %s listening on %s", RUNNER_ID, SOCK_PATH)
 
     async with server:
