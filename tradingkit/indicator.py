@@ -302,10 +302,6 @@ ta_indicator = _TAIndicatorNS()
 # Re-export TA namespace for direct use in indicator code              #
 # ------------------------------------------------------------------ #
 
-# ------------------------------------------------------------------ #
-# Factory helpers — moved from plugins/indicators/loader.py            #
-# ------------------------------------------------------------------ #
-
 def _extract_defaults(code: str) -> dict[str, Any]:
     """Parse ``__params__ = {...}`` literal from indicator code and return defaults."""
     match = _re.search(r"__params__\s*=\s*(\{.*?\})", code, _re.DOTALL)

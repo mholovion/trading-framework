@@ -335,17 +335,14 @@ class CppStrategyPlugin:
         raise RuntimeError("CppStrategyPlugin must run through CppRunnerPool")
 
 
-# ------------------------------------------------------------------ #
-# load_strategy_plugin — factory moved from plugins/strategies/loader  #
-# ------------------------------------------------------------------ #
-
 def load_strategy_plugin(type_: str, params_dict: dict) -> "ScriptStrategy | CppStrategyPlugin":
     """
     Create a strategy plugin from a type string and params dict.
 
     '__script__'  — ScriptStrategy wrapping user code (from _code param).
     '__cpp__'     — CppStrategyPlugin (compiled .so, requires CppRunnerPool).
-    named types   — looks up in app-level BUILTIN_STRATEGIES from plugins.
+    named types   — looks up in a host-registered builtin registry, see
+                    tradingkit.core.plugin_registry.
     """
     if type_ == "__script__":
         code = params_dict.get("_code", "")
@@ -360,12 +357,9 @@ def load_strategy_plugin(type_: str, params_dict: dict) -> "ScriptStrategy | Cpp
         code = params_dict.get("_code", "")
         return CppStrategyPlugin(cpp_code=code, so_bytes=so_bytes, config=params_dict)
 
-    # Named type — load from app-level builtins (plugins/strategies/loader.py)
-    try:
-        from plugins.strategies.loader import BUILTIN_STRATEGIES
-        code = BUILTIN_STRATEGIES.get(type_)
-    except ImportError:
-        code = None
+    from tradingkit.core.plugin_registry import get_builtin_registry
+    BUILTIN_STRATEGIES = get_builtin_registry("TRADINGKIT_STRATEGIES_MODULE", "BUILTIN_STRATEGIES")
+    code = BUILTIN_STRATEGIES.get(type_)
 
     if not code:
         raise ValueError(

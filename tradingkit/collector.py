@@ -549,10 +549,8 @@ class DataCollector:
                     conn.get("project", "default"), "aggregation", agg_name
                 )
                 if not agg_code:
-                    try:
-                        from plugins.aggregations.loader import BUILTIN_AGGREGATIONS as _BUILTINS
-                    except ImportError:
-                        _BUILTINS = {}
+                    from tradingkit.core.plugin_registry import get_builtin_registry
+                    _BUILTINS = get_builtin_registry("TRADINGKIT_AGGREGATIONS_MODULE", "BUILTIN_AGGREGATIONS")
                     agg_code = _BUILTINS.get(agg_name)
                 if agg_code:
                     from tradingkit.aggregation import AggregationScript

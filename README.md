@@ -176,8 +176,8 @@ C++ runner containers on first use. Treat access to the host running `tradingkit
 
 `AggregationContext.query(table, symbol=..., start_ts=..., end_ts=...)` reads *any*
 ClickHouse table by name — tradingkit ships no built-in aggregation scripts
-(`BUILTIN_AGGREGATIONS` is an empty registry you populate yourself), but the mechanism
-covers a few patterns directly:
+(`BUILTIN_AGGREGATIONS` is an empty registry by default), but the mechanism covers a
+few patterns directly:
 
 - **Cross-symbol** — query two symbols, combine them (spread, ratio, custom index).
 - **Cross-timeframe** — query a pre-aggregated table for a different bucket size (e.g.
@@ -206,6 +206,18 @@ async def aggregate(ctx, start_ts: int, end_ts: int) -> list[dict]:
 
 `AggregationWorker` polls `plugin_library` for scripts like this one (`type="aggregation"`,
 defines `aggregate()`) and runs each on `INTERVAL_S`, writing results to `OUTPUT_TABLE`.
+
+**Registering named builtins.** `plugin_library` (ClickHouse-stored, per-project) is the
+primary way to add aggregation/strategy scripts, but a host app can additionally register
+its own named builtins — e.g. a curated set it always wants available regardless of
+project — by pointing an environment variable at a module:
+
+```bash
+export TRADINGKIT_AGGREGATIONS_MODULE=myapp.aggregations   # exposes BUILTIN_AGGREGATIONS: dict[str, str]
+export TRADINGKIT_STRATEGIES_MODULE=myapp.strategies       # exposes BUILTIN_STRATEGIES: dict[str, str]
+```
+
+Unset (the default), both registries are empty — see `tradingkit.core.plugin_registry`.
 
 ---
 

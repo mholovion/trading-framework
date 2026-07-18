@@ -198,10 +198,8 @@ class AggregationWorker:
         Return all aggregation scripts from plugin_library that define aggregate().
         Falls back to app-level BUILTIN_AGGREGATIONS for development/testing.
         """
-        try:
-            from plugins.aggregations.loader import BUILTIN_AGGREGATIONS as _APP_BUILTINS
-        except ImportError:
-            _APP_BUILTINS = {}
+        from tradingkit.core.plugin_registry import get_builtin_registry
+        _APP_BUILTINS = get_builtin_registry("TRADINGKIT_AGGREGATIONS_MODULE", "BUILTIN_AGGREGATIONS")
 
         results: list[dict] = []
 
@@ -302,7 +300,8 @@ class AggregationScript:
         return result or []
 
 
-# Empty registry — app-specific builtins live in plugins/aggregations/
+# Empty by default -- a host app can register its own via get_builtin_registry()
+# (tradingkit.core.plugin_registry), see _load_python_scripts() above.
 BUILTIN_AGGREGATIONS: dict[str, str] = {}
 
 
