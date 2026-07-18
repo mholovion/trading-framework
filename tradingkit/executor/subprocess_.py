@@ -73,7 +73,7 @@ class SubprocessExecutor(PluginExecutor):
 
     def __init__(
         self,
-        max_memory_mb: int = 512,
+        max_memory_mb: int = 2048,
         timeout_s: int = 60,
         max_workers: int = 4,
         cpp_pool=None,
