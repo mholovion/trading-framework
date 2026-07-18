@@ -116,7 +116,11 @@ class DockerRunnerLauncher(RunnerLauncher):
     def _get_client(self):
         if self._client is None:
             import docker
-            self._client = docker.from_env()
+            # docker-py's default is 60s, which a loaded host (many cached images/
+            # volumes, or a container start under a seccomp/read-only/no-network
+            # config) can genuinely exceed -- a slow container is not the same as a
+            # broken one, so give it real headroom instead of failing the request.
+            self._client = docker.from_env(timeout=180)
         return self._client
 
     def _ensure_image(self, client, tag: str, subdir: str) -> None:
@@ -142,13 +146,17 @@ class DockerRunnerLauncher(RunnerLauncher):
             logger.info("Created volume %s", self._socket_volume)
 
     def _start_container(self, client, runner_id: int):
-        seccomp = str(_DOCKER_DIR / "runner" / "seccomp.json")
+        # docker-py talks to the Engine API directly, unlike the `docker` CLI it does
+        # not resolve `seccomp=<path>` to file contents itself -- the profile JSON has
+        # to be read and inlined here, or the daemon tries to parse the path string
+        # itself as JSON and rejects it immediately.
+        seccomp_json = (_DOCKER_DIR / "runner" / "seccomp.json").read_text()
         return client.containers.run(
             self._runner_image,
             detach=True,
             remove=True,
             network_mode="none",
-            security_opt=[f"seccomp={seccomp}"],
+            security_opt=[f"seccomp={seccomp_json}"],
             mem_limit="256m",
             nano_cpus=1_000_000_000,
             read_only=True,
