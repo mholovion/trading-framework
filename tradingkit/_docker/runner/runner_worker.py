@@ -121,13 +121,18 @@ async def main() -> None:
 
     server = await asyncio.start_unix_server(handle_client, path=SOCK_PATH)
     try:
-        os.chmod(SOCK_PATH, 0o660)
+        # 0o666, not 0o660: this container runs as root, but whoever connects doesn't
+        # necessarily -- the app container's UID in production, or a bare non-root CI
+        # runner process in tests (neither of which this image controls or can predict).
+        # 660 would restrict the socket to root:root, so anything not running as root
+        # gets EACCES on connect(). The real isolation boundary is network=none + seccomp
+        # + which processes can even see this shared path at all, not the socket's own
+        # owner/group bits.
+        os.chmod(SOCK_PATH, 0o666)
     except OSError as exc:
-        # Defense-in-depth hardening, not the primary boundary (that's network=none +
-        # seccomp + which processes can even see this path) -- some bind-mount backends
-        # (observed: Docker Desktop's virtiofs) reject chmod on socket special files
-        # with EINVAL. Not worth crashing the runner over.
-        logger.warning("Could not chmod %s to 0o660: %s", SOCK_PATH, exc)
+        # Some bind-mount backends (observed: Docker Desktop's virtiofs) reject chmod on
+        # socket special files outright with EINVAL. Not worth crashing the runner over.
+        logger.warning("Could not chmod %s to 0o666: %s", SOCK_PATH, exc)
     logger.info("Runner %s listening on %s", RUNNER_ID, SOCK_PATH)
 
     async with server:
