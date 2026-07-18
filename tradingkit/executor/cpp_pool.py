@@ -74,12 +74,25 @@ class CppRunnerPool:
         socket_dir = self._launcher.socket_dir
         for i in range(self._pool_size):
             sock = str(Path(socket_dir) / f"runner-{i}.sock")
-            try:
-                reader, writer = await asyncio.open_unix_connection(sock)
-                await self._pool.put((reader, writer))
-                logger.info("CppRunnerPool: connected runner %d", i)
-            except Exception as exc:
-                logger.error("CppRunnerPool: cannot connect runner %d: %s", i, exc)
+            # The launcher only waits for the socket *file* to exist, not for the
+            # runner's listen() to be fully active -- across a bind-mounted volume in
+            # particular there can be a brief window where the path is visible before
+            # the listener is actually accepting, so a first connect attempt can see
+            # ECONNREFUSED on an otherwise-healthy runner. Short bounded retry instead
+            # of failing the whole pool on that one race.
+            last_exc: Exception | None = None
+            for _ in range(20):
+                try:
+                    reader, writer = await asyncio.open_unix_connection(sock)
+                    await self._pool.put((reader, writer))
+                    logger.info("CppRunnerPool: connected runner %d", i)
+                    last_exc = None
+                    break
+                except Exception as exc:
+                    last_exc = exc
+                    await asyncio.sleep(0.1)
+            if last_exc is not None:
+                logger.error("CppRunnerPool: cannot connect runner %d: %s", i, last_exc)
 
         if self._pool.empty():
             raise RuntimeError(

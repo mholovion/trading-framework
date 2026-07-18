@@ -55,6 +55,17 @@ class DockerRunnerLauncher(RunnerLauncher):
         runner_image:  str = _RUNNER_IMAGE,
         compiler_image: str = _COMPILER_IMAGE,
     ) -> None:
+        """
+        socket_volume: a Docker named volume (default) shared with the app container in
+        production -- see docker-compose.yml, where both `app` and each runner container
+        mount it at _SOCKET_DIR, so a named volume works because the launcher's own
+        process already lives inside a container.
+
+        Pass an absolute host path instead (e.g. "/tmp/tradingkit_sockets") to bind-mount
+        a real directory that a *bare* launcher process can also see directly -- needed
+        wherever the launcher itself doesn't run inside a container with the volume
+        mounted (tests, or a non-containerized dev setup).
+        """
         self._socket_volume  = socket_volume
         self._runner_image   = runner_image
         self._compiler_image = compiler_image
@@ -62,8 +73,15 @@ class DockerRunnerLauncher(RunnerLauncher):
         self._client = None
 
     @property
+    def _is_bind_mount(self) -> bool:
+        return self._socket_volume.startswith("/")
+
+    @property
     def socket_dir(self) -> str:
-        return _SOCKET_DIR
+        # Host-visible path when bind-mounted; the fixed in-container path otherwise
+        # (relies on the launcher's own process sharing the named volume -- true in
+        # production, where DockerRunnerLauncher always runs inside the app container).
+        return self._socket_volume if self._is_bind_mount else _SOCKET_DIR
 
     # ------------------------------------------------------------------ #
     # Lifecycle                                                            #
@@ -138,6 +156,9 @@ class DockerRunnerLauncher(RunnerLauncher):
             logger.info("Image %s built", tag)
 
     def _ensure_volume(self, client) -> None:
+        if self._is_bind_mount:
+            Path(self._socket_volume).mkdir(parents=True, exist_ok=True)
+            return
         import docker
         try:
             client.volumes.get(self._socket_volume)
@@ -172,17 +193,20 @@ class DockerRunnerLauncher(RunnerLauncher):
 
     async def _wait_for_sockets(self, pool_size: int) -> None:
         """
-        Poll the shared volume via app-side mount point.
-        The volume must be mounted in the app container at _SOCKET_DIR.
+        Poll the shared volume via this process's own view of it: the in-container
+        mount point for the (default) named-volume mode, or the bind-mount host path
+        when constructed with an absolute socket_volume. See socket_dir/__init__.
         """
         deadline = asyncio.get_event_loop().time() + _SOCKET_TIMEOUT
         for i in range(pool_size):
-            sock = Path(_SOCKET_DIR) / f"runner-{i}.sock"
+            sock = Path(self.socket_dir) / f"runner-{i}.sock"
             while not sock.exists():
                 if asyncio.get_event_loop().time() > deadline:
                     raise RuntimeError(
                         f"Runner {i} socket never appeared at {sock} "
-                        f"after {_SOCKET_TIMEOUT}s. "
-                        "Is the runner_sockets volume mounted in the app container?"
+                        f"after {_SOCKET_TIMEOUT}s. Does this process share "
+                        f"{self._socket_volume!r} with the runner containers -- "
+                        "mounted at the same path if it's a named volume, or "
+                        "constructed with that absolute path if it's a bind mount?"
                     )
                 await asyncio.sleep(0.1)

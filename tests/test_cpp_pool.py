@@ -78,6 +78,19 @@ def _docker_available() -> bool:
         return False
 
 
+def _docker_is_desktop_vm() -> bool:
+    """
+    True under Docker Desktop (Mac/Windows), where the daemon runs inside a Linux VM --
+    as opposed to a native Linux daemon (GitHub Actions' ubuntu-latest, most self-hosted
+    setups). `docker info` reports this directly, no host-OS guessing needed.
+    """
+    try:
+        import docker
+        return docker.from_env().info().get("OperatingSystem") == "Docker Desktop"
+    except Exception:
+        return False
+
+
 # ------------------------------------------------------------------ #
 # Tier A — SubprocessRunnerLauncher, no Docker required                #
 # ------------------------------------------------------------------ #
@@ -142,9 +155,44 @@ pytestmark_docker = pytest.mark.skipif(
 )
 
 
+@pytest.fixture
+def socket_dir():
+    """
+    A bind-mounted host directory instead of DockerRunnerLauncher's default named
+    volume. In production, DockerRunnerLauncher runs *inside* the app container, which
+    shares the named volume with each runner container -- see docker-compose.yml. pytest
+    here runs directly on the bare host (locally and in CI), which can't see into a named
+    volume at all, so the launcher needs a real host path both sides can open directly.
+
+    Deliberately not pytest's tmp_path: AF_UNIX socket paths are capped at ~104-108
+    bytes by the kernel (sockaddr_un.sun_path), and tmp_path's
+    /private/var/.../pytest-of-<user>/pytest-NN/<test-name>/ nesting blows past that on
+    its own, before the socket filename is even appended.
+    """
+    import shutil
+    import tempfile
+    # dir="/tmp" (not the default $TMPDIR) so the path stays short on macOS, where
+    # $TMPDIR is a long per-user /var/folders/... path that alone can exceed the limit.
+    path = tempfile.mkdtemp(prefix="tk_ipc_", dir="/tmp")
+    yield path
+    shutil.rmtree(path, ignore_errors=True)
+
+
 @pytestmark_docker
-async def test_docker_launcher_runs_real_compiled_indicator(so_bytes, ohlcv_df):
-    pool = CppRunnerPool(launcher=DockerRunnerLauncher(), pool_size=1)
+@pytest.mark.skipif(
+    _docker_is_desktop_vm(),
+    reason=(
+        "Docker Desktop runs the daemon inside a Linux VM: a bind-mounted Unix socket "
+        "is metadata-visible from the host (its path exists) but not connectable from "
+        "the host (needs the same kernel on both ends). test_docker_launcher_containers_"
+        "are_actually_isolated below already proves the image/container/isolation-flags "
+        "path works under Docker Desktop -- this one additionally needs a real "
+        "host-to-container connection, which only a native Linux daemon provides "
+        "(GitHub Actions' ubuntu-latest, most self-hosted runners)."
+    ),
+)
+async def test_docker_launcher_runs_real_compiled_indicator(so_bytes, ohlcv_df, socket_dir):
+    pool = CppRunnerPool(launcher=DockerRunnerLauncher(socket_volume=socket_dir), pool_size=1)
     await pool.start()
     try:
         result = await pool.run(so_bytes, ohlcv_df, params={})
@@ -154,11 +202,11 @@ async def test_docker_launcher_runs_real_compiled_indicator(so_bytes, ohlcv_df):
 
 
 @pytestmark_docker
-async def test_docker_launcher_containers_are_actually_isolated():
+async def test_docker_launcher_containers_are_actually_isolated(socket_dir):
     """The isolation flags DockerRunnerLauncher claims (network=none, 256m, read-only)
     must actually be present on the running container's HostConfig -- not just passed
     to the SDK call and silently ignored."""
-    launcher = DockerRunnerLauncher()
+    launcher = DockerRunnerLauncher(socket_volume=socket_dir)
     await launcher.start(1)
     try:
         assert len(launcher._containers) == 1
