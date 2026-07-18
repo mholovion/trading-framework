@@ -1,6 +1,8 @@
 """tradingkit.core.clickhouse.ClickHouseManager — SQL construction, no real ClickHouse needed."""
 from __future__ import annotations
 
+import polars as pl
+
 from tradingkit.core.clickhouse import ClickHouseManager, _basic_auth_header, create_clickhouse_manager
 from tests.conftest import FakeChResponse
 
@@ -72,6 +74,32 @@ async def test_execute_appends_format_only_for_select(fake_ch_http):
     assert "FORMAT JSONCompact" not in fake_ch_http.calls[1]["body"]
 
 
+async def test_execute_appends_format_for_describe_and_show(fake_ch_http):
+    """Regression: DESCRIBE/SHOW are read queries too, just like SELECT -- they used to
+    fall through to the non-SELECT branch, so FORMAT JSONCompact was never appended and
+    the response body was never parsed, silently returning [] every time. That made
+    get_table_schema() always return {} against a real server (caught only by the real
+    ClickHouse integration tests, never by mocks -- see test_get_table_schema_below)."""
+    fake_ch_http._responses.extend([
+        FakeChResponse(json_data={"data": []}),
+        FakeChResponse(json_data={"data": []}),
+    ])
+    db = ClickHouseManager()
+    await db._execute("DESCRIBE TABLE t")
+    await db._execute("SHOW TABLES")
+    assert "FORMAT JSONCompact" in fake_ch_http.calls[0]["body"]
+    assert "FORMAT JSONCompact" in fake_ch_http.calls[1]["body"]
+
+
+async def test_get_table_schema_parses_describe_output(fake_ch_http):
+    fake_ch_http._responses.append(FakeChResponse(json_data={
+        "data": [["timestamp", "Int64"], ["value", "Float64"]],
+    }))
+    db = ClickHouseManager()
+    schema = await db.get_table_schema("t")
+    assert schema == {"timestamp": pl.Int64, "value": pl.Float64}
+
+
 async def test_execute_returns_empty_list_on_http_error(fake_ch_http):
     fake_ch_http._responses.append(FakeChResponse(status=500, text_data="boom"))
     db = ClickHouseManager()
@@ -103,6 +131,17 @@ async def test_ensure_connections_table_sends_auth_and_configured_port(fake_ch_h
     for call in fake_ch_http.calls:
         assert call["url"].startswith("http://localhost:8443/")
         assert call["headers"]["Authorization"] == _basic_auth_header("bot", "s3cret")
+
+
+async def test_delete_connection_forces_synchronous_mutation(fake_ch_http):
+    """Regression: ALTER ... DELETE is an async mutation by default -- a list_connections()
+    call right after delete_connection() could still see the "deleted" row until the
+    mutation gets applied to the underlying parts, unless mutations_sync is forced."""
+    fake_ch_http._responses.append(FakeChResponse())
+    db = ClickHouseManager()
+    db._conn = object()
+    await db.delete_connection("foo")
+    assert "mutations_sync=1" in fake_ch_http.calls[0]["url"]
 
 
 def test_basic_auth_header_matches_http_spec():
