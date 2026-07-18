@@ -81,6 +81,10 @@ class _ConnectionsMixin:
     async def delete_connection(self, name: str) -> None:
         if not self._conn:
             return
+        # ALTER ... DELETE is a mutation, applied asynchronously by default -- without
+        # mutations_sync, a list_connections() call right after this would still see the
+        # "deleted" row until the mutation gets applied to the underlying parts.
         await self._execute(
-            "ALTER TABLE connections DELETE WHERE name = %(n)s", {"n": name}
+            "ALTER TABLE connections DELETE WHERE name = %(n)s", {"n": name},
+            settings={"mutations_sync": "1"},
         )

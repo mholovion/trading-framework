@@ -92,16 +92,18 @@ class _SqlMixin:
             return _SqlMixin._fmt(params[m.group(1)])
         return re.sub(r"%\((\w+)\)s", _sub, sql)
 
-    async def _execute(self, sql: str, params: dict | None = None) -> list:
+    async def _execute(self, sql: str, params: dict | None = None, settings: dict | None = None) -> list:
         import aiohttp as _aiohttp
         rendered   = self._interpolate(sql, params)
         first_word = rendered.lstrip().split()[0].upper() if rendered.strip() else ""
-        is_select  = first_word in ("SELECT", "WITH", "SHOW")
+        is_select  = first_word in ("SELECT", "WITH", "SHOW", "DESCRIBE", "DESC", "EXISTS")
         post_sql   = (rendered + " FORMAT JSONCompact") if is_select else rendered
         url = (
             f"http://{self.host}:{self.http_port}/"
             f"?database={self.database}&output_format_json_quote_64bit_integers=0"
         )
+        for key, val in (settings or {}).items():
+            url += f"&{key}={val}"
         headers = {"Authorization": _basic_auth_header(self.user, self.password)}
         try:
             async with _aiohttp.ClientSession() as sess:
