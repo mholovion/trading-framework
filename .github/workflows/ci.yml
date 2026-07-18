@@ -20,6 +20,12 @@ jobs:
     services:
       clickhouse:
         image: clickhouse/clickhouse-server:latest
+        env:
+          # Without this, the entrypoint disables network access for the passwordless
+          # 'default' user (local/healthcheck access still works, which is why this was
+          # missed until a real client connected from the job container) -- ClickHouseManager
+          # defaults to user=default, password="", so it needs that restriction lifted.
+          CLICKHOUSE_SKIP_USER_SETUP: 1
         ports:
           - 8123:8123
           - 9000:9000
