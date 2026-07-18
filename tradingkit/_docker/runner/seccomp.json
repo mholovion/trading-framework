@@ -1,5 +1,5 @@
 {
-  "defaultAction": "SCMP_ACT_KILL",
+  "defaultAction": "SCMP_ACT_ERRNO",
   "architectures": [
     "SCMP_ARCH_X86_64", "SCMP_ARCH_X86", "SCMP_ARCH_X32",
     "SCMP_ARCH_AARCH64", "SCMP_ARCH_ARM"
@@ -7,19 +7,36 @@
   "syscalls": [
     {
       "names": [
-        "read", "write", "readv", "writev",
-        "open", "openat", "close", "fstat", "lstat", "stat",
-        "mmap", "mprotect", "munmap", "brk",
-        "rt_sigaction", "rt_sigprocmask", "rt_sigreturn",
-        "lseek", "pread64", "pwrite64",
-        "access", "dup", "dup2",
-        "getpid", "getuid", "getgid", "geteuid", "getegid",
-        "arch_prctl", "set_tid_address", "set_robust_list",
-        "futex", "clone", "wait4", "exit", "exit_group",
-        "nanosleep", "clock_gettime", "gettimeofday",
-        "uname", "getcwd",
-        "madvise", "msync",
-        "getrandom"
+        "accept", "accept4", "access", "arch_prctl",
+        "bind", "brk",
+        "capget", "capset", "chdir", "chmod", "clock_getres", "clock_gettime",
+        "clock_nanosleep", "clone", "clone3", "close", "close_range", "connect",
+        "dup", "dup2", "dup3",
+        "epoll_create1", "epoll_ctl", "epoll_pwait", "epoll_wait", "eventfd2",
+        "execve", "exit", "exit_group",
+        "faccessat", "faccessat2", "fchdir", "fchmod", "fchmodat", "fcntl",
+        "fstat", "fstatfs", "futex",
+        "getcwd", "getdents64", "getegid", "geteuid", "getgid", "getpeername",
+        "getpid", "getppid", "getrandom", "getsockname", "getsockopt", "gettid",
+        "gettimeofday", "getuid",
+        "ioctl",
+        "listen", "lseek", "lstat",
+        "madvise", "mkdir", "mkdirat", "mmap", "mprotect", "mremap", "msync",
+        "munmap",
+        "nanosleep", "newfstatat",
+        "open", "openat",
+        "pipe", "pipe2", "poll", "ppoll", "prctl", "pread64", "prlimit64",
+        "pselect6", "pwrite64",
+        "read", "readlink", "readlinkat", "readv", "recvfrom", "recvmsg",
+        "restart_syscall", "rseq", "rt_sigaction", "rt_sigprocmask",
+        "rt_sigreturn", "rt_sigtimedwait",
+        "select", "sendmsg", "sendto", "set_robust_list", "set_tid_address",
+        "setgid", "setgroups", "setns", "setresgid", "setresuid", "setsockopt",
+        "setuid", "shutdown", "sigaltstack", "socket", "socketpair", "stat",
+        "statfs", "statx", "sysinfo",
+        "tgkill",
+        "uname", "unlink", "unlinkat", "unshare",
+        "wait4", "write", "writev"
       ],
       "action": "SCMP_ACT_ALLOW"
     }
