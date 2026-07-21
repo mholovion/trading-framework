@@ -12,8 +12,11 @@ a backtest — without changing the plugin code.
 ## Install
 
 ```bash
-pip install tradingkit
+pip install tradingkit-py
 ```
+
+(PyPI distribution name is `tradingkit-py` — an unrelated project already holds the bare
+`tradingkit` name — but the actual import is unaffected: `import tradingkit`.)
 
 Requires Python ≥3.11. `TA-Lib` needs the native library installed first (see
 [ta-lib.org](https://ta-lib.org)); everything else is a normal wheel dependency.

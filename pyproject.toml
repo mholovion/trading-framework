@@ -3,11 +3,18 @@ requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "tradingkit"
+# Distribution name for PyPI ("tradingkit" is already taken by an unrelated package) --
+# the importable package is still `tradingkit` (see [tool.setuptools.packages.find]
+# below), so `import tradingkit` in every example stays unchanged.
+name = "tradingkit-py"
 version = "0.1.0"
 description = "Async trading framework with Polars, ClickHouse, and pluggable executors"
+readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
+authors = [
+    { name = "Maksym Holovin", email = "holovin.maksym@gmail.com" },
+]
 dependencies = [
     "aiohttp>=3.9.0,<4.0.0",
     "aiohttp-jinja2==1.5.1",

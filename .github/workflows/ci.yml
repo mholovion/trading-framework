@@ -52,7 +52,12 @@ jobs:
         id: cache-ta-lib
         uses: actions/cache@v4
         with:
-          path: /usr/lib/libta_lib*
+          # make install actually produces libta-lib.* (hyphen, not underscore) --
+          # the old pattern here never matched anything, so this never cached at all.
+          path: |
+            /usr/lib/libta-lib*
+            /usr/lib/pkgconfig/ta-lib.pc
+            /usr/include/ta-lib
           key: ta-lib-0.6.4-${{ runner.os }}
 
       - name: Build TA-Lib from source
