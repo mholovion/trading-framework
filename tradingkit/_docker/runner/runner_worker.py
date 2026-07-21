@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import ctypes
+import hashlib
 import logging
 import os
 import pickle
@@ -35,12 +36,36 @@ SOCKET_DIR = os.environ.get("RUNNER_SOCKET_DIR", "/run/cpp-runner")
 RUNNER_ID  = os.environ.get("RUNNER_ID", "0")
 SOCK_PATH  = f"{SOCKET_DIR}/runner-{RUNNER_ID}.sock"
 
+# Keyed by content hash, not a caller-supplied name: two different .so payloads can
+# never collide into the same (wrong) cached handle by accident, and callers don't need
+# to coordinate names across a pool of independent runner processes -- they just always
+# send the same bytes for the same kernel, cheap over an already-open Unix socket, and
+# this cache skips the expensive part (tempfile write + dlopen/ELF relocation) on repeat
+# calls. Lives as long as this runner process does.
+_SO_CACHE: dict[str, ctypes.CDLL] = {}
+
 
 def _load_so(so_bytes: bytes) -> ctypes.CDLL:
+    digest = hashlib.sha256(so_bytes).hexdigest()
+    cached = _SO_CACHE.get(digest)
+    if cached is not None:
+        logger.info("so cache hit (%s)", digest[:12])
+        return cached
+
+    logger.info("so cache miss (%s), loading", digest[:12])
     with tempfile.NamedTemporaryFile(suffix=".so", delete=False) as f:
         f.write(so_bytes)
         f.flush()
-        return ctypes.CDLL(f.name)
+        lib = ctypes.CDLL(f.name)
+    # Safe to unlink once dlopen has succeeded: the loaded library stays mapped via the
+    # process's own reference, the inode just loses its last directory entry. Keeps a
+    # long-lived runner from accumulating one temp file per distinct kernel it ever sees.
+    try:
+        os.unlink(f.name)
+    except OSError:
+        pass
+    _SO_CACHE[digest] = lib
+    return lib
 
 
 def _run_indicator(so_bytes: bytes, candles_ipc: bytes, params_json: str) -> bytes:

@@ -131,6 +131,43 @@ trust as any other code you run — see [Security model](#security-model).
 
 ---
 
+## Compiled C++ kernels
+
+`CppIndicator(cpp_code, so_bytes, **params)` carries a compiled `.so` and runs through
+`CppRunnerPool` (see the executor table above) — the sandboxed path for performance-
+critical or genuinely untrusted compute. The runner (`_docker/runner/runner_worker.py`)
+caches loaded libraries by a hash of their bytes, not a name you supply: identical
+`.so` bytes from two different `CppIndicator` instances (or two different strategies)
+skip the tempfile-write + `dlopen`/ELF-relocation cost on every call after the first,
+automatically, with no coordination needed between callers — you always just pass the
+same bytes, the runner notices they've been seen before.
+
+To reuse the same compiled kernel by name across your own strategy code, keep a small
+registry and point `CppIndicator(so_bytes=...)` at it — reusing `get_builtin_registry()`,
+the same env-var-driven lookup the [Aggregation](#aggregation) section below uses for
+named builtins:
+
+```python
+# myapp/kernels.py
+KERNELS = {
+    "fast_rsi": open("kernels/fast_rsi.so", "rb").read(),
+}
+```
+
+```bash
+export TRADINGKIT_KERNELS_MODULE=myapp.kernels
+```
+
+```python
+from tradingkit.core.plugin_registry import get_builtin_registry
+from tradingkit import CppIndicator
+
+kernels = get_builtin_registry("TRADINGKIT_KERNELS_MODULE", "KERNELS")
+rsi = CppIndicator(cpp_code="...", so_bytes=kernels["fast_rsi"], period=14)
+```
+
+---
+
 ## Security model
 
 tradingkit executes plugin code by design — that's the product. Two things are worth

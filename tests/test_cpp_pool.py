@@ -130,6 +130,29 @@ async def test_subprocess_launcher_pool_reuses_workers(so_bytes, ohlcv_df):
         await pool.stop()
 
 
+async def test_subprocess_launcher_caches_loaded_so_by_content_hash(so_bytes, ohlcv_df):
+    """runner_worker.py's _load_so caches by sha256(so_bytes), not a caller-supplied
+    name -- two calls with identical bytes must dlopen/tempfile-write only once. This
+    doesn't just re-check correctness (test_subprocess_launcher_pool_reuses_workers
+    already does that) -- it inspects the runner's own log to prove the *caching*
+    actually engaged: call 1 -> miss, call 2 -> hit, not two misses that happen to both
+    produce the right answer."""
+    launcher = SubprocessRunnerLauncher()
+    pool = CppRunnerPool(launcher=launcher, pool_size=1)
+    await pool.start()
+    try:
+        r1 = await pool.run(so_bytes, ohlcv_df, params={})
+        r2 = await pool.run(so_bytes, ohlcv_df, params={})
+        assert list(r1) == list(r2) == [21.0, 41.0, 61.0]
+    finally:
+        procs = list(launcher._procs)  # stop() clears launcher._procs -- grab refs first
+        await pool.stop()
+
+    stderr = (await procs[0].stderr.read()).decode(errors="replace")
+    assert stderr.count("so cache miss") == 1, stderr
+    assert stderr.count("so cache hit") == 1, stderr
+
+
 async def test_auto_launcher_falls_back_to_subprocess_without_docker(monkeypatch):
     """auto_launcher() must not raise even when the `docker` package is missing/unreachable."""
     import builtins
