@@ -1,6 +1,6 @@
 # tradingkit
 
-[![CI](https://github.com/mholovion/trading-framework/actions/workflows/ci.yml/badge.svg)](https://github.com/mholovion/trading-framework/actions/workflows/ci.yml)
+[![CI](https://github.com/nivolon/trading-framework/actions/workflows/ci.yml/badge.svg)](https://github.com/nivolon/trading-framework/actions/workflows/ci.yml)
 
 Async trading strategy framework built on [Polars](https://pola.rs), [ClickHouse](https://clickhouse.com),
 and pluggable executors. Write an `Indicator`/`Strategy`/`DataSource` once, then run it
@@ -24,7 +24,7 @@ Requires Python ≥3.11. `TA-Lib` needs the native library installed first (see
 For development:
 
 ```bash
-git clone https://github.com/mholovion/trading-framework.git
+git clone https://github.com/nivolon/trading-framework.git
 cd trading-framework
 pip install -e ".[dev]"
 ```
