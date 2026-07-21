@@ -84,6 +84,33 @@ def _validate_ch_arg(value: Any) -> Any:
     raise ValueError(f"Invalid Fold arg type {type(value).__name__}: {value!r}. Expected str/int/float/bool.")
 
 
+# ClickHouse aggregate functions using the "leading parameter" calling convention --
+# fn(params)(columns) -- where the params are query-time-only and NOT part of the
+# serialized aggregate state: e.g. quantile's level selects what to extract from the
+# state, so it has to be supplied again at *every* read, State or Merge alike. Verified
+# directly against a real server: quantileMerge(state) (no params) silently defaults to
+# level=0.5 instead of erroring, so getting this list right actually matters --
+# quantileMerge(0.95)(state) is the correct form.
+#
+# Everything else (sum, count, avg, sumIf, countIf, argMin, ...) uses the flat
+# convention fn(columns, extra_args...), where Merge never needs the args at all --
+# also verified directly (sumIfState(qty, cond) / sumIfMerge(state), no cond repeated).
+#
+# Best-effort list, not exhaustive: an unlisted parametric function falls through to
+# the flat convention and fails loudly with a ClickHouse syntax/type error if that's
+# wrong for it -- same trust model as the identifier validation above, add to this set
+# as needed.
+_LEADING_PARAM_FUNCTIONS = frozenset({
+    "quantile", "quantiles", "quantileExact", "quantileExactLow", "quantileExactHigh",
+    "quantileExactWeighted", "quantileTiming", "quantileTimingWeighted",
+    "quantileDeterministic", "quantileTDigest", "quantileTDigestWeighted",
+    "quantileBFloat16", "quantileInterpolatedWeighted",
+    "topK", "topKWeighted",
+    "groupArrayMovingAvg", "groupArrayMovingSum",
+    "windowFunnel", "sequenceMatch", "sequenceCount",
+})
+
+
 POLARS_TO_CH: dict[Any, str] = {
     pl.Float64: "Float64",
     pl.Float32: "Float32",
@@ -134,32 +161,55 @@ class Fold:
         return Fold(self.fn, self.field, self.ch_type, self.by,
                     self.by_ch_type, list(self.args), name)
 
+    def _args_sql(self) -> str:
+        return ", ".join(str(a) for a in self.args)
+
     def ch_agg_type(self) -> str:
         """AggregateFunction(...) DDL string for AggregatingMergeTree column."""
-        fn_part    = self.fn if not self.args else f"{self.fn}({', '.join(str(a) for a in self.args)})"
-        type_args  = [self.ch_type] + ([self.by_ch_type] if self.by_ch_type else [])
+        if self.fn in _LEADING_PARAM_FUNCTIONS:
+            fn_part   = f"{self.fn}({self._args_sql()})" if self.args else self.fn
+            type_args = [self.ch_type] + ([self.by_ch_type] if self.by_ch_type else [])
+        else:
+            fn_part = self.fn
+            # Combinator-style extra args (e.g. sumIf's condition) need a type slot of
+            # their own in the DDL. The only shape this framework produces for them is
+            # a boolean condition, which ClickHouse represents as UInt8.
+            type_args = ([self.ch_type] + ([self.by_ch_type] if self.by_ch_type else [])
+                         + ["UInt8"] * len(self.args))
         return f"AggregateFunction({fn_part}, {', '.join(type_args)})"
 
     def ch_state_expr(self, alias: str) -> str:
         """
-        MV SELECT fragment: argMinState(open, timestamp) AS open
+        MV SELECT fragment.
 
-        KNOWN LIMITATION: for parametric functions (fn with args, e.g. quantile,
-        sumIf), the combinator suffix is placed after the argument list --
-        "quantile(0.95)State(price)" -- which ClickHouse rejects; the correct form
-        is "quantileState(0.95)(price)". Argument-less functions (sum, count, avg,
-        min, max, ...) are unaffected and covered by real-server integration tests.
-        See README.md's Aggregation section for the full note. Not fixed yet.
+        Leading-parameter functions (quantile, topK, ...): argument(s) go in their own
+        parens before the column(s) -- quantileState(0.95)(price) AS alias.
+        Everything else: argMinState(open, timestamp) AS open, sumIfState(qty, cond).
         """
-        fn_part  = self.fn if not self.args else f"{self.fn}({', '.join(str(a) for a in self.args)})"
         col_args = self.field if not self.by else f"{self.field}, {self.by}"
-        return f"{fn_part}State({col_args}) AS {alias}"
+        if self.fn in _LEADING_PARAM_FUNCTIONS:
+            params = f"({self._args_sql()})" if self.args else ""
+            return f"{self.fn}State{params}({col_args}) AS {alias}"
+        all_args = col_args if not self.args else f"{col_args}, {self._args_sql()}"
+        return f"{self.fn}State({all_args}) AS {alias}"
 
     def ch_merge_expr(self, col: str) -> str:
-        """Query SELECT fragment: argMinMerge(open) AS open. Same combinator-placement
-        limitation for parametric functions as ch_state_expr above."""
-        fn_part = self.fn if not self.args else f"{self.fn}({', '.join(str(a) for a in self.args)})"
-        return f"{fn_part}Merge({col}) AS {col}"
+        """
+        Query SELECT fragment.
+
+        Leading-parameter functions need the same argument(s) supplied again here --
+        verified against a real server that the state does NOT retain them (e.g.
+        quantile's level chooses what to extract from the state at read time, so
+        quantileMerge(state) with no level silently defaults to the median instead of
+        erroring): quantileMerge(0.95)(state) AS alias.
+        Everything else never needs the args repeated: argMinMerge(open) AS open,
+        sumIfMerge(state) AS state -- the condition was already applied when the state
+        was built.
+        """
+        if self.fn in _LEADING_PARAM_FUNCTIONS:
+            params = f"({self._args_sql()})" if self.args else ""
+            return f"{self.fn}Merge{params}({col}) AS {col}"
+        return f"{self.fn}Merge({col}) AS {col}"
 
 
 @dataclass

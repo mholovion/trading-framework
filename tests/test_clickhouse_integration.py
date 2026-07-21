@@ -102,6 +102,60 @@ async def test_agg_table_and_materialized_view(db, table_name):
     assert by_bucket.get(60) == pytest.approx(7.0)  # rows at t=60,90 -> bucket 60
 
 
+async def test_agg_table_with_leading_param_function(db, table_name):
+    """quantile-family functions use a different ClickHouse calling convention than
+    sum/count/etc: the parameter isn't part of the serialized state, so it has to be
+    supplied again at Merge time too (quantileMerge(0.95)(state), not
+    quantileMerge(state) -- the latter silently defaults to the median instead of
+    erroring, which is exactly the kind of wrong-not-failing bug mocks can't catch)."""
+    import polars as pl
+
+    await db.ensure_raw_table(table_name, {"timestamp": pl.Int64, "price": pl.Float64})
+    df = pl.DataFrame({
+        "timestamp": [0, 1, 2, 3, 4],
+        "price":     [1.0, 2.0, 3.0, 4.0, 5.0],
+    })
+    await db.insert_unit_batch(table_name, df, exchange="test_ex", symbol="TEST")
+    await db.flush()
+
+    folds = [Fold("quantileExact", "price", "Float64", args=[0.95]).alias("q95")]
+    await db.ensure_agg_table(table_name, 60, folds)
+    await db.ensure_mv(table_name, 60, folds)
+    await db.backfill_agg(table_name, 60, folds)
+
+    rows = await db.query_agg(table_name, 60, folds, exchange="test_ex", symbol="TEST")
+    by_bucket = {r["bucket"]: r["q95"] for r in rows}
+    # quantileExact(0.95) of [1,2,3,4,5] -- if Merge silently dropped to the default
+    # level (0.5, the median) this would read 3.0 instead.
+    assert by_bucket.get(0) == pytest.approx(5.0)
+
+
+async def test_agg_table_with_combinator_function(db, table_name):
+    """sumIf/countIf-style combinator functions use yet another calling convention:
+    the extra arg (the condition) sits alongside the column in one paren list, and --
+    unlike quantile -- Merge needs no arg at all, since the condition was already
+    applied when the state was built."""
+    import polars as pl
+
+    await db.ensure_raw_table(table_name, {"timestamp": pl.Int64, "qty": pl.Float64, "side": pl.Int64})
+    df = pl.DataFrame({
+        "timestamp": [0, 1, 2, 3, 4],
+        "qty":       [10.0, 5.0, 20.0, 0.0, 0.0],
+        "side":      [1, 0, 1, 0, 0],
+    })
+    await db.insert_unit_batch(table_name, df, exchange="test_ex", symbol="TEST")
+    await db.flush()
+
+    folds = [Fold("sumIf", "qty", "Float64", args=["side = 1"]).alias("sum_side1")]
+    await db.ensure_agg_table(table_name, 60, folds)
+    await db.ensure_mv(table_name, 60, folds)
+    await db.backfill_agg(table_name, 60, folds)
+
+    rows = await db.query_agg(table_name, 60, folds, exchange="test_ex", symbol="TEST")
+    by_bucket = {r["bucket"]: r["sum_side1"] for r in rows}
+    assert by_bucket.get(0) == pytest.approx(30.0)  # rows where side=1: 10 + 20
+
+
 async def test_connections_crud_over_authenticated_http(db):
     """Exercises ensure_connections_table/upsert/list/delete over the HTTP path with the
     Basic Auth header this session added -- proves it actually authenticates against a

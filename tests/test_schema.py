@@ -51,6 +51,35 @@ def test_quantile_and_sumif_accept_args(unit):
     assert s.args == ["side = 1"]
 
 
+def test_leading_param_function_sql_repeats_args_in_state_and_merge(unit):
+    """quantile-family: args form their own leading parens, separate from the column(s)
+    -- and, unlike combinator functions, Merge needs them too (verified against a real
+    server: the state doesn't retain the level, so a bare quantileMerge(state) silently
+    computes the median instead of erroring)."""
+    q = unit.price.quantileExact(0.95).alias("q95")
+    assert q.ch_agg_type() == "AggregateFunction(quantileExact(0.95), Float64)"
+    assert q.ch_state_expr("q95") == "quantileExactState(0.95)(price) AS q95"
+    assert q.ch_merge_expr("q95") == "quantileExactMerge(0.95)(q95) AS q95"
+
+
+def test_combinator_function_sql_keeps_args_flat_and_drops_them_in_merge(unit):
+    """sumIf-family: args sit alongside the column in one flat paren list, and Merge
+    drops them entirely -- the condition was already applied when the state was built."""
+    s = unit.qty.sumIf("side = 1").alias("sum_side1")
+    assert s.ch_agg_type() == "AggregateFunction(sumIf, Float64, UInt8)"
+    assert s.ch_state_expr("sum_side1") == "sumIfState(qty, side = 1) AS sum_side1"
+    assert s.ch_merge_expr("sum_side1") == "sumIfMerge(sum_side1) AS sum_side1"
+
+
+def test_argument_less_function_sql_unaffected(unit):
+    """Baseline: sum/count/avg/... (the overwhelmingly common case) must generate
+    exactly what they did before this fix -- no leading-parens, no dropped args."""
+    f = unit.price.sum().alias("total")
+    assert f.ch_agg_type() == "AggregateFunction(sum, Float64)"
+    assert f.ch_state_expr("total") == "sumState(price) AS total"
+    assert f.ch_merge_expr("total") == "sumMerge(total) AS total"
+
+
 def test_compute_returns_pyfold(unit):
     pf = unit.price.compute(pl.col("price") * 2)
     assert isinstance(pf, PyFold)
