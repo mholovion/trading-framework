@@ -5,7 +5,7 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
-## [0.1.1] - Unreleased
+## [0.1.1] - 2026-07-25
 
 ### Fixed
 - `Signal.is_buy` / `Signal.is_sell` were referenced by `PipelineResult.trades` but never
@@ -25,6 +25,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   call.
 
 ### Changed
+- **License changed from MIT to [Business Source License 1.1](LICENSE)**, converting
+  automatically to Apache License 2.0 on 2030-07-25 (or sooner, per version — see the
+  license text). Free for effectively all use, including internal commercial use; the
+  one thing it excludes is offering `tradingkit` as a competing hosted/managed
+  backtesting or charting service. This is **not retroactive** — v0.1.0 remains
+  available under MIT under its original terms; only v0.1.1 and later are BUSL-1.1.
 - CI (`ruff check .`) was silently exposed to drift: an unbounded `ruff>=0.4` dev dependency
   meant a newer ruff release could expand its default rule set and fail CI on old code with
   no corresponding change. Pinned to `ruff>=0.4,<0.17` and cleaned up ~180 pre-existing

@@ -321,4 +321,10 @@ pytest tests/test_cpp_pool.py
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+[Business Source License 1.1](LICENSE) — source-available, not OSI-approved "open
+source." Free for effectively everything, including internal commercial use; the one
+thing it excludes is offering `tradingkit` (or a product mostly built from it) to third
+parties as a hosted/managed backtesting or charting platform that competes with a paid
+product from the author. Converts automatically to Apache License 2.0 on 2030-07-25 (or
+sooner per-version — see the license text). For a license exception, contact
+holovin.maksym@gmail.com.
