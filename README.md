@@ -75,6 +75,13 @@ async def main() -> None:
 asyncio.run(main())
 ```
 
+The snippet above is deliberately minimal — synthetic CSV data, `BacktestRunner` only. For
+a complete, runnable project (a real `DataSource` over WebSocket, a custom indicator next
+to a built-in one, and a `Strategy` combining both — the *same* code run unchanged against
+both historical data and a live stream via `Pipeline`), see
+[tradingkit-example](https://github.com/nivolon/tradingkit-example). Its CI tracks this
+repo's `main` branch directly, so it also doubles as a downstream regression check.
+
 ---
 
 ## Architecture
