@@ -16,8 +16,8 @@ class LiveFeed:
     def __init__(self, db: Any = None, logger: logging.Logger | None = None):
         self._db  = db
         self._log = logger or logging.getLogger("LiveFeed")
-        # key: (symbol, timeframe) → list[asyncio.Queue]
-        self._subs: dict[tuple[str, str], list[asyncio.Queue]] = {}
+        # key: (exchange, symbol, timeframe) → list[asyncio.Queue]
+        self._subs: dict[tuple[str, str, str], list[asyncio.Queue]] = {}
 
     async def initialize(self) -> None:
         self._log.info("LiveFeed ready (pub-sub mode)")
@@ -29,9 +29,9 @@ class LiveFeed:
     # Called by DataCollector workers                                      #
     # ------------------------------------------------------------------ #
 
-    def publish(self, symbol: str, timeframe: str, candle: dict) -> None:
+    def publish(self, exchange: str, symbol: str, timeframe: str, candle: dict) -> None:
         """Broadcast a candle dict to all WS subscribers for this stream."""
-        key    = (symbol.upper(), timeframe)
+        key    = (exchange.lower(), symbol.upper(), timeframe)
         queues = self._subs.get(key, [])
         if not queues:
             return
@@ -61,7 +61,7 @@ class LiveFeed:
         self, exchange: str, symbol: str, timeframe: str
     ) -> asyncio.Queue:
         """Return a Queue that will receive live candle dicts."""
-        key: tuple[str, str] = (symbol.upper(), timeframe)
+        key: tuple[str, str, str] = (exchange.lower(), symbol.upper(), timeframe)
         q: asyncio.Queue = asyncio.Queue(maxsize=100)
         self._subs.setdefault(key, []).append(q)
         self._log.debug(f"LiveFeed: subscribed {exchange}/{symbol}/{timeframe}")
@@ -70,7 +70,7 @@ class LiveFeed:
     def unsubscribe(
         self, exchange: str, symbol: str, timeframe: str, q: asyncio.Queue
     ) -> None:
-        key = (symbol.upper(), timeframe)
+        key = (exchange.lower(), symbol.upper(), timeframe)
         lst = self._subs.get(key, [])
         try:
             lst.remove(q)

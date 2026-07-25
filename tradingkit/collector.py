@@ -255,7 +255,7 @@ class _ConnectionWorker:
                 await self._ensure_tables(df)
                 await self._db.insert_unit_batch(self._table, df, self._exchange, self._symbol)
                 if self._live_feed is not None:
-                    self._live_feed.publish(self._symbol, self._timeframe, row)
+                    self._live_feed.publish(self._exchange, self._symbol, self._timeframe, row)
         except asyncio.CancelledError:
             raise
         except Exception as e:
