@@ -321,9 +321,9 @@ def load_aggregation_script(name: str, code: str | None = None) -> AggregationSc
 
 
 __all__ = [
-    "AggregationContext",
-    "AggregationWorker",
-    "AggregationScript",
     "BUILTIN_AGGREGATIONS",
+    "AggregationContext",
+    "AggregationScript",
+    "AggregationWorker",
     "load_aggregation_script",
 ]

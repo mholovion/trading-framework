@@ -16,7 +16,7 @@ import json
 import logging
 import time
 from datetime import datetime
-from typing import Any
+from typing import Any, Self
 
 from tradingkit.core.clickhouse import ClickHouseManager
 from tradingkit.source import ConnectionScriptSource
@@ -186,7 +186,7 @@ class _ConnectionWorker:
     # Table setup                                                          #
     # ------------------------------------------------------------------ #
 
-    async def _ensure_tables(self, df: "Any") -> None:
+    async def _ensure_tables(self, df: Any) -> None:
         """Idempotent DDL: create raw table + agg tables + MVs on first insert."""
         if self._tables_ready:
             return
@@ -403,9 +403,7 @@ class _ConnectionWorker:
         self._last_request = now
 
     def _parse_start_ts(self) -> int:
-        raw = int(datetime.fromisoformat(
-            self._start_date.replace("Z", "+00:00")
-        ).timestamp())
+        raw = int(datetime.fromisoformat(self._start_date).timestamp())
         iv = self._unit_interval_s
         period_start = (raw // iv) * iv
         return period_start + iv if period_start < raw else period_start
@@ -442,7 +440,7 @@ class DataCollector:
     def __init__(
         self,
         db:        ClickHouseManager,
-        live_feed: "Any | None" = None,
+        live_feed: Any | None = None,
         *,
         concurrency:        int = _CONCURRENCY,
         gap_interval:       int = _GAP_INTERVAL,
@@ -454,15 +452,15 @@ class DataCollector:
     ) -> None:
         self._db        = db
         self._live_feed = live_feed
-        self._timing = dict(
-            concurrency=concurrency,
-            gap_interval=gap_interval,
-            health_interval=health_interval,
-            reconnect_cooldown=reconnect_cooldown,
-            inflight_ttl=inflight_ttl,
-            max_batch=max_batch,
-            max_time_gap=max_time_gap,
-        )
+        self._timing = {
+            "concurrency": concurrency,
+            "gap_interval": gap_interval,
+            "health_interval": health_interval,
+            "reconnect_cooldown": reconnect_cooldown,
+            "inflight_ttl": inflight_ttl,
+            "max_batch": max_batch,
+            "max_time_gap": max_time_gap,
+        }
         self._workers:      dict[str, _ConnectionWorker] = {}
         self._worker_tasks: dict[str, asyncio.Task]      = {}
 
@@ -521,11 +519,11 @@ class DataCollector:
         """Return progress dict for all workers."""
         return {name: worker.progress for name, worker in self._workers.items()}
 
-    async def __aenter__(self) -> "DataCollector":
+    async def __aenter__(self) -> Self:
         await self.start()
         return self
 
-    async def __aexit__(self, *_: Any) -> None:
+    async def __aexit__(self, *_: object) -> None:
         await self.stop()
 
     async def _start_connection(self, conn: dict) -> None:

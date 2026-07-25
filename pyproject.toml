@@ -39,7 +39,11 @@ Repository = "https://github.com/nivolon/trading-framework"
 Issues = "https://github.com/nivolon/trading-framework/issues"
 
 [project.optional-dependencies]
-dev = ["pytest>=8", "pytest-asyncio>=0.23", "mypy>=1.9", "ruff>=0.4"]
+# ruff has repeatedly expanded its *default* rule set across 0.x minor releases (not just
+# added opt-in rules) -- an unbounded ruff>=0.4 means CI silently starts enforcing new
+# categories on old code the day a newer ruff resolves, with no code change to explain the
+# failure. Capped to the range verified clean; bump deliberately, not implicitly.
+dev = ["pytest>=8", "pytest-asyncio>=0.23", "mypy>=1.9", "ruff>=0.4,<0.17"]
 cpp = ["docker>=7.0.0"]
 
 [project.scripts]
@@ -64,10 +68,28 @@ line-length = 100
 target-version = "py311"
 
 [tool.ruff.lint]
-# E702 (semicolon-joined statements) is a deliberate, consistent style throughout the
-# ClickHouse query-building methods: `if x is not None: where += "..."; params["k"] = x`
-# keeps each optional filter to one line. Not a formatting slip — leave it alone.
-ignore = ["E702"]
+ignore = [
+    # E702 (semicolon-joined statements) is a deliberate, consistent style throughout the
+    # ClickHouse query-building methods: `if x is not None: where += "..."; params["k"] = x`
+    # keeps each optional filter to one line. Not a formatting slip — leave it alone.
+    "E702",
+    # BLE001/S110 (blind except / try-except-pass): worker loops, best-effort cleanup, and
+    # dynamic script execution (Script*/Cpp* plugins run arbitrary user code via exec()) all
+    # deliberately catch Exception broadly so one bad indicator/strategy/connection can't
+    # take down a long-running process. Narrowing these would be wrong, not incomplete.
+    "BLE001",
+    "S110",
+    # RUF022 (__all__ not sorted): __all__ lists are hand-grouped by category with comments
+    # (# Indicator, # Strategy, # Source, ...) documenting the public API's shape -- forcing
+    # alphabetical order would destroy that grouping for no readability gain.
+    "RUF022",
+]
+
+[tool.ruff.lint.per-file-ignores]
+# B018 (useless expression): `with pytest.raises(AttributeError): sig.nonexistent` is the
+# standard idiom for asserting a dynamic __getattr__ raises -- the attribute access *is*
+# the assertion, assigning it to a throwaway variable would add nothing.
+"tests/*" = ["B018"]
 
 [tool.mypy]
 python_version = "3.11"

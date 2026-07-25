@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from functools import partial
 from pathlib import Path
 
 from tradingkit.executor.launchers.base import RunnerLauncher
@@ -110,7 +111,7 @@ class DockerRunnerLauncher(RunnerLauncher):
         for c in self._containers:
             try:
                 await asyncio.get_event_loop().run_in_executor(
-                    None, lambda: c.stop(timeout=5)
+                    None, partial(c.stop, timeout=5)
                 )
             except Exception as exc:
                 logger.warning("Failed to stop container %s: %s", c.short_id, exc)

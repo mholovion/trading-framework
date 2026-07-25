@@ -55,7 +55,7 @@ def fake_ch_http():
     """
     Patches aiohttp.ClientSession so ClickHouseManager._execute() never touches the
     network. Yields the FakeChSession instance so tests can inspect .calls (recorded
-    SQL bodies) and pre-seed .​_responses with FakeChResponse for SELECT queries.
+    SQL bodies) and pre-seed .\u200b_responses with FakeChResponse for SELECT queries.
     """
     session = FakeChSession()
     with patch("aiohttp.ClientSession", return_value=session):

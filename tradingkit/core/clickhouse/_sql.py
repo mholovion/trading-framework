@@ -106,16 +106,17 @@ class _SqlMixin:
             url += f"&{key}={val}"
         headers = {"Authorization": _basic_auth_header(self.user, self.password)}
         try:
-            async with _aiohttp.ClientSession() as sess:
-                async with sess.post(url, data=post_sql.encode(), headers=headers) as resp:
-                    if resp.status != 200:
-                        body = await resp.text()
-                        logger.error(f"ClickHouse error HTTP {resp.status}: {body[:300]}")
-                        return []
-                    if is_select:
-                        result = await resp.json(content_type=None)
-                        return result.get("data", [])
+            async with _aiohttp.ClientSession() as sess, sess.post(
+                url, data=post_sql.encode(), headers=headers
+            ) as resp:
+                if resp.status != 200:
+                    body = await resp.text()
+                    logger.error(f"ClickHouse error HTTP {resp.status}: {body[:300]}")
                     return []
+                if is_select:
+                    result = await resp.json(content_type=None)
+                    return result.get("data", [])
+                return []
         except Exception as e:
             logger.error(f"ClickHouse query error: {e}")
             return []

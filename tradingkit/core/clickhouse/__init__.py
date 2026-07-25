@@ -12,15 +12,15 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Any, Optional
+from typing import Any
 
 from tradingkit.core.clickhouse._candles import _CandlesMixin, _to_ch_interval
 from tradingkit.core.clickhouse._connections import _ConnectionsMixin
 from tradingkit.core.clickhouse._indicators_signals import _IndicatorsSignalsMixin
 from tradingkit.core.clickhouse._plugin_library import _PluginLibraryMixin
 from tradingkit.core.clickhouse._sql import (
-    _SqlMixin,
     _basic_auth_header,
+    _SqlMixin,
     _validate_identifier,
     _validates_identifiers,
 )
@@ -71,7 +71,7 @@ class ClickHouseManager(
         self._lock = asyncio.Lock()
         self._indicator_buffer: list[tuple] = []
         self._signal_buffer:    list[tuple] = []
-        self._flush_task: Optional[asyncio.Task] = None
+        self._flush_task: asyncio.Task | None = None
 
     # ------------------------------------------------------------------ #
     # Lifecycle                                                            #
@@ -126,11 +126,11 @@ def create_clickhouse_manager(config: dict | None = None) -> ClickHouseManager:
 
 
 __all__ = [
-    "ClickHouseManager",
     "TIMEFRAME_SECONDS",
-    "create_clickhouse_manager",
+    "ClickHouseManager",
+    "_basic_auth_header",
     "_to_ch_interval",
     "_validate_identifier",
     "_validates_identifiers",
-    "_basic_auth_header",
+    "create_clickhouse_manager",
 ]

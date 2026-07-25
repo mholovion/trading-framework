@@ -24,7 +24,8 @@ PyFold — Python/Polars aggregation (explicit RAM, no MV; use only when CH cann
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, field as dc_field
+from dataclasses import dataclass
+from dataclasses import field as dc_field
 from typing import Any
 
 import polars as pl
@@ -157,7 +158,7 @@ class Fold:
         for a in self.args:
             _validate_ch_arg(a)
 
-    def alias(self, name: str) -> "Fold":
+    def alias(self, name: str) -> Fold:
         return Fold(self.fn, self.field, self.ch_type, self.by,
                     self.by_ch_type, list(self.args), name)
 
@@ -223,7 +224,7 @@ class PyFold:
     expr:   pl.Expr
     _alias: str | None = None
 
-    def alias(self, name: str) -> "PyFold":
+    def alias(self, name: str) -> PyFold:
         return PyFold(self.expr.alias(name), name)
 
 
@@ -289,7 +290,7 @@ class Field:
         """argMax(field, timestamp) — last value in the bucket by time."""
         return Fold("argMax", self.name, self.ch_type, "timestamp", "UInt64")
 
-    def mul(self, other: "Field") -> _ArithProxy:
+    def mul(self, other: Field) -> _ArithProxy:
         """Arithmetic proxy: enables sumState(price * qty) in MV."""
         return _ArithProxy(f"{self.name} * {other.name}", self.ch_type)
 
@@ -333,10 +334,10 @@ class DataUnit:
 
 __all__ = [
     "POLARS_TO_CH",
-    "Fold",
-    "PyFold",
     "AggSpec",
     "DataUnit",
     "Field",
+    "Fold",
+    "PyFold",
     "_ArithProxy",
 ]

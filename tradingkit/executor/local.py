@@ -5,15 +5,16 @@ No isolation. Use for trusted/internal plugins or development.
 """
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 import polars as pl
-from typing import Optional, TYPE_CHECKING
 
 from tradingkit.executor.base import PluginExecutor
 
 if TYPE_CHECKING:
     from tradingkit.indicator import Indicator, IndicatorContext
-    from tradingkit.strategy import Strategy, BarContext, Signal
     from tradingkit.source import DataSource
+    from tradingkit.strategy import BarContext, Signal, Strategy
 
 
 class LocalExecutor(PluginExecutor):
@@ -29,8 +30,8 @@ class LocalExecutor(PluginExecutor):
 
     async def compute_indicator(
         self,
-        indicator: "Indicator",
-        ctx: "IndicatorContext",
+        indicator: Indicator,
+        ctx: IndicatorContext,
     ) -> pl.Series:
         from tradingkit.indicator import CppIndicator
         if isinstance(indicator, CppIndicator):
@@ -44,14 +45,14 @@ class LocalExecutor(PluginExecutor):
 
     async def process_strategy_bar(
         self,
-        strategy: "Strategy",
-        bar: "BarContext",
-    ) -> Optional["Signal"]:
+        strategy: Strategy,
+        bar: BarContext,
+    ) -> Signal | None:
         return await strategy.on_bar(bar)
 
     async def fetch_source_data(
         self,
-        source: "DataSource",
+        source: DataSource,
         symbol: str,
         timeframe_seconds: int,
         start_ts: int,

@@ -8,7 +8,6 @@ import pytest
 from tradingkit.collector import DataCollector, _ConnectionWorker, _GapBatcher
 from tradingkit.source import ConnectionScriptSource
 
-
 # ------------------------------------------------------------------ #
 # _GapBatcher — pure logic                                             #
 # ------------------------------------------------------------------ #

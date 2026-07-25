@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """
 C++ indicator runner — Unix socket server.
 

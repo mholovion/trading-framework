@@ -1,6 +1,6 @@
-from tradingkit.executor.launchers.base       import RunnerLauncher
+from tradingkit.executor.launchers.base import RunnerLauncher
+from tradingkit.executor.launchers.docker_ import DockerRunnerLauncher
 from tradingkit.executor.launchers.subprocess_ import SubprocessRunnerLauncher
-from tradingkit.executor.launchers.docker_     import DockerRunnerLauncher
 
 
 def auto_launcher() -> RunnerLauncher:
@@ -18,8 +18,8 @@ def auto_launcher() -> RunnerLauncher:
 
 
 __all__ = [
+    "DockerRunnerLauncher",
     "RunnerLauncher",
     "SubprocessRunnerLauncher",
-    "DockerRunnerLauncher",
     "auto_launcher",
 ]

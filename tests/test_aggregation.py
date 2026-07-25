@@ -5,7 +5,6 @@ import pytest
 
 from tradingkit.aggregation import AggregationContext, AggregationScript, load_aggregation_script
 
-
 CH_MV_SCRIPT = '''
 SOURCE_TABLE = "candles"
 

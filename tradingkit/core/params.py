@@ -33,7 +33,7 @@ class IndicatorParams:
         period: int = 14,
         source: str = "close",
         **extra,
-    ) -> "IndicatorParams":
+    ) -> IndicatorParams:
         """Convenience constructor that accepts extra kwargs and sorts them."""
         return cls(
             type=type,
@@ -44,7 +44,7 @@ class IndicatorParams:
         )
 
     @classmethod
-    def from_dict(cls, d: dict) -> "IndicatorParams":
+    def from_dict(cls, d: dict) -> IndicatorParams:
         standard = {"type", "timeframe", "period", "source"}
         extra = {k: v for k, v in d.items() if k not in standard}
         return cls.create(
@@ -85,7 +85,7 @@ class IndicatorParams:
         return json.dumps(self.to_dict(), sort_keys=True)
 
     @classmethod
-    def from_json(cls, s: str) -> "IndicatorParams":
+    def from_json(cls, s: str) -> IndicatorParams:
         return cls.from_dict(json.loads(s))
 
     # ------------------------------------------------------------------ #
@@ -116,11 +116,11 @@ class StrategyParams:
     # ------------------------------------------------------------------ #
 
     @classmethod
-    def create(cls, type: str, **kwargs) -> "StrategyParams":
+    def create(cls, type: str, **kwargs) -> StrategyParams:
         return cls(type=type, extra=tuple(sorted(kwargs.items())))
 
     @classmethod
-    def from_dict(cls, d: dict) -> "StrategyParams":
+    def from_dict(cls, d: dict) -> StrategyParams:
         type_ = d.pop("type") if "type" in d else d.pop("strategy_type")
         return cls.create(type_, **d)
 
@@ -141,7 +141,7 @@ class StrategyParams:
         return json.dumps(self.to_dict(), sort_keys=True)
 
     @classmethod
-    def from_json(cls, s: str) -> "StrategyParams":
+    def from_json(cls, s: str) -> StrategyParams:
         return cls.from_dict(json.loads(s))
 
     def display_name(self) -> str:

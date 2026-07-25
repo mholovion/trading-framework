@@ -30,41 +30,46 @@ Writing a strategy:
 """
 
 # ── Indicator ────────────────────────────────────────────────────────
-from tradingkit.indicator import (
-    Indicator,
-    IndicatorContext,
-    IndicatorDeclaration,
-    ScriptIndicator,
-    JitIndicator,
-    CppIndicator,
-    ta_indicator,
-    load_indicator_plugin,
+# ── Aggregation ──────────────────────────────────────────────────────
+from tradingkit.aggregation import (
+    AggregationContext,
+    AggregationScript,
+    AggregationWorker,
+    load_aggregation_script,
 )
 
-# ── Strategy ─────────────────────────────────────────────────────────
-from tradingkit.strategy import (
-    Strategy,
-    Signal,
-    BarContext,
-    ScriptStrategy,
-    CppStrategyPlugin,
-    load_strategy_plugin,
-    StrategyPlugin,
+# ── Backtest ─────────────────────────────────────────────────────────
+from tradingkit.backtest import (
+    BacktestResult,
+    BacktestRunner,
 )
 
-# ── Source ───────────────────────────────────────────────────────────
-from tradingkit.source import (
-    DataSource,
-    ScriptSource,
-)
+# ── Collector ────────────────────────────────────────────────────────
+from tradingkit.collector import DataCollector
+
+# ── Application layer ────────────────────────────────────────────────
+from tradingkit.context import TradingContext
+from tradingkit.core.clickhouse import ClickHouseManager
+from tradingkit.core.resolver import DependencyResolver
+from tradingkit.core.timeframe import parse_timeframe
 
 # ── Executor ─────────────────────────────────────────────────────────
 from tradingkit.executor import (
-    PluginExecutor,
-    LocalExecutor,
-    SubprocessExecutor,
-    RemoteExecutor,
     CppRunnerPool,
+    LocalExecutor,
+    PluginExecutor,
+    RemoteExecutor,
+    SubprocessExecutor,
+)
+from tradingkit.indicator import (
+    CppIndicator,
+    Indicator,
+    IndicatorContext,
+    IndicatorDeclaration,
+    JitIndicator,
+    ScriptIndicator,
+    load_indicator_plugin,
+    ta_indicator,
 )
 
 # ── Pipeline ─────────────────────────────────────────────────────────
@@ -73,29 +78,22 @@ from tradingkit.pipeline import (
     PipelineResult,
 )
 
-# ── Backtest ─────────────────────────────────────────────────────────
-from tradingkit.backtest import (
-    BacktestRunner,
-    BacktestResult,
+# ── Source ───────────────────────────────────────────────────────────
+from tradingkit.source import (
+    DataSource,
+    ScriptSource,
 )
 
-# ── Collector ────────────────────────────────────────────────────────
-from tradingkit.collector import DataCollector
-
-# ── Aggregation ──────────────────────────────────────────────────────
-from tradingkit.aggregation import (
-    AggregationContext,
-    AggregationWorker,
-    AggregationScript,
-    load_aggregation_script,
+# ── Strategy ─────────────────────────────────────────────────────────
+from tradingkit.strategy import (
+    BarContext,
+    CppStrategyPlugin,
+    ScriptStrategy,
+    Signal,
+    Strategy,
+    StrategyPlugin,
+    load_strategy_plugin,
 )
-
-# ── Application layer ────────────────────────────────────────────────
-from tradingkit.context import TradingContext
-from tradingkit.core.clickhouse import ClickHouseManager
-from tradingkit.core.resolver import DependencyResolver
-from tradingkit.core.timeframe import parse_timeframe
-
 
 __version__ = "0.1.0"
 

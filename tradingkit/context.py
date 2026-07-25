@@ -31,8 +31,8 @@ class TradingContext:
     Accessed in every route via:
         tk: TradingContext = request.app["tk"]
     """
-    db:       "ClickHouseManager"
-    resolver: "DependencyResolver"
-    executor: "PluginExecutor"
+    db:       ClickHouseManager
+    resolver: DependencyResolver
+    executor: PluginExecutor
     config:   dict = field(default_factory=dict)
     extra:    dict = field(default_factory=dict)

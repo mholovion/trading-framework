@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import logging
 import pickle
-from typing import Any, Optional, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import polars as pl
 import pyarrow as pa
@@ -27,8 +27,8 @@ from tradingkit.executor.base import PluginExecutor
 
 if TYPE_CHECKING:
     from tradingkit.indicator import Indicator, IndicatorContext
-    from tradingkit.strategy import Strategy, BarContext, Signal
     from tradingkit.source import DataSource
+    from tradingkit.strategy import BarContext, Signal, Strategy
 
 logger = logging.getLogger(__name__)
 
@@ -109,8 +109,8 @@ class RemoteExecutor(PluginExecutor):
 
     async def compute_indicator(
         self,
-        indicator: "Indicator",
-        ctx: "IndicatorContext",
+        indicator: Indicator,
+        ctx: IndicatorContext,
     ) -> pl.Series:
         import numpy as np
         payload = {
@@ -126,9 +126,9 @@ class RemoteExecutor(PluginExecutor):
 
     async def process_strategy_bar(
         self,
-        strategy: "Strategy",
-        bar: "BarContext",
-    ) -> Optional["Signal"]:
+        strategy: Strategy,
+        bar: BarContext,
+    ) -> Signal | None:
         payload = {
             "strategy": pickle.dumps(strategy),
             "bar":      pickle.dumps(bar),
@@ -144,7 +144,7 @@ class RemoteExecutor(PluginExecutor):
 
     async def fetch_source_data(
         self,
-        source: "DataSource",
+        source: DataSource,
         symbol: str,
         timeframe_seconds: int,
         start_ts: int,

@@ -80,11 +80,9 @@ class BacktestResult:
         max_dd = 0.0
         for t in sorted(self.trades, key=lambda x: x.entry_ts):
             cumulative += t.pnl
-            if cumulative > peak:
-                peak = cumulative
+            peak = max(peak, cumulative)
             dd = peak - cumulative
-            if dd > max_dd:
-                max_dd = dd
+            max_dd = max(max_dd, dd)
         return max_dd
 
     def summary(self) -> dict:

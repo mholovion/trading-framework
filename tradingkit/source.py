@@ -7,11 +7,12 @@ Usage:
 """
 from __future__ import annotations
 
+from abc import ABC, abstractmethod
+from collections.abc import AsyncIterator
+from typing import Any
+
 import numpy as np
 import polars as pl
-from abc import ABC, abstractmethod
-from typing import Any, AsyncIterator
-
 
 # ------------------------------------------------------------------ #
 # DataSource ABC                                                       #
@@ -209,7 +210,7 @@ class ConnectionScriptSource:
         timeframe: str,
         start_ts: int,
         end_ts: int,
-    ) -> "pl.DataFrame | list[dict]":
+    ) -> pl.DataFrame | list[dict]:
         """Execute script's historical() and return pl.DataFrame or list[dict]."""
         cfg = self.merged_config()
         namespace: dict = {}
@@ -253,7 +254,7 @@ class ConnectionScriptSource:
 
 
 __all__ = [
+    "ConnectionScriptSource",
     "DataSource",
     "ScriptSource",
-    "ConnectionScriptSource",
 ]

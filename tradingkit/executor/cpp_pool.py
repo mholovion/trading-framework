@@ -34,6 +34,7 @@ import numpy as np
 
 if TYPE_CHECKING:
     import polars as pl
+
     from tradingkit.executor.launchers.base import RunnerLauncher
 
 logger = logging.getLogger(__name__)
@@ -51,12 +52,12 @@ class CppRunnerPool:
 
     def __init__(
         self,
-        launcher: "RunnerLauncher | None" = None,
+        launcher: RunnerLauncher | None = None,
         pool_size: int = 2,
     ) -> None:
         self._launcher_arg = launcher
         self._pool_size    = pool_size
-        self._launcher: "RunnerLauncher | None" = None
+        self._launcher: RunnerLauncher | None = None
         self._pool: asyncio.Queue = asyncio.Queue()
 
     # ------------------------------------------------------------------ #
@@ -118,7 +119,7 @@ class CppRunnerPool:
     async def run(
         self,
         so_bytes: bytes,
-        df: "pl.DataFrame",
+        df: pl.DataFrame,
         params: dict,
     ) -> np.ndarray:
         """Send compiled .so + OHLCV data to a runner, return float64 array."""

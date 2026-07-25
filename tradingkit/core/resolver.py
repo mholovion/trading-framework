@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import logging
+import math
 from bisect import bisect_right
-from typing import Any, Callable, Optional, TYPE_CHECKING
+from collections.abc import Callable
+from typing import TYPE_CHECKING, Any
 
-from tradingkit.core.clickhouse import ClickHouseManager, TIMEFRAME_SECONDS
+from tradingkit.core.clickhouse import TIMEFRAME_SECONDS, ClickHouseManager
 from tradingkit.core.params import IndicatorParams, StrategyParams
 
 if TYPE_CHECKING:
@@ -13,7 +15,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 _CACHE_FRESH_RATIO = 0.98
-ProgressCb = Optional[Callable[[dict], Any]]
+ProgressCb = Callable[[dict], Any] | None
 
 
 class DependencyResolver:
@@ -37,7 +39,7 @@ class DependencyResolver:
     def __init__(
         self,
         db: ClickHouseManager,
-        executor: Optional["PluginExecutor"] = None,
+        executor: PluginExecutor | None = None,
     ) -> None:
         self.db = db
         self.executor = executor
@@ -162,9 +164,12 @@ class DependencyResolver:
         val_list      = result_series.to_list()
 
         for ts, val in zip(ts_list[warmup:], val_list[warmup:]):
-            if val is not None and val == val:  # not NaN
-                if max_ind_ts is None or ts > max_ind_ts:
-                    values.append((ts, float(val)))
+            if (
+                val is not None
+                and not math.isnan(val)
+                and (max_ind_ts is None or ts > max_ind_ts)
+            ):
+                values.append((ts, float(val)))
 
         if values:
             if progress_cb:
@@ -210,8 +215,8 @@ class DependencyResolver:
         self, exchange: str, symbol: str, src: str, dst: str
     ) -> None:
         """Aggregate OHLCV rows via ClickHouse INSERT...SELECT."""
-        from tradingkit.core.timeframe import parse_timeframe
         from tradingkit.core.clickhouse import _to_ch_interval
+        from tradingkit.core.timeframe import parse_timeframe
 
         parse_timeframe(src)  # validates src is a well-formed timeframe string; raises if not
         dst_seconds = parse_timeframe(dst)

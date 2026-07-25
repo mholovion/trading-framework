@@ -8,12 +8,11 @@ from __future__ import annotations
 
 import ast as _ast
 import re as _re
+from abc import ABC, abstractmethod
+from typing import Any, ClassVar
 
 import numpy as np
 import polars as pl
-from abc import ABC, abstractmethod
-from typing import Any
-
 
 # ------------------------------------------------------------------ #
 # TA namespace                                                          #
@@ -30,7 +29,7 @@ class _TA:
     Single-output → np.ndarray; multi-output (MACD, BB...) → tuple[np.ndarray, ...]
     Backward-compat: period=/length= kwargs are remapped to timeperiod=.
     """
-    _primitives: dict[str, Any] = {}
+    _primitives: ClassVar[dict[str, Any]] = {}
 
     @classmethod
     def register_primitive(cls, name: str, fn: Any) -> None:
@@ -159,7 +158,7 @@ class IndicatorDeclaration:
     def __set_name__(self, owner: type, name: str) -> None:
         self.name = name
 
-    def build(self) -> "Indicator":
+    def build(self) -> Indicator:
         return self.indicator_cls(**self.params)
 
     def __repr__(self) -> str:
@@ -322,7 +321,7 @@ def _make_talib_indicator(
     period: int,
     source: str,
     extra: dict,
-) -> "Indicator":
+) -> Indicator:
     """Create an Indicator that delegates to TA-Lib (via ctx.ta namespace)."""
 
     class _TalibIndicator(Indicator):
@@ -331,7 +330,7 @@ def _make_talib_indicator(
         _s  = source
         _ex = extra
 
-        def compute(self, ctx: "IndicatorContext") -> np.ndarray:
+        def compute(self, ctx: IndicatorContext) -> np.ndarray:
             src = getattr(ctx.np, self._s, ctx.np.close)
             result = getattr(ctx.ta, self._tn)(src, length=self._p, **self._ex)
             if isinstance(result, tuple):
@@ -344,7 +343,7 @@ def _make_talib_indicator(
     return _TalibIndicator(period=period, source=source)
 
 
-def load_indicator_plugin(type_: str, params_dict: dict) -> "Indicator":
+def load_indicator_plugin(type_: str, params_dict: dict) -> Indicator:
     """
     Create an Indicator from a type string and params dict.
 
@@ -414,6 +413,7 @@ class JitIndicator(Indicator):
 
     def _build_jit(self, cols: tuple) -> Any:
         import ast as _ast2
+
         import numba
 
         tree = _ast2.parse(self._code, mode="exec")

@@ -93,7 +93,7 @@ class _UnitTablesMixin:
     async def insert_unit_batch(
         self,
         table_name: str,
-        df: "pl.DataFrame",
+        df: pl.DataFrame,
         exchange: str,
         symbol: str,
     ) -> None:
@@ -190,7 +190,7 @@ class _UnitTablesMixin:
         symbol: str | None = None,
         start_ts: int | None = None,
         end_ts:   int | None = None,
-    ) -> "pl.DataFrame":
+    ) -> pl.DataFrame:
         """
         Generic SELECT * FROM any raw unit table with exchange/symbol/time filters.
         Returns a Polars DataFrame. Used by AggregationContext.query().

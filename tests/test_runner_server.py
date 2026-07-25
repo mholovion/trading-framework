@@ -37,28 +37,27 @@ async def server_without_token():
 async def test_health_requires_no_token(server_with_token):
     import aiohttp
     _, base_url = server_with_token
-    async with aiohttp.ClientSession() as sess:
-        async with sess.get(f"{base_url}health") as resp:
-            assert resp.status == 200
+    async with aiohttp.ClientSession() as sess, sess.get(f"{base_url}health") as resp:
+        assert resp.status == 200
 
 
 async def test_compute_without_token_is_rejected(server_with_token):
     import aiohttp
     _, base_url = server_with_token
-    async with aiohttp.ClientSession() as sess:
-        async with sess.post(f"{base_url}compute/indicator", data=b"whatever") as resp:
-            assert resp.status == 401
+    async with aiohttp.ClientSession() as sess, sess.post(
+        f"{base_url}compute/indicator", data=b"whatever"
+    ) as resp:
+        assert resp.status == 401
 
 
 async def test_compute_with_wrong_token_is_rejected(server_with_token):
     import aiohttp
     _, base_url = server_with_token
-    async with aiohttp.ClientSession() as sess:
-        async with sess.post(
-            f"{base_url}compute/indicator", data=b"whatever",
-            headers={"Authorization": "Bearer wrong-token"},
-        ) as resp:
-            assert resp.status == 401
+    async with aiohttp.ClientSession() as sess, sess.post(
+        f"{base_url}compute/indicator", data=b"whatever",
+        headers={"Authorization": "Bearer wrong-token"},
+    ) as resp:
+        assert resp.status == 401
 
 
 async def test_compute_indicator_with_correct_token_computes(server_with_token):
@@ -70,13 +69,12 @@ async def test_compute_indicator_with_correct_token_computes(server_with_token):
         "indicator": pickle.dumps(ind),
         "data": _arrow_bytes(df),
     })
-    async with aiohttp.ClientSession() as sess:
-        async with sess.post(
-            f"{base_url}compute/indicator", data=payload,
-            headers={"Authorization": f"Bearer {TOKEN}"},
-        ) as resp:
-            assert resp.status == 200
-            result = pickle.loads(await resp.read())
+    async with aiohttp.ClientSession() as sess, sess.post(
+        f"{base_url}compute/indicator", data=payload,
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    ) as resp:
+        assert resp.status == 200
+        result = pickle.loads(await resp.read())
     import numpy as np
     values = np.frombuffer(result["values"], dtype=np.float64)
     assert list(values) == [3.0, 6.0, 9.0]
@@ -92,12 +90,11 @@ async def test_malicious_payload_rejected_even_with_valid_token(server_with_toke
             return (os.system, (f"echo pwned > {marker}",))
 
     payload = pickle.dumps({"indicator": pickle.dumps(Evil()), "data": b""})
-    async with aiohttp.ClientSession() as sess:
-        async with sess.post(
-            f"{base_url}compute/indicator", data=payload,
-            headers={"Authorization": f"Bearer {TOKEN}"},
-        ) as resp:
-            assert resp.status == 400
+    async with aiohttp.ClientSession() as sess, sess.post(
+        f"{base_url}compute/indicator", data=payload,
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    ) as resp:
+        assert resp.status == 400
     assert not marker.exists()
 
 
@@ -105,9 +102,8 @@ async def test_no_token_configured_allows_request(server_without_token):
     """Loopback-only, no-token dev mode: requests are accepted (see server.py fail-closed startup gate)."""
     import aiohttp
     _, base_url = server_without_token
-    async with aiohttp.ClientSession() as sess:
-        async with sess.get(f"{base_url}health") as resp:
-            assert resp.status == 200
+    async with aiohttp.ClientSession() as sess, sess.get(f"{base_url}health") as resp:
+        assert resp.status == 200
 
 
 def _arrow_bytes(df: pl.DataFrame) -> bytes:
@@ -139,7 +135,7 @@ def test_is_loopback(host, expected):
 def test_cli_refuses_nonloopback_without_allow_remote():
     proc = subprocess.run(
         [sys.executable, "-m", "tradingkit.runner.server", "--host", "0.0.0.0"],
-        capture_output=True, text=True, timeout=10,
+        capture_output=True, text=True, timeout=10, check=False,
     )
     assert proc.returncode != 0
     assert "--allow-remote" in proc.stderr
@@ -148,7 +144,7 @@ def test_cli_refuses_nonloopback_without_allow_remote():
 def test_cli_refuses_allow_remote_without_token():
     proc = subprocess.run(
         [sys.executable, "-m", "tradingkit.runner.server", "--host", "0.0.0.0", "--allow-remote"],
-        capture_output=True, text=True, timeout=10,
+        capture_output=True, text=True, timeout=10, check=False,
     )
     assert proc.returncode != 0
     assert "token" in proc.stderr.lower()

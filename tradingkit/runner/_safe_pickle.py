@@ -24,7 +24,8 @@ from __future__ import annotations
 
 import io
 import pickle
-from typing import Any, Iterable
+from collections.abc import Iterable
+from typing import Any
 
 # ---------------------------------------------------------------------------
 # TRUSTED_DATA_PLANE_PACKAGES — the biggest lever in this file.
@@ -91,4 +92,4 @@ def loads(data: bytes, *, trusted_modules: Iterable[str] = ()) -> Any:
     return _RunnerUnpickler(io.BytesIO(data), trusted_modules=trusted_modules).load()
 
 
-__all__ = ["loads", "UnsafeUnpicklingError", "TRUSTED_DATA_PLANE_PACKAGES"]
+__all__ = ["TRUSTED_DATA_PLANE_PACKAGES", "UnsafeUnpicklingError", "loads"]

@@ -17,15 +17,16 @@ Usage:
 from __future__ import annotations
 
 import logging
+from collections.abc import AsyncIterator
 from dataclasses import dataclass
-from typing import Any, AsyncIterator, Optional
+from typing import Any
 
 import polars as pl
 
-from tradingkit.indicator import Indicator, IndicatorContext
-from tradingkit.strategy import Strategy, Signal, BarContext
-from tradingkit.source import DataSource
 from tradingkit.core.timeframe import parse_timeframe
+from tradingkit.indicator import Indicator, IndicatorContext
+from tradingkit.source import DataSource
+from tradingkit.strategy import BarContext, Signal, Strategy
 
 logger = logging.getLogger(__name__)
 
@@ -55,7 +56,7 @@ class PipelineResult:
     def trades(self) -> list[Trade]:
         """Pair BUY/SELL signals into trades."""
         trades: list[Trade] = []
-        open_trade: Optional[dict] = None
+        open_trade: dict | None = None
         for sig in sorted(self.signals, key=lambda s: s.timestamp or 0):
             if sig.is_buy and open_trade is None:
                 open_trade = {"ts": sig.timestamp, "price": sig.price or 0.0}
@@ -213,8 +214,8 @@ class Pipeline:
 
     def to_dict(self) -> dict:
         """Serialize to JSON-compatible dict for ClickHouse storage."""
-        import pickle
         import base64
+        import pickle
         return {
             "name":       self.name,
             "source":     base64.b64encode(pickle.dumps(self.source)).decode(),
@@ -226,7 +227,7 @@ class Pipeline:
         }
 
     @classmethod
-    def from_dict(cls, data: dict, executor: Any = None) -> "Pipeline":
+    def from_dict(cls, data: dict, executor: Any = None) -> Pipeline:
         """
         Deserialize from dict (loaded from ClickHouse plugin_library).
 
@@ -236,6 +237,7 @@ class Pipeline:
         a hardcoded trust boundary, so it gets the same treatment as network input.
         """
         import base64
+
         from tradingkit.runner import _safe_pickle
         return cls(
             name=data["name"],

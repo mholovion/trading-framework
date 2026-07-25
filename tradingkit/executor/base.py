@@ -3,15 +3,16 @@ tradingkit.executor.base — PluginExecutor ABC.
 """
 from __future__ import annotations
 
-import polars as pl
 from abc import ABC, abstractmethod
-from typing import Optional, TYPE_CHECKING
+from typing import TYPE_CHECKING, Self
+
+import polars as pl
 
 if TYPE_CHECKING:
-    from tradingkit.indicator import Indicator, IndicatorContext
-    from tradingkit.strategy import Strategy, BarContext, Signal
-    from tradingkit.source import DataSource
     from tradingkit.executor.cpp_pool import CppRunnerPool
+    from tradingkit.indicator import Indicator, IndicatorContext
+    from tradingkit.source import DataSource
+    from tradingkit.strategy import BarContext, Signal, Strategy
 
 
 class PluginExecutor(ABC):
@@ -28,13 +29,13 @@ class PluginExecutor(ABC):
     """
 
     #: Optional C++ runner pool — set to enable CppIndicator execution.
-    cpp_pool: Optional["CppRunnerPool"] = None
+    cpp_pool: CppRunnerPool | None = None
 
     @abstractmethod
     async def compute_indicator(
         self,
-        indicator: "Indicator",
-        ctx: "IndicatorContext",
+        indicator: Indicator,
+        ctx: IndicatorContext,
     ) -> pl.Series:
         """
         Run indicator.compute(ctx) and return pl.Series of Float64.
@@ -45,9 +46,9 @@ class PluginExecutor(ABC):
     @abstractmethod
     async def process_strategy_bar(
         self,
-        strategy: "Strategy",
-        bar: "BarContext",
-    ) -> Optional["Signal"]:
+        strategy: Strategy,
+        bar: BarContext,
+    ) -> Signal | None:
         """
         Call strategy.on_bar(bar) and return Signal or None.
         """
@@ -56,7 +57,7 @@ class PluginExecutor(ABC):
     @abstractmethod
     async def fetch_source_data(
         self,
-        source: "DataSource",
+        source: DataSource,
         symbol: str,
         timeframe_seconds: int,
         start_ts: int,
@@ -74,7 +75,7 @@ class PluginExecutor(ABC):
     async def stop(self) -> None:
         """Optional: release executor resources."""
 
-    async def __aenter__(self) -> "PluginExecutor":
+    async def __aenter__(self) -> Self:
         await self.start()
         return self
 

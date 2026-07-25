@@ -7,7 +7,13 @@ import numpy as np
 import polars as pl
 import pytest
 
-from tradingkit.indicator import CppIndicator, Indicator, IndicatorContext, JitIndicator, ScriptIndicator
+from tradingkit.indicator import (
+    CppIndicator,
+    Indicator,
+    IndicatorContext,
+    JitIndicator,
+    ScriptIndicator,
+)
 
 
 @pytest.fixture

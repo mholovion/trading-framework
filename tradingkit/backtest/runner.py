@@ -19,9 +19,9 @@ from typing import Any
 
 import polars as pl
 
-from tradingkit.indicator import Indicator, IndicatorContext
-from tradingkit.strategy import Strategy, BarContext, Signal
 from tradingkit.backtest.result import BacktestResult, Trade
+from tradingkit.indicator import Indicator, IndicatorContext
+from tradingkit.strategy import BarContext, Signal, Strategy
 
 logger = logging.getLogger(__name__)
 

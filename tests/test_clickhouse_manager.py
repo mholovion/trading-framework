@@ -3,8 +3,12 @@ from __future__ import annotations
 
 import polars as pl
 
-from tradingkit.core.clickhouse import ClickHouseManager, _basic_auth_header, create_clickhouse_manager
 from tests.conftest import FakeChResponse
+from tradingkit.core.clickhouse import (
+    ClickHouseManager,
+    _basic_auth_header,
+    create_clickhouse_manager,
+)
 
 
 def _sql(fake_ch_http, index: int = -1) -> str:
