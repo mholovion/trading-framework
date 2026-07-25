@@ -183,7 +183,7 @@ class AggregationWorker:
 
         schema = dict(zip(df.columns, df.dtypes))
         await self._db.ensure_raw_table(output_table, schema)
-        await self._db.insert_unit_batch(output_table, df, exchange, "")
+        await self._db.insert_unit_batch(output_table, df, exchange, "", "")
         await self._db.flush()
         logger.info(
             f"AggregationWorker: {name!r} → {output_table} stored {len(rows)} rows"

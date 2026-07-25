@@ -77,6 +77,43 @@ async def test_raw_table_roundtrip(db, table_name):
     assert sorted(result["value"].to_list()) == [10.0, 20.0, 30.0]
 
 
+async def test_insert_unit_batch_stores_timeframe(db, table_name):
+    """Regression: insert_unit_batch() had no timeframe parameter at all, so every row
+    landed with ClickHouse's zero-default (empty string) regardless of what the caller's
+    actual timeframe was -- found via a real deployment where this broke timeframe-filtered
+    chart queries for a symbol whose collector was still actively writing."""
+    import polars as pl
+
+    await db.ensure_raw_table(table_name, {"timestamp": pl.Int64, "close": pl.Float64})
+    df = pl.DataFrame({"timestamp": [1000], "close": [100.0]})
+    await db.insert_unit_batch(table_name, df, exchange="whitebit", symbol="SOL_USDT", timeframe="1m")
+    await db.flush()
+
+    rows = await db._execute(f"SELECT timeframe FROM {table_name}")
+    assert [r[0] for r in rows] == ["1m"]
+
+
+async def test_ensure_raw_table_migrates_existing_table_missing_timeframe_column(db, table_name):
+    """Regression: ensure_raw_table() only ran CREATE TABLE IF NOT EXISTS, so a table
+    created before timeframe existed in the DDL would never gain the column -- any insert
+    passing a real timeframe against it would fail with an unknown-column error."""
+    import polars as pl
+
+    # Simulates a table that predates this fix -- exact old-style DDL, no timeframe column.
+    await db._execute(
+        f"CREATE TABLE {table_name} (exchange String, symbol String, timestamp Int64, "
+        f"close Float64) ENGINE = ReplacingMergeTree ORDER BY (exchange, symbol, timestamp)"
+    )
+
+    await db.ensure_raw_table(table_name, {"timestamp": pl.Int64, "close": pl.Float64})
+    df = pl.DataFrame({"timestamp": [1000], "close": [100.0]})
+    await db.insert_unit_batch(table_name, df, exchange="whitebit", symbol="SOL_USDT", timeframe="5m")
+    await db.flush()
+
+    rows = await db._execute(f"SELECT timeframe FROM {table_name}")
+    assert [r[0] for r in rows] == ["5m"]
+
+
 async def test_agg_table_and_materialized_view(db, table_name):
     """Proves ensure_agg_table/ensure_mv/backfill_agg produce SQL ClickHouse actually
     accepts and that the MV really aggregates -- the mocked tests can't tell the

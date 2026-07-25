@@ -23,11 +23,16 @@ class _UnitTablesMixin:
         from tradingkit.schema import POLARS_TO_CH
         for col in schema:
             _validate_identifier(col, kind="column name")
-        cols = ["exchange String", "symbol String"]
+        cols = ["exchange String", "symbol String", "timeframe String"]
         cols += [f"{col} {POLARS_TO_CH.get(dtype, 'String')}" for col, dtype in schema.items()]
         await self._execute(
             f"CREATE TABLE IF NOT EXISTS {table_name} ({', '.join(cols)})"
             " ENGINE = ReplacingMergeTree ORDER BY (exchange, symbol, timestamp)"
+        )
+        # Tables created before `timeframe` existed here won't get it from CREATE ... IF NOT
+        # EXISTS alone -- ADD COLUMN IF NOT EXISTS is the idempotent migration for those.
+        await self._execute(
+            f"ALTER TABLE {table_name} ADD COLUMN IF NOT EXISTS timeframe String DEFAULT ''"
         )
 
     @_validates_identifiers("raw_table")
@@ -96,15 +101,16 @@ class _UnitTablesMixin:
         df: pl.DataFrame,
         exchange: str,
         symbol: str,
+        timeframe: str = "",
     ) -> None:
         """Bulk-insert a Polars DataFrame into a raw unit table."""
         if df.is_empty():
             return
         rows   = df.to_dicts()
         tuples = tuple(
-            (exchange, symbol, *[r[c] for c in df.columns]) for r in rows
+            (exchange, symbol, timeframe, *[r[c] for c in df.columns]) for r in rows
         )
-        await self._bulk_insert(table_name, ["exchange", "symbol"] + df.columns, tuples)
+        await self._bulk_insert(table_name, ["exchange", "symbol", "timeframe"] + df.columns, tuples)
 
     @_validates_identifiers("table_name")
     async def get_unit_range(

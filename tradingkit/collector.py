@@ -253,7 +253,9 @@ class _ConnectionWorker:
                 self._last_row_ts = time.time()
                 df = pl.DataFrame([row])
                 await self._ensure_tables(df)
-                await self._db.insert_unit_batch(self._table, df, self._exchange, self._symbol)
+                await self._db.insert_unit_batch(
+                    self._table, df, self._exchange, self._symbol, self._timeframe
+                )
                 if self._live_feed is not None:
                     self._live_feed.publish(self._exchange, self._symbol, self._timeframe, row)
         except asyncio.CancelledError:
@@ -362,7 +364,9 @@ class _ConnectionWorker:
                 df = pl.DataFrame(rows)
             row_count = len(df)
             await self._ensure_tables(df)
-            await self._db.insert_unit_batch(self._table, df, self._exchange, self._symbol)
+            await self._db.insert_unit_batch(
+                self._table, df, self._exchange, self._symbol, self._timeframe
+            )
             await self._db.flush()
             if total > 1:
                 self._log.debug(
