@@ -32,10 +32,15 @@ Writing a strategy:
 # ── Indicator ────────────────────────────────────────────────────────
 # ── Aggregation ──────────────────────────────────────────────────────
 from tradingkit.aggregation import (
+    Aggregation,
     AggregationContext,
     AggregationScript,
     AggregationWorker,
-    load_aggregation_script,
+    ScriptAggregation,
+    SourceRef,
+    load_aggregation_plugin,
+    query_aggregation,
+    setup_aggregation,
 )
 
 # ── Backtest ─────────────────────────────────────────────────────────
@@ -133,10 +138,15 @@ __all__ = [
     # Collector
     "DataCollector",
     # Aggregation
+    "Aggregation",
     "AggregationContext",
     "AggregationWorker",
     "AggregationScript",
-    "load_aggregation_script",
+    "ScriptAggregation",
+    "SourceRef",
+    "load_aggregation_plugin",
+    "query_aggregation",
+    "setup_aggregation",
     # Application
     "TradingContext",
     "ClickHouseManager",

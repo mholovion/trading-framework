@@ -193,6 +193,105 @@ async def test_agg_table_with_combinator_function(db, table_name):
     assert by_bucket.get(0) == pytest.approx(30.0)  # rows where side=1: 10 + 20
 
 
+async def test_cross_source_aggregation_out_of_order_arrival(db):
+    """The core TASK-005 mechanism: two sources arriving in different order still produce
+    a correct combined value once both are present, and never a misleading partial result
+    before that -- this is the exact scenario verified by hand while designing the gap-
+    closing two-MV approach, now a permanent regression test."""
+    import uuid
+
+    from tradingkit.aggregation import Aggregation, SourceRef, query_aggregation, setup_aggregation
+
+    suffix = uuid.uuid4().hex[:8]
+    btc_table = f"test_btc_{suffix}"
+    eth_table = f"test_eth_{suffix}"
+    output_table = f"test_spread_{suffix}"
+
+    await db._execute(f"CREATE TABLE {btc_table} (timestamp UInt64, close Float64) ENGINE=MergeTree ORDER BY timestamp")
+    await db._execute(f"CREATE TABLE {eth_table} (timestamp UInt64, close Float64) ENGINE=MergeTree ORDER BY timestamp")
+
+    class BtcEthSpread(Aggregation):
+        OUTPUT_TABLE = output_table
+        btc = SourceRef(btc_table, field="close")
+        eth = SourceRef(eth_table, field="close")
+
+        def combine_sql(self) -> str:
+            return "btc - eth"
+
+    agg = BtcEthSpread()
+    await setup_aggregation(db, agg)
+
+    # BTC arrives first -- must not surface as a (wrong) complete row.
+    await db._execute(f"INSERT INTO {btc_table} VALUES (1000, 50000.0)")
+    rows = await query_aggregation(db, agg, 0, 9999)
+    assert rows == []
+
+    # ETH arrives late (simulates a backfilled gap) -- now it must complete correctly.
+    await db._execute(f"INSERT INTO {eth_table} VALUES (1000, 3000.0)")
+    rows = await query_aggregation(db, agg, 0, 9999)
+    assert rows == [{"timestamp": 1000, "value": 47000.0}]
+
+
+async def test_cross_source_aggregation_combine_python_fallback(db):
+    """combine() (Python fallback) driven end-to-end through AggregationWorker._run_one(),
+    the same code path a real background worker uses -- not just calling combine() directly."""
+    import uuid
+
+    from tradingkit.aggregation import Aggregation, AggregationWorker
+
+    suffix = uuid.uuid4().hex[:8]
+    output_table = f"test_py_agg_{suffix}"
+
+    class FixedValue(Aggregation):
+        OUTPUT_TABLE = output_table
+
+        async def combine(self, ctx, start_ts, end_ts):
+            return [{"timestamp": start_ts, "value": 42.0}]
+
+    worker = AggregationWorker(db)
+    agg = FixedValue()
+    await worker._run_one({"namespace": "default", "name": "fixed", "exchange": "test_ex", "agg": agg})
+
+    result = await db.fetch_from_unit_table(output_table, exchange="test_ex")
+    assert result["value"].to_list() == [42.0]
+
+
+async def test_script_aggregation_equivalent_to_class(db):
+    """The dynamic path (ScriptAggregation, what a SaaS UI editor would create) must behave
+    identically to hand-writing the same thing as an Aggregation subclass -- not just in
+    theory (same combine_sql() interface) but against a real server end to end. Data is
+    inserted BEFORE setup_aggregation() runs, deliberately -- this doubles as the
+    regression test for backfill_cross_source(): Materialized Views aren't retroactive,
+    so without a backfill step this would return [] despite both sources having data."""
+    import uuid
+
+    from tradingkit.aggregation import load_aggregation_plugin, query_aggregation, setup_aggregation
+
+    suffix = uuid.uuid4().hex[:8]
+    btc_table = f"test_btc_{suffix}"
+    eth_table = f"test_eth_{suffix}"
+    output_table = f"test_spread_{suffix}"
+
+    await db._execute(f"CREATE TABLE {btc_table} (timestamp UInt64, close Float64) ENGINE=MergeTree ORDER BY timestamp")
+    await db._execute(f"CREATE TABLE {eth_table} (timestamp UInt64, close Float64) ENGINE=MergeTree ORDER BY timestamp")
+    await db._execute(f"INSERT INTO {btc_table} VALUES (1000, 50000.0)")
+    await db._execute(f"INSERT INTO {eth_table} VALUES (1000, 3000.0)")
+
+    code = f'''
+OUTPUT_TABLE = "{output_table}"
+SOURCES = {{
+    "btc": SourceRef("{btc_table}", field="close"),
+    "eth": SourceRef("{eth_table}", field="close"),
+}}
+COMBINE_SQL = "btc - eth"
+'''
+    agg = load_aggregation_plugin("__script__", {"_code": code})
+    await setup_aggregation(db, agg)
+
+    rows = await query_aggregation(db, agg, 0, 9999)
+    assert rows == [{"timestamp": 1000, "value": 47000.0}]
+
+
 async def test_connections_crud_over_authenticated_http(db):
     """Exercises ensure_connections_table/upsert/list/delete over the HTTP path with the
     Basic Auth header this session added -- proves it actually authenticates against a

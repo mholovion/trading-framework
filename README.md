@@ -221,45 +221,83 @@ C++ runner containers on first use. Treat access to the host running `tradingkit
 
 ## Aggregation
 
-`AggregationContext.query(table, symbol=..., start_ts=..., end_ts=...)` reads *any*
-ClickHouse table by name — tradingkit ships no built-in aggregation scripts
-(`BUILTIN_AGGREGATIONS` is an empty registry by default), but the mechanism covers a
-few patterns directly:
-
-- **Cross-symbol** — query two symbols, combine them (spread, ratio, custom index).
-- **Cross-timeframe** — query a pre-aggregated table for a different bucket size (e.g.
-  `candles_3600s` for 1h buckets) and project it onto a lower-timeframe series; this is
-  the exact case `query()`'s own docstring calls out.
-- **Cross-source** — the same `query()` call works on any table regardless of what wrote
-  it, so combining two independently-ingested tables (e.g. spot price + a funding-rate
-  feed) uses the same call shape. There's no bundled example of this one yet — you write
-  the join.
+Combine data across sources/symbols (spread, ratio, custom index) with `Aggregation` —
+declare which sources you need, then either a SQL expression (fast, ClickHouse-native,
+zero Python) or a Python function (flexible, for logic SQL can't express):
 
 ```python
-OUTPUT_TABLE  = "spread_btc_eth"
-OUTPUT_SCHEMA = {"timestamp": "Int64", "spread": "Float64", "ratio": "Float64"}
-INTERVAL_S    = 60
+from tradingkit.aggregation import Aggregation, SourceRef, setup_aggregation, query_aggregation
 
-async def aggregate(ctx, start_ts: int, end_ts: int) -> list[dict]:
-    btc = await ctx.query("candles", symbol="BTC_USDT", start_ts=start_ts, end_ts=end_ts)
-    eth = await ctx.query("candles", symbol="ETH_USDT", start_ts=start_ts, end_ts=end_ts)
-    joined = btc.join(eth, on="timestamp", suffix="_eth")
-    return [
-        {"timestamp": int(r["timestamp"]), "spread": r["close"] - r["close_eth"],
-         "ratio": r["close"] / r["close_eth"] if r["close_eth"] else 0.0}
-        for r in joined.iter_rows(named=True)
-    ]
+class BtcEthSpread(Aggregation):
+    OUTPUT_TABLE = "btc_eth_spread"
+    btc = SourceRef("candles_btc_usdt", field="close")
+    eth = SourceRef("candles_eth_usdt", field="close")
+
+    def combine_sql(self) -> str:
+        return "btc - eth"
+
+agg = BtcEthSpread()
+await setup_aggregation(db, agg)                              # one-time: installs the MVs, backfills existing data
+result = await query_aggregation(db, agg, start_ts, end_ts)    # always fresh, computed at read time
 ```
 
-`AggregationWorker` polls `plugin_library` for scripts like this one (`type="aggregation"`,
-defines `aggregate()`) and runs each on `INTERVAL_S`, writing results to `OUTPUT_TABLE`.
+**`combine_sql()` (SQL-native, the fast path).** `setup_aggregation()` installs one
+Materialized View per declared source, all writing into a shared `AggregatingMergeTree`
+alignment table keyed by timestamp — every source contributes its own partial state
+independently, so arrival order never matters: a source that arrives late (even a
+backfilled gap) still correctly completes the row once it lands, verified directly
+against a real server. Rows where a source hasn't arrived yet are excluded by default
+(`only_complete=True` in `query_cross_source`) rather than surfacing a misleading `0` —
+ClickHouse's `argMaxMerge()` on an unwritten state returns the type's zero value, not
+`NULL`, unless the stored value is wrapped in `Nullable` (which `ensure_cross_source_table`
+already does — also verified directly). `setup_aggregation()` also backfills each
+source's already-existing rows on setup (`backfill_cross_source`) — MVs alone only fire
+on rows inserted *after* the MV exists, so without this a new aggregation on top of
+already-populated tables would silently have no historical data. Once installed,
+ClickHouse keeps the result live on every insert — no polling, no worker.
 
-**ClickHouse-native aggregation (`Fold`).** Separately from the Python-script path above,
-`tradingkit.core.clickhouse` also has a lower-level, ClickHouse-native aggregation path
-(`Fold` in `tradingkit/schema.py`, plus `ensure_agg_table`/`ensure_mv`/`backfill_agg`/
-`query_agg`), backed by `AggregatingMergeTree` tables and materialized views using
-ClickHouse's `-State`/`-Merge` combinators. `Fold` covers two calling conventions,
-verified against a real server:
+**`combine(ctx, start_ts, end_ts)` (Python fallback).** For logic SQL can't express —
+rolling windows, joins beyond the declared sources, external state — override `combine()`
+instead of `combine_sql()`. Same signature and `ctx.query(table, symbol=, start_ts=,
+end_ts=)` access `AggregationContext` always had (reads *any* ClickHouse table by name).
+`AggregationWorker` drives this path on a timer (`_POLL_INTERVAL`, 60s by default) — but
+only for aggregations that actually need it: one with `combine_sql()` defined is skipped
+entirely, since ClickHouse already keeps it current.
+
+**Dynamic aggregations (`ScriptAggregation`).** For a SaaS UI editor to create new
+aggregations without a framework release, wrap a code string the same way
+`ScriptStrategy`/`ScriptIndicator` wrap strategy/indicator code:
+
+```python
+code = '''
+OUTPUT_TABLE = "btc_eth_spread"
+SOURCES = {
+    "btc": SourceRef("candles_btc_usdt", field="close"),
+    "eth": SourceRef("candles_eth_usdt", field="close"),
+}
+COMBINE_SQL = "btc - eth"
+'''
+agg = load_aggregation_plugin("__script__", {"_code": code})
+```
+
+Stored in `plugin_library` (`type="aggregation"`) exactly like strategies/indicators —
+`load_aggregation_plugin()` dispatches on a type string the same way
+`load_strategy_plugin`/`load_indicator_plugin` do: `"__script__"` for a `_code` param, or
+a name registered via `TRADINGKIT_AGGREGATIONS_MODULE` (below).
+
+**`AggregationContext.query()` directly** still works standalone for one-off/ad-hoc reads
+(e.g. a script that just wants `await ctx.query("candles", symbol="BTC_USDT", ...)`
+without going through the `Aggregation` class at all) — it's what `combine()` uses
+internally, nothing about it changed.
+
+**ClickHouse-native single-table aggregation (`Fold`).** Separate from `Aggregation`
+above — for bucketing ONE table's own rows by time (`candles` → `candles_3600s` for 1h
+buckets), see `Fold` in `tradingkit/schema.py`, plus `ensure_agg_table`/`ensure_mv`/
+`backfill_agg`/`query_agg`. `DataCollector` uses this automatically per connection via
+`aggregation(unit) -> AggSpec`-style scripts (`AggregationScript.is_ch_mv()`) — a
+different mechanism from cross-source `Aggregation` above, sharing only the same
+`plugin_library` storage (distinguished by which top-level names each script defines).
+`Fold` covers two calling conventions, verified against a real server:
 
 - Argument-less functions (`sum`, `count`, `avg`, `min`, `max`, `argMin`/`argMax` via
   `.first()`/`.last()`, ...) and combinator-style functions taking extra args alongside

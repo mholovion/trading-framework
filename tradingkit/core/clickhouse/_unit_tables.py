@@ -7,11 +7,52 @@ data flow behind AggregationContext.query() and DataCollector's per-connection t
 """
 from __future__ import annotations
 
+import re
 from typing import Any
 
 import polars as pl
 
 from tradingkit.core.clickhouse._sql import _validate_identifier, _validates_identifiers
+
+# Tokenizer for cross-source combine_sql() expressions (e.g. "btc - eth", "(btc - eth) / eth").
+# Unlike table/column identifiers (_validate_identifier, a closed grammar), this needs to
+# accept a small arithmetic language over a caller-supplied set of aliases -- validated by
+# requiring the ENTIRE string to tokenize with no gaps (a naive scan-for-danger check could
+# miss characters between matches) and every identifier-like token to be a known alias.
+_CROSS_SOURCE_EXPR_TOKEN_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*|[0-9]+\.?[0-9]*|[+\-*/()]|\s+")
+
+# Two single-character operator tokens can legally sit next to each other (the tokenizer
+# below allows it) but still spell a dangerous *pair* SQL gives special meaning to -- "--"
+# opens a line comment, "/*"/"*/" a block comment. Same class of check as schema.py's
+# _CH_ARG_DANGER_RE, applied here because this validator's per-character tokenizing would
+# otherwise wave both straight through as "two valid operators in a row".
+_CROSS_SOURCE_EXPR_DANGER_RE = re.compile(r";|--|/\*|\*/")
+
+
+def _validate_cross_source_expr(expr: str, aliases: list[str]) -> str:
+    if not isinstance(expr, str) or not expr.strip():
+        raise ValueError(f"Invalid cross-source expression: {expr!r}")
+    if _CROSS_SOURCE_EXPR_DANGER_RE.search(expr):
+        raise ValueError(f"Invalid cross-source expression {expr!r}: looks like a statement/comment injection")
+    known = set(aliases)
+    pos = 0
+    for m in _CROSS_SOURCE_EXPR_TOKEN_RE.finditer(expr):
+        if m.start() != pos:
+            raise ValueError(
+                f"Invalid cross-source expression {expr!r}: unexpected character at position {pos}"
+            )
+        pos = m.end()
+        tok = m.group()
+        if tok.isspace() or tok in "+-*/()" or re.fullmatch(r"[0-9]+\.?[0-9]*", tok):
+            continue
+        if tok not in known:
+            raise ValueError(
+                f"Invalid cross-source expression {expr!r}: unknown identifier {tok!r} "
+                f"(expected one of {sorted(known)})"
+            )
+    if pos != len(expr):
+        raise ValueError(f"Invalid cross-source expression {expr!r}: unexpected trailing content")
+    return expr
 
 
 class _UnitTablesMixin:
@@ -258,3 +299,139 @@ class _UnitTablesMixin:
         )
         cols = ["bucket"] + aliases
         return [dict(zip(cols, r)) for r in rows]
+
+    # ------------------------------------------------------------------ #
+    # Cross-source alignment (TASK-005) — backs tradingkit.aggregation.Aggregation.        #
+    # ------------------------------------------------------------------ #
+
+    @_validates_identifiers("output_table")
+    async def ensure_cross_source_table(self, output_table: str, sources: dict[str, str]) -> None:
+        """
+        CREATE TABLE IF NOT EXISTS {output_table} (AggregatingMergeTree) for cross-source
+        alignment: one Nullable(ch_type)-wrapped argMax state column per source, keyed by
+        timestamp. Nullable is load-bearing, not decorative — argMaxMerge() on a state no
+        source has written yet returns the type's zero value (0), not NULL; without it a
+        reader can't tell "this source hasn't arrived yet" from "it arrived and was 0".
+        Verified directly against a real server.
+        """
+        for alias in sources:
+            _validate_identifier(alias, kind="cross-source alias")
+        cols = ["timestamp UInt64"]
+        cols += [
+            f"{alias} AggregateFunction(argMax, Nullable({ch_type}), UInt64)"
+            for alias, ch_type in sources.items()
+        ]
+        await self._execute(
+            f"CREATE TABLE IF NOT EXISTS {output_table} ({', '.join(cols)})"
+            " ENGINE = AggregatingMergeTree ORDER BY timestamp"
+        )
+
+    @_validates_identifiers("output_table", "source_table")
+    async def ensure_cross_source_mv(
+        self,
+        output_table: str,
+        source_table: str,
+        alias: str,
+        field: str,
+        ch_type: str,
+        timestamp_col: str = "timestamp",
+    ) -> None:
+        """
+        CREATE MATERIALIZED VIEW IF NOT EXISTS mv_{source_table}_to_{output_table}_{alias}.
+        One MV per source, each writing its own partial argMax state into the SAME shared
+        output_table — not a reactive JOIN (a single MV only ever triggers on its own FROM
+        table's inserts, so it could never see a not-yet-arrived row from a different
+        source). A late insert into source_table — even a backfilled one — triggers this MV
+        and merges into the same key regardless of how late it is: gap-closing falls out of
+        AggregatingMergeTree's merge semantics, it isn't separate logic. Verified directly:
+        a late-arriving row correctly completed a previously-partial row at read time, even
+        while still sitting in a separate, unmerged physical part.
+        """
+        _validate_identifier(alias, kind="cross-source alias")
+        _validate_identifier(field, kind="column name")
+        _validate_identifier(ch_type, kind="ch_type")
+        _validate_identifier(timestamp_col, kind="column name")
+        mv_name = f"mv_{source_table}_to_{output_table}_{alias}"
+        await self._execute(
+            f"CREATE MATERIALIZED VIEW IF NOT EXISTS {mv_name} TO {output_table} AS"
+            f" SELECT {timestamp_col} AS timestamp,"
+            f" argMaxState(CAST({field} AS Nullable({ch_type})), {timestamp_col}) AS {alias}"
+            f" FROM {source_table} GROUP BY {timestamp_col}"
+        )
+
+    @_validates_identifiers("output_table", "source_table")
+    async def backfill_cross_source(
+        self,
+        output_table: str,
+        source_table: str,
+        alias: str,
+        field: str,
+        ch_type: str,
+        timestamp_col: str = "timestamp",
+    ) -> None:
+        """
+        One-time INSERT INTO {output_table} (timestamp, {alias}) SELECT ... for rows that
+        already existed in source_table before ensure_cross_source_mv() was called.
+        Materialized Views are NOT retroactive — they only fire on rows inserted after
+        the MV itself exists, so without this, setting up a new aggregation on top of
+        already-populated source tables would silently have no historical data (found via
+        a real test failure, not anticipated up front). Verified directly: a partial-column
+        INSERT naming only (timestamp, {alias}) backfills that one source's state without
+        disturbing any other source's already-written rows for the same timestamp — the
+        same partial-write shape ensure_cross_source_mv's own MV already relies on, just
+        issued once instead of continuously. Same convention as backfill_agg() for the
+        single-table Fold/bucket-aggregation path this mirrors.
+        """
+        _validate_identifier(alias, kind="cross-source alias")
+        _validate_identifier(field, kind="column name")
+        _validate_identifier(ch_type, kind="ch_type")
+        _validate_identifier(timestamp_col, kind="column name")
+        await self._execute(
+            f"INSERT INTO {output_table} (timestamp, {alias})"
+            f" SELECT {timestamp_col}, argMaxState(CAST({field} AS Nullable({ch_type})), {timestamp_col})"
+            f" FROM {source_table} GROUP BY {timestamp_col}"
+        )
+
+    @_validates_identifiers("output_table")
+    async def query_cross_source(
+        self,
+        output_table: str,
+        aliases: list[str],
+        select_expr: str,
+        start_ts: int | None = None,
+        end_ts: int | None = None,
+        only_complete: bool = True,
+    ) -> list[dict]:
+        """
+        Read a cross-source alignment table: merge each alias's partial state, apply
+        select_expr (an arithmetic expression over the aliases, e.g. "btc - eth" —
+        validated by _validate_cross_source_expr, not trusted from the caller) to the
+        merged columns. only_complete=True (default) drops rows where any source hasn't
+        arrived yet — the safe default, since a partial row's arithmetic result would
+        otherwise silently look like a real number. NULL propagates correctly through
+        +-*/, verified directly, so with only_complete=False a partial row's `value`
+        comes back NULL rather than a wrong number.
+        """
+        for alias in aliases:
+            _validate_identifier(alias, kind="cross-source alias")
+        _validate_cross_source_expr(select_expr, aliases)
+        merged = ", ".join(f"argMaxMerge({a}) AS {a}" for a in aliases)
+        where_parts = []
+        params: dict[str, Any] = {}
+        if start_ts is not None:
+            where_parts.append("timestamp >= %(st)s")
+            params["st"] = start_ts
+        if end_ts is not None:
+            where_parts.append("timestamp <= %(et)s")
+            params["et"] = end_ts
+        where = f" WHERE {' AND '.join(where_parts)}" if where_parts else ""
+        inner = f"SELECT timestamp, {merged} FROM {output_table}{where} GROUP BY timestamp"
+        outer_where = ""
+        if only_complete:
+            outer_where = " WHERE " + " AND ".join(f"{a} IS NOT NULL" for a in aliases)
+        sql = (
+            f"SELECT timestamp, ({select_expr}) AS value FROM ({inner}){outer_where}"
+            f" ORDER BY timestamp"
+        )
+        rows = await self._execute(sql, params)
+        return [{"timestamp": int(r[0]), "value": r[1]} for r in rows]

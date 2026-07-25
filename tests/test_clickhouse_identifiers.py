@@ -4,6 +4,7 @@ from __future__ import annotations
 import pytest
 
 from tradingkit.core.clickhouse import ClickHouseManager, _validate_identifier
+from tradingkit.core.clickhouse._unit_tables import _validate_cross_source_expr
 from tradingkit.schema import Fold
 
 
@@ -63,6 +64,59 @@ async def test_fold_based_methods_validate_alias_and_bucket_s(fake_ch_http):
         await db.ensure_agg_table("candles); DROP TABLE x; --", 3600, [good_fold])
     with pytest.raises((ValueError, TypeError)):
         await db.ensure_agg_table("candles", "3600); DROP TABLE x; --", [good_fold])
+
+
+async def test_cross_source_methods_validate_table_and_alias_names(fake_ch_http):
+    db = ClickHouseManager()
+    await db.ensure_cross_source_table("spread", {"btc": "Float64", "eth": "Float64"})
+    await db.ensure_cross_source_mv("spread", "candles_btc", "btc", "close", "Float64")
+    await db.backfill_cross_source("spread", "candles_btc", "btc", "close", "Float64")
+
+    with pytest.raises(ValueError):
+        await db.ensure_cross_source_table("spread); DROP TABLE x; --", {"btc": "Float64"})
+    with pytest.raises(ValueError):
+        await db.ensure_cross_source_table("spread", {"btc); DROP TABLE x; --": "Float64"})
+    with pytest.raises(ValueError):
+        await db.ensure_cross_source_mv("spread", "candles); DROP TABLE x; --", "btc", "close", "Float64")
+    with pytest.raises(ValueError):
+        await db.ensure_cross_source_mv("spread", "candles_btc", "btc", "close); DROP TABLE x; --", "Float64")
+    with pytest.raises(ValueError):
+        await db.backfill_cross_source("spread); DROP TABLE x; --", "candles_btc", "btc", "close", "Float64")
+    with pytest.raises(ValueError):
+        await db.backfill_cross_source("spread", "candles_btc", "btc); DROP TABLE x; --", "close", "Float64")
+
+
+@pytest.mark.parametrize("expr,aliases", [
+    ("btc - eth", ["btc", "eth"]),
+    ("(btc - eth) / eth", ["btc", "eth"]),
+    ("btc * 2", ["btc", "eth"]),
+    ("btc + eth + sol", ["btc", "eth", "sol"]),
+])
+def test_valid_cross_source_expressions_pass(expr, aliases):
+    assert _validate_cross_source_expr(expr, aliases) == expr
+
+
+@pytest.mark.parametrize("expr,aliases", [
+    ("btc; DROP TABLE candles; --", ["btc", "eth"]),
+    ("btc - evil_column", ["btc", "eth"]),   # not a declared alias
+    ("btc UNION SELECT 1", ["btc", "eth"]),
+    ("", ["btc", "eth"]),
+    ("btc -- eth", ["btc", "eth"]),
+    ("btc /*comment*/", ["btc", "eth"]),
+])
+def test_invalid_cross_source_expressions_rejected(expr, aliases):
+    with pytest.raises(ValueError):
+        _validate_cross_source_expr(expr, aliases)
+
+
+async def test_query_cross_source_validates_aliases_and_expr(fake_ch_http):
+    db = ClickHouseManager()
+    await db.query_cross_source("spread", ["btc", "eth"], "btc - eth", 0, 100)
+
+    with pytest.raises(ValueError):
+        await db.query_cross_source("spread", ["btc); DROP TABLE x; --"], "btc", 0, 100)
+    with pytest.raises(ValueError):
+        await db.query_cross_source("spread", ["btc", "eth"], "btc - evil_column", 0, 100)
 
 
 async def test_bulk_insert_validates_table_and_columns():
