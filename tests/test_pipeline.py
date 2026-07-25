@@ -5,13 +5,14 @@ import base64
 import os
 import pickle
 
+import polars as pl
 import pytest
 
 from tradingkit.indicator import ScriptIndicator
-from tradingkit.pipeline import Pipeline
+from tradingkit.pipeline import Pipeline, PipelineResult
 from tradingkit.runner._safe_pickle import UnsafeUnpicklingError
 from tradingkit.source import ScriptSource
-from tradingkit.strategy import ScriptStrategy
+from tradingkit.strategy import ScriptStrategy, Signal
 
 
 def _make_pipeline() -> Pipeline:
@@ -91,3 +92,38 @@ elif bar.rsi > 70:
     result = await p.run("BTC_USDT", "1m", start_ts=0, end_ts=3600)
     assert result.data.height == 60
     assert "rsi" in result.indicators
+
+
+def _signal_with_price(type_: str, timestamp: int, price: float) -> Signal:
+    sig = Signal(type_, 0.8, timestamp=timestamp)
+    sig.price = price
+    return sig
+
+
+def test_pipeline_result_trades_pairs_buy_sell_signals():
+    """Regression: .trades used sig.is_buy/is_sell, which didn't exist on Signal."""
+    signals = [
+        _signal_with_price("buy", 100, 10.0),
+        _signal_with_price("sell", 200, 12.0),
+    ]
+    result = PipelineResult(signals=signals, data=pl.DataFrame(), indicators={})
+
+    trades = result.trades
+    assert len(trades) == 1
+    trade = trades[0]
+    assert trade.side == "buy"
+    assert trade.entry_ts == 100
+    assert trade.exit_ts == 200
+    assert trade.entry_price == 10.0
+    assert trade.exit_price == 12.0
+    assert trade.pnl == pytest.approx(2.0)
+    assert trade.pnl_pct == pytest.approx(20.0)
+
+
+def test_pipeline_result_trades_ignores_unmatched_signals():
+    signals = [
+        _signal_with_price("sell", 50, 9.0),   # sell with no open trade -> ignored
+        _signal_with_price("buy", 100, 10.0),  # never closed
+    ]
+    result = PipelineResult(signals=signals, data=pl.DataFrame(), indicators={})
+    assert result.trades == []

@@ -6,16 +6,13 @@ Usage:
 """
 from __future__ import annotations
 
-import polars as pl
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Any, Optional, TYPE_CHECKING
+from typing import Any
+
+import polars as pl
 
 from tradingkit.indicator import Indicator, IndicatorDeclaration
-
-if TYPE_CHECKING:
-    pass
-
 
 # ------------------------------------------------------------------ #
 # Signal                                                               #
@@ -37,7 +34,7 @@ class Signal:
     """
     type:       str
     confidence: float
-    timestamp:  Optional[int] = None
+    timestamp:  int | None = None
     metadata:   dict = field(default_factory=dict)
 
     def __getattr__(self, name: str):
@@ -45,6 +42,14 @@ class Signal:
         if md is not None and name in md:
             return md[name]
         raise AttributeError(f"Signal has no attribute '{name}'")
+
+    @property
+    def is_buy(self) -> bool:
+        return self.type == "buy"
+
+    @property
+    def is_sell(self) -> bool:
+        return self.type == "sell"
 
     # ------------------------------------------------------------------ #
     # Serialisation                                                        #
@@ -59,7 +64,7 @@ class Signal:
         }
 
     @classmethod
-    def from_dict(cls, d: dict) -> "Signal":
+    def from_dict(cls, d: dict) -> Signal:
         return cls(
             type=d["signal_type"],
             confidence=d["confidence"],
@@ -149,7 +154,7 @@ class Strategy(ABC):
         self.parameters = self.config.get("parameters", self.config)
 
     @abstractmethod
-    async def on_bar(self, bar: BarContext) -> Optional[Signal]:
+    async def on_bar(self, bar: BarContext) -> Signal | None:
         """Process one bar. Return Signal or None (hold)."""
         ...
 
@@ -178,7 +183,7 @@ class Strategy(ABC):
         indicators_data: dict[str, Any],
         row: dict,
         signal_timestamp: int | None = None,
-    ) -> Optional[dict]:
+    ) -> dict | None:
         """Deprecated. Implement on_bar() instead."""
         return None
 
@@ -248,7 +253,7 @@ class ScriptStrategy(Strategy):
         self.__dict__.update(state)
         self._exec_ns()
 
-    async def on_bar(self, bar: BarContext) -> Optional[Signal]:
+    async def on_bar(self, bar: BarContext) -> Signal | None:
         namespace: dict[str, Any] = {
             **self._ns,
             "bar":    bar,
@@ -278,7 +283,7 @@ class ScriptStrategy(Strategy):
         row: dict,
         signal_timestamp: int | None = None,
         **_: Any,
-    ) -> Optional[dict]:
+    ) -> dict | None:
         fn = self._ns.get("process")
         if fn is None:
             return None
@@ -328,14 +333,14 @@ class CppStrategyPlugin:
     def get_required_indicators(self, params: Any = None) -> list:
         return list(self._config.get("required_indicators", []))
 
-    async def process(self, *_: Any, **__: Any) -> Optional[dict]:
+    async def process(self, *_: Any, **__: Any) -> dict | None:
         raise RuntimeError("CppStrategyPlugin must run through CppRunnerPool")
 
     async def process_batch(self, batch_data: list) -> list:
         raise RuntimeError("CppStrategyPlugin must run through CppRunnerPool")
 
 
-def load_strategy_plugin(type_: str, params_dict: dict) -> "ScriptStrategy | CppStrategyPlugin":
+def load_strategy_plugin(type_: str, params_dict: dict) -> ScriptStrategy | CppStrategyPlugin:
     """
     Create a strategy plugin from a type string and params dict.
 
@@ -370,11 +375,11 @@ def load_strategy_plugin(type_: str, params_dict: dict) -> "ScriptStrategy | Cpp
 
 
 __all__ = [
-    "Signal",
     "BarContext",
+    "CppStrategyPlugin",
+    "ScriptStrategy",
+    "Signal",
     "Strategy",
     "StrategyPlugin",
-    "ScriptStrategy",
-    "CppStrategyPlugin",
     "load_strategy_plugin",
 ]

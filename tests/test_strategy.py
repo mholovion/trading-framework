@@ -33,6 +33,21 @@ def test_signal_pickle_roundtrip():
     assert restored.reason == "overbought"
 
 
+def test_signal_is_buy_is_sell():
+    buy = Signal("buy", 0.8)
+    sell = Signal("sell", 0.8)
+    other = Signal("anomaly", 0.8)
+
+    assert buy.is_buy is True
+    assert buy.is_sell is False
+
+    assert sell.is_buy is False
+    assert sell.is_sell is True
+
+    assert other.is_buy is False
+    assert other.is_sell is False
+
+
 def test_bar_context_row_and_indicator_access():
     bar = BarContext(row={"timestamp": 1, "close": 42.0}, indicators={"rsi": 55.0})
     assert bar.close == 42.0
