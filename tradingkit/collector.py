@@ -30,6 +30,8 @@ _RECONNECT_CD     = 120
 _INFLIGHT_TTL     = 180
 _MAX_BATCH        = 1440
 _MAX_TIME_GAP     = 3600
+_MAX_GAP_INTERVAL = 3600  # backoff ceiling: retry at most once an hour once fully backed off
+_STALLED_THRESHOLD = 5    # consecutive no-progress cycles before status flips to "stalled"
 
 
 # ---------------------------------------------------------------------------
@@ -98,6 +100,8 @@ class _ConnectionWorker:
         inflight_ttl:       int = _INFLIGHT_TTL,
         max_batch:          int = _MAX_BATCH,
         max_time_gap:       int = _MAX_TIME_GAP,
+        max_gap_interval:   int = _MAX_GAP_INTERVAL,
+        stalled_threshold:  int = _STALLED_THRESHOLD,
     ) -> None:
         self._conn       = conn
         self._db         = db
@@ -127,12 +131,16 @@ class _ConnectionWorker:
         self._health_interval    = int(hist_cfg.get("health_interval_s",    health_interval))
         self._reconnect_cooldown = int(hist_cfg.get("reconnect_cooldown_s", reconnect_cooldown))
         self._inflight_ttl       = int(hist_cfg.get("inflight_ttl_s",       inflight_ttl))
+        self._max_gap_interval   = int(hist_cfg.get("max_gap_interval_s",   max_gap_interval))
+        self._stalled_threshold  = int(hist_cfg.get("stalled_threshold",    stalled_threshold))
 
         self._request_times: list[float] = []
         self._last_request:  float = 0.0
         self._last_row_ts: float | None = None
         self._last_reconnect: float = 0.0
         self._inflight: dict[tuple, float] = {}
+        self._gap_failures: int = 0
+        self._status_before_gap_recovery: str = "starting"
         self._gap_batcher = _GapBatcher(max_batch=max_batch, max_time_gap=max_time_gap)
         self._tasks: list[asyncio.Task] = []
 
@@ -272,36 +280,69 @@ class _ConnectionWorker:
     async def _gap_loop(self) -> None:
         while True:
             try:
-                await asyncio.sleep(self._gap_interval)
-                prev_status = self.progress["status"]
-                self.progress["status"] = "gap_recovery"
-                await self._recover_gaps()
-                if self.progress["status"] == "gap_recovery":
-                    self.progress["status"] = prev_status
+                await asyncio.sleep(self._current_gap_interval())
+                await self._gap_cycle()
             except asyncio.CancelledError:
                 break
             except Exception as e:
                 self._log.error(f"Gap recovery error: {e}")
+                self._gap_failures += 1
 
-    async def _recover_gaps(self) -> None:
+    async def _gap_cycle(self) -> None:
+        """One gap-recovery attempt: overlay status, run it, then either clear the overlay
+        (progress made) or escalate it to "stalled" once failures cross the threshold --
+        never silently restore an overlay status (gap_recovery/stalled) as if it were the
+        connection's real prior state."""
+        if self.progress["status"] not in ("gap_recovery", "stalled"):
+            self._status_before_gap_recovery = self.progress["status"]
+        self.progress["status"] = "gap_recovery"
+
+        made_progress = await self._recover_gaps()
+        self._gap_failures = 0 if made_progress else self._gap_failures + 1
+
+        if self._gap_failures >= self._stalled_threshold:
+            self.progress["status"] = "stalled"
+        else:
+            self.progress["status"] = self._status_before_gap_recovery
+
+    def _current_gap_interval(self) -> int:
+        """Exponential backoff after consecutive no-progress cycles, capped at
+        _max_gap_interval -- found via a real deployment where a connection stuck offline
+        for hours retried at the same fixed interval forever, generating constant load with
+        no signal that anything was actually wrong beyond a slowly growing gap count."""
+        if self._gap_failures == 0:
+            return self._gap_interval
+        return min(self._gap_interval * (2 ** self._gap_failures), self._max_gap_interval)
+
+    async def _recover_gaps(self) -> bool:
+        """Returns whether this cycle made progress: True if there were no gaps to begin
+        with, or at least one attempted batch actually stored rows; False if gaps were
+        found, batches were attempted, and none of them stored anything (the source is
+        likely unreachable)."""
         start_ts = self._parse_start_ts()
         end_ts   = self._safe_end()
         gaps = await self._detect_gaps(start_ts, end_ts)
         if not gaps:
-            return
+            return True
 
         self._log.info(f"Found {len(gaps)} gaps in {self._symbol}/{self._timeframe}")
         batches = self._gap_batcher.create_batches(gaps)
         now = time.time()
         self._inflight = {k: v for k, v in self._inflight.items() if now - v < self._inflight_ttl}
 
+        attempted_any = False
+        stored_any = False
         for batch in batches:
             key = (self._symbol, self._timeframe, batch["start_timestamp"], batch["end_timestamp"])
             if key in self._inflight:
                 continue
+            attempted_any = True
             self._inflight[key] = now
             n = await self._fetch_and_store(batch["start_timestamp"], batch["end_timestamp"], 1, 1)
             self.progress["total_stored"] += n
+            if n > 0:
+                stored_any = True
+        return stored_any or not attempted_any
 
     async def _detect_gaps(self, start_ts: int, end_ts: int) -> list[dict]:
         gaps: list[dict] = []
@@ -453,6 +494,8 @@ class DataCollector:
         inflight_ttl:       int = _INFLIGHT_TTL,
         max_batch:          int = _MAX_BATCH,
         max_time_gap:       int = _MAX_TIME_GAP,
+        max_gap_interval:   int = _MAX_GAP_INTERVAL,
+        stalled_threshold:  int = _STALLED_THRESHOLD,
     ) -> None:
         self._db        = db
         self._live_feed = live_feed
@@ -464,6 +507,8 @@ class DataCollector:
             "inflight_ttl": inflight_ttl,
             "max_batch": max_batch,
             "max_time_gap": max_time_gap,
+            "max_gap_interval": max_gap_interval,
+            "stalled_threshold": stalled_threshold,
         }
         self._workers:      dict[str, _ConnectionWorker] = {}
         self._worker_tasks: dict[str, asyncio.Task]      = {}

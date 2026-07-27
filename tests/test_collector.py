@@ -89,6 +89,14 @@ class FakeDb:
         return self.gaps
 
 
+def _async_return(value):
+    """Stand-in for an async method that just returns a fixed value, for monkeypatching
+    _recover_gaps in the gap-cycle tests below without needing a full fake data pipeline."""
+    async def _fn():
+        return value
+    return _fn
+
+
 @pytest.fixture
 def worker():
     return _ConnectionWorker(_make_conn(), db=FakeDb(), source=FakeSource())
@@ -176,6 +184,90 @@ def test_per_connection_config_overrides_timing_defaults():
     w = _ConnectionWorker(conn, db=FakeDb(), source=FakeSource())
     assert w._gap_interval == 5
     assert w._batch_size == 100
+
+
+def test_per_connection_config_overrides_backoff_defaults():
+    conn = _make_conn(config='{"max_gap_interval_s": 30, "stalled_threshold": 2}')
+    w = _ConnectionWorker(conn, db=FakeDb(), source=FakeSource())
+    assert w._max_gap_interval == 30
+    assert w._stalled_threshold == 2
+
+
+# ------------------------------------------------------------------ #
+# Gap-recovery backoff/give-up (TASK-011)                              #
+# ------------------------------------------------------------------ #
+
+def test_gap_interval_is_unbacked_off_with_no_failures(worker):
+    assert worker._current_gap_interval() == worker._gap_interval
+
+
+def test_gap_interval_backs_off_exponentially(worker):
+    worker._gap_failures = 1
+    assert worker._current_gap_interval() == worker._gap_interval * 2
+    worker._gap_failures = 3
+    assert worker._current_gap_interval() == worker._gap_interval * 8
+
+
+def test_gap_interval_caps_at_max_gap_interval(worker):
+    worker._gap_failures = 20  # would be an enormous multiple uncapped
+    assert worker._current_gap_interval() == worker._max_gap_interval
+
+
+async def test_gap_cycle_resets_failures_and_restores_status_on_progress(worker):
+    worker.progress["status"] = "streaming"
+    worker._gap_failures = 3
+    worker._recover_gaps = _async_return(True)
+
+    await worker._gap_cycle()
+
+    assert worker._gap_failures == 0
+    assert worker.progress["status"] == "streaming"
+
+
+async def test_gap_cycle_increments_failures_and_restores_status_below_threshold(worker):
+    worker.progress["status"] = "streaming"
+    worker._stalled_threshold = 5
+    worker._recover_gaps = _async_return(False)
+
+    await worker._gap_cycle()
+
+    assert worker._gap_failures == 1
+    assert worker.progress["status"] == "streaming"  # not yet at threshold
+
+
+async def test_gap_cycle_marks_stalled_at_threshold(worker):
+    worker.progress["status"] = "streaming"
+    worker._stalled_threshold = 2
+    worker._gap_failures = 1
+    worker._recover_gaps = _async_return(False)
+
+    await worker._gap_cycle()
+
+    assert worker._gap_failures == 2
+    assert worker.progress["status"] == "stalled"
+
+
+async def test_gap_cycle_stays_stalled_across_repeated_failures():
+    """Regression: capturing "prev_status" naively on every cycle would let a stalled
+    connection's own "stalled" status get recorded as the thing to restore to -- it
+    should keep restoring to the real underlying status (streaming) from before the
+    first failure, not to "stalled" itself."""
+    w = _ConnectionWorker(_make_conn(), db=FakeDb(), source=FakeSource())
+    w.progress["status"] = "streaming"
+    w._stalled_threshold = 1
+    w._recover_gaps = _async_return(False)
+
+    await w._gap_cycle()  # 1st failure -> stalled
+    assert w.progress["status"] == "stalled"
+    await w._gap_cycle()  # 2nd failure while already stalled -> still stalled
+    assert w.progress["status"] == "stalled"
+    assert w._gap_failures == 2
+
+    w._recover_gaps = _async_return(True)  # source recovers
+    await w._gap_cycle()
+
+    assert w._gap_failures == 0
+    assert w.progress["status"] == "streaming"  # restored to the real prior status
 
 
 # ------------------------------------------------------------------ #
