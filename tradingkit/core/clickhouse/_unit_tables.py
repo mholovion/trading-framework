@@ -346,6 +346,14 @@ class _UnitTablesMixin:
         AggregatingMergeTree's merge semantics, it isn't separate logic. Verified directly:
         a late-arriving row correctly completed a previously-partial row at read time, even
         while still sitting in a separate, unmerged physical part.
+
+        The `by` argument to argMax (timestamp) is explicitly cast to UInt64 here, matching
+        ensure_cross_source_table's column DDL exactly — an AggregateFunction's type
+        parameters are baked into the state at creation time, not just widened on insert
+        like a plain column, so a source table whose own timestamp column is e.g. Int64
+        (found via real dogfooding: WhiteBitDataSource's schema uses Int64) would otherwise
+        produce a state ClickHouse refuses to write into a UInt64-typed state column at all
+        (CANNOT_CONVERT_TYPE), rather than silently coercing it.
         """
         _validate_identifier(alias, kind="cross-source alias")
         _validate_identifier(field, kind="column name")
@@ -354,8 +362,8 @@ class _UnitTablesMixin:
         mv_name = f"mv_{source_table}_to_{output_table}_{alias}"
         await self._execute(
             f"CREATE MATERIALIZED VIEW IF NOT EXISTS {mv_name} TO {output_table} AS"
-            f" SELECT {timestamp_col} AS timestamp,"
-            f" argMaxState(CAST({field} AS Nullable({ch_type})), {timestamp_col}) AS {alias}"
+            f" SELECT CAST({timestamp_col} AS UInt64) AS timestamp,"
+            f" argMaxState(CAST({field} AS Nullable({ch_type})), CAST({timestamp_col} AS UInt64)) AS {alias}"
             f" FROM {source_table} GROUP BY {timestamp_col}"
         )
 
@@ -386,9 +394,13 @@ class _UnitTablesMixin:
         _validate_identifier(field, kind="column name")
         _validate_identifier(ch_type, kind="ch_type")
         _validate_identifier(timestamp_col, kind="column name")
+        # Same explicit UInt64 cast as ensure_cross_source_mv, same reason: the state's type
+        # parameters are fixed at creation time and must match output_table's declared
+        # column type exactly, regardless of source_table's own timestamp column type.
         await self._execute(
             f"INSERT INTO {output_table} (timestamp, {alias})"
-            f" SELECT {timestamp_col}, argMaxState(CAST({field} AS Nullable({ch_type})), {timestamp_col})"
+            f" SELECT CAST({timestamp_col} AS UInt64),"
+            f" argMaxState(CAST({field} AS Nullable({ch_type})), CAST({timestamp_col} AS UInt64))"
             f" FROM {source_table} GROUP BY {timestamp_col}"
         )
 

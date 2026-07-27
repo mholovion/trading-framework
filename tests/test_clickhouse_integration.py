@@ -232,6 +232,45 @@ async def test_cross_source_aggregation_out_of_order_arrival(db):
     assert rows == [{"timestamp": 1000, "value": 47000.0}]
 
 
+async def test_cross_source_aggregation_with_int64_timestamp_source(db):
+    """Regression: ensure_cross_source_mv/backfill_cross_source hardcoded UInt64 for the
+    timestamp baked into the AggregateFunction(argMax, ..., UInt64) state, but a real
+    DataSource's schema (e.g. WhiteBitDataSource, and ensure_raw_table's own POLARS_TO_CH
+    mapping for pl.Int64) produces an Int64 timestamp column, not UInt64 -- found via real
+    dogfooding (the example repo's aggregation demo), not anticipated up front. ClickHouse
+    refuses to write an Int64-derived state into a UInt64-declared state column at all
+    (CANNOT_CONVERT_TYPE) rather than silently coercing it, so this was a hard failure, not
+    a subtly wrong result -- but only for source tables shaped like real ones, which every
+    earlier test in this file (deliberately UInt64) didn't exercise."""
+    import uuid
+
+    from tradingkit.aggregation import Aggregation, SourceRef, query_aggregation, setup_aggregation
+
+    suffix = uuid.uuid4().hex[:8]
+    btc_table = f"test_btc_i64_{suffix}"
+    eth_table = f"test_eth_i64_{suffix}"
+    output_table = f"test_spread_i64_{suffix}"
+
+    await db._execute(f"CREATE TABLE {btc_table} (timestamp Int64, close Float64) ENGINE=MergeTree ORDER BY timestamp")
+    await db._execute(f"CREATE TABLE {eth_table} (timestamp Int64, close Float64) ENGINE=MergeTree ORDER BY timestamp")
+    await db._execute(f"INSERT INTO {btc_table} VALUES (1000, 50000.0)")
+    await db._execute(f"INSERT INTO {eth_table} VALUES (1000, 3000.0)")
+
+    class BtcEthSpread(Aggregation):
+        OUTPUT_TABLE = output_table
+        btc = SourceRef(btc_table, field="close")
+        eth = SourceRef(eth_table, field="close")
+
+        def combine_sql(self) -> str:
+            return "btc - eth"
+
+    agg = BtcEthSpread()
+    await setup_aggregation(db, agg)  # must not raise CANNOT_CONVERT_TYPE
+
+    rows = await query_aggregation(db, agg, 0, 9999)
+    assert rows == [{"timestamp": 1000, "value": 47000.0}]
+
+
 async def test_cross_source_aggregation_combine_python_fallback(db):
     """combine() (Python fallback) driven end-to-end through AggregationWorker._run_one(),
     the same code path a real background worker uses -- not just calling combine() directly."""
