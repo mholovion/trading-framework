@@ -5,6 +5,45 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.2.0] - 2026-07-27
+
+### Added
+- `Aggregation` / `ScriptAggregation` — declarative cross-source aggregation (e.g. a
+  BTC/ETH spread) via a gap-closing two-Materialized-View pattern: each declared source
+  writes its own partial state into a shared `AggregatingMergeTree` table, keyed by
+  timestamp, so arrival order never matters and a late or backfilled source still
+  completes the row correctly once it lands. Two ways to compute the result: `combine_sql()`
+  (a validated SQL expression over the declared sources, kept live by ClickHouse on every
+  insert — no polling) or `combine(ctx, start_ts, end_ts)` (a Python fallback for logic SQL
+  can't express, with the same signature and `ctx.query()` power as the free-function
+  `aggregate()` convention it replaces). `ScriptAggregation` / `load_aggregation_plugin()`
+  mirror `ScriptStrategy` / `load_strategy_plugin` so a SaaS UI editor can create new
+  aggregations without a framework release. The within-table bucket-aggregation mechanism
+  (`Fold`, `AggregationScript.is_ch_mv()`) is unrelated and unchanged.
+- Gap-recovery backoff: `_gap_loop()` now backs off exponentially (capped at
+  `max_gap_interval_s`, default 3600s) after consecutive no-progress cycles instead of
+  retrying at a fixed interval forever, and surfaces a distinct `"stalled"` connection
+  status once `stalled_threshold` (default 5) consecutive failures is crossed — previously
+  a connection stuck offline for hours was indistinguishable from one with a small, normal
+  gap except by watching the gap count grow, and retried at the same rate regardless.
+
+### Fixed
+- `LiveFeed` routed live candles by `(symbol, timeframe)` only, dropping `exchange` — two
+  different exchanges streaming the same symbol/timeframe would cross-deliver each other's
+  candles to the wrong subscribers. `publish()` now requires `exchange`; the routing key
+  also normalizes exchange case, since the same exchange was observed tagged inconsistently
+  (`"whitebit"` vs `"WhiteBit"`) depending on connection config.
+- `insert_unit_batch()` never wrote a `timeframe` column, so every row landed with
+  ClickHouse's empty-string default regardless of the connection's actual timeframe,
+  breaking any timeframe-filtered query. `ensure_raw_table()` now also migrates existing
+  tables that predate this column.
+- Cross-source aggregation hardcoded `UInt64` for the timestamp type baked into its
+  `AggregateFunction(argMax, ..., UInt64)` state; a real `DataSource`'s schema (e.g.
+  `Int64`, as produced by `ensure_raw_table`'s own Polars-to-ClickHouse type mapping)
+  made ClickHouse reject the write outright (`CANNOT_CONVERT_TYPE`) rather than silently
+  coercing it. Found via dogfooding the aggregation demo against a real data source, not
+  anticipated up front — now covered by a regression test using an `Int64` source table.
+
 ## [0.1.1] - 2026-07-25
 
 ### Fixed
