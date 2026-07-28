@@ -37,6 +37,26 @@ class ScriptAST:
         except Exception:
             return False
 
+    def has_class(self, base: str | None = None) -> bool:
+        """True if the script defines a class -- optionally, one listing `base` among its
+        bases. Used to tell a class-style plugin script apart from a function-style or
+        expression-style one without executing it."""
+        try:
+            for node in ast.walk(self._get_tree()):
+                if not isinstance(node, ast.ClassDef):
+                    continue
+                if base is None:
+                    return True
+                for b in node.bases:
+                    name = b.id if isinstance(b, ast.Name) else (
+                        b.attr if isinstance(b, ast.Attribute) else None
+                    )
+                    if name == base:
+                        return True
+        except Exception:
+            pass
+        return False
+
     def get_literal(self, var_name: str) -> Any | None:
         """ast.literal_eval() of a `var_name = <literal>` module-level assignment, or None."""
         try:

@@ -15,11 +15,13 @@ import asyncio
 import json
 import logging
 import time
+from collections.abc import Awaitable, Callable, Iterable
 from datetime import datetime
 from typing import Any, Self
 
 from tradingkit.core.clickhouse import ClickHouseManager
-from tradingkit.source import ConnectionScriptSource
+from tradingkit.core.timeframe import UNIT_SCALE
+from tradingkit.source import DataSource, ScriptSource
 
 logger = logging.getLogger(__name__)
 
@@ -34,40 +36,27 @@ _MAX_GAP_INTERVAL = 3600  # backoff ceiling: retry at most once an hour once ful
 _STALLED_THRESHOLD = 5    # consecutive no-progress cycles before status flips to "stalled"
 
 
-# ---------------------------------------------------------------------------
-# Gap batching
-# ---------------------------------------------------------------------------
+async def recover_gaps(
+    detect: Callable[[], Awaitable[list[dict]]],
+    batch:  Callable[[list[dict]], Iterable[dict]],
+    fetch:  Callable[[int, int], Awaitable[Any]],
+) -> list[Any]:
+    """Detect gaps, batch nearby ones together, and fetch each batch. detect(), batch(),
+    and fetch() are all supplied by the caller -- this function only owns the
+    detect -> batch -> fetch-per-batch orchestration, nothing about what any of the three
+    steps actually do. Used here by _ConnectionWorker (ClickHouse-backed) and by
+    tradingkit.pipeline.Pipeline (in-memory) -- the two have no source interface or
+    storage target in common, so they each supply their own detect/batch/fetch.
 
-class _GapBatcher:
-    def __init__(self, max_batch: int = _MAX_BATCH, max_time_gap: int = _MAX_TIME_GAP):
-        self._max_batch    = max_batch
-        self._max_time_gap = max_time_gap
-
-    def create_batches(self, gaps: list[dict]) -> list[dict]:
-        if not gaps:
-            return []
-        sorted_gaps = sorted(gaps, key=lambda x: x["start_timestamp"])
-        batches: list[dict] = []
-        cur = {
-            "start_timestamp": sorted_gaps[0]["start_timestamp"],
-            "end_timestamp":   sorted_gaps[0]["end_timestamp"],
-            "total_rows":      sorted_gaps[0]["missing_rows"],
-        }
-        for gap in sorted_gaps[1:]:
-            time_gap = gap["start_timestamp"] - cur["end_timestamp"]
-            if (cur["total_rows"] + gap["missing_rows"] <= self._max_batch
-                    and time_gap <= self._max_time_gap):
-                cur["end_timestamp"] = gap["end_timestamp"]
-                cur["total_rows"]   += gap["missing_rows"]
-            else:
-                batches.append(cur)
-                cur = {
-                    "start_timestamp": gap["start_timestamp"],
-                    "end_timestamp":   gap["end_timestamp"],
-                    "total_rows":      gap["missing_rows"],
-                }
-        batches.append(cur)
-        return batches
+    Returns one fetch() result per batch; [] if detect() found no gaps.
+    """
+    gaps = await detect()
+    if not gaps:
+        return []
+    results = []
+    for b in batch(gaps):
+        results.append(await fetch(b["start_timestamp"], b["end_timestamp"]))
+    return results
 
 
 # ---------------------------------------------------------------------------
@@ -89,17 +78,16 @@ class _ConnectionWorker:
         self,
         conn: dict,
         db:   ClickHouseManager,
-        source: ConnectionScriptSource,
+        source: DataSource,
         live_feed: Any = None,
         agg_script: Any = None,
         *,
+        executor:           Any = None,
         concurrency:        int = _CONCURRENCY,
         gap_interval:       int = _GAP_INTERVAL,
         health_interval:    int = _HEALTH_INTERVAL,
         reconnect_cooldown: int = _RECONNECT_CD,
         inflight_ttl:       int = _INFLIGHT_TTL,
-        max_batch:          int = _MAX_BATCH,
-        max_time_gap:       int = _MAX_TIME_GAP,
         max_gap_interval:   int = _MAX_GAP_INTERVAL,
         stalled_threshold:  int = _STALLED_THRESHOLD,
     ) -> None:
@@ -110,22 +98,29 @@ class _ConnectionWorker:
         self._agg_script = agg_script
         self._log        = logging.getLogger(f"collector.{conn['name']}")
 
+        if executor is None:
+            from tradingkit.executor.local import LocalExecutor
+            executor = LocalExecutor()
+        self._executor = executor
+
         self._exchange  = (conn.get("source") or "").replace(".py", "")
         self._symbol    = conn["symbol"]
         self._timeframe = conn.get("timeframe", "1m")
 
-        # Source always writes 60s units; framework aggregates upward via MV
-        self._unit_interval_s: int = 60
+        # Source always writes one unit per interval; framework aggregates upward via MV.
+        # Expressed in the source's own timestamp unit (see DataSource.timestamp_unit),
+        # so a millisecond source gets 60_000 rather than 60.
+        self._unit_interval: int = 60 * UNIT_SCALE.get(source.timestamp_unit, 1)
 
         hist_cfg = json.loads(conn.get("config", "{}")) if isinstance(conn.get("config"), str) \
                    else conn.get("config", {})
         self._start_date    = conn.get("start_date", "2020-01-01T00:00:00Z")
         self._batch_size    = int(hist_cfg.get("batch_size",    1440))
-        self._max_requests  = int(hist_cfg.get("max_requests",  10000))
-        self._per_seconds   = int(hist_cfg.get("per_seconds",   10))
-        self._rate_limit_ms = float(hist_cfg.get("rate_limit_ms", 50))
 
-        # Per-connection timing overrides from config JSON
+        # Per-connection timing overrides from config JSON. Rate limiting and gap
+        # batching are NOT here -- they live on the source (DataSource.rate_limit /
+        # batch_gaps), which reads the same config dict, since both are properties of
+        # the exchange rather than of this worker.
         self._concurrency        = int(hist_cfg.get("concurrency",          concurrency))
         self._gap_interval       = int(hist_cfg.get("gap_interval_s",       gap_interval))
         self._health_interval    = int(hist_cfg.get("health_interval_s",    health_interval))
@@ -134,14 +129,11 @@ class _ConnectionWorker:
         self._max_gap_interval   = int(hist_cfg.get("max_gap_interval_s",   max_gap_interval))
         self._stalled_threshold  = int(hist_cfg.get("stalled_threshold",    stalled_threshold))
 
-        self._request_times: list[float] = []
-        self._last_request:  float = 0.0
         self._last_row_ts: float | None = None
         self._last_reconnect: float = 0.0
         self._inflight: dict[tuple, float] = {}
         self._gap_failures: int = 0
         self._status_before_gap_recovery: str = "starting"
-        self._gap_batcher = _GapBatcher(max_batch=max_batch, max_time_gap=max_time_gap)
         self._tasks: list[asyncio.Task] = []
 
         # DataUnit table state (initialized on first insert)
@@ -221,13 +213,13 @@ class _ConnectionWorker:
         start_ts = self._parse_start_ts()
         end_ts   = self._safe_end()
 
-        batch_dur = self._batch_size * self._unit_interval_s
+        batch_dur = self._batch_size * self._unit_interval
         batches: list[tuple[int, int, int]] = []
         cur, bn = start_ts, 1
         while cur <= end_ts:
-            batch_end = min(cur + batch_dur - self._unit_interval_s, end_ts)
+            batch_end = min(cur + batch_dur - self._unit_interval, end_ts)
             batches.append((bn, cur, batch_end))
-            cur = batch_end + self._unit_interval_s
+            cur = batch_end + self._unit_interval
             bn += 1
 
         total = len(batches)
@@ -257,7 +249,10 @@ class _ConnectionWorker:
         self.progress["status"] = "streaming"
         self._log.info(f"Starting realtime stream for {self._symbol}/{self._timeframe}")
         try:
-            async for row in self._source.stream(self._symbol, self._timeframe):
+            # NOTE: unlike the historical path below, this does NOT go through the
+            # executor -- PluginExecutor has no streaming method, so user script code
+            # runs unsandboxed here. Tracked separately; see framework.todo.
+            async for row in self._source.stream(self._symbol, self._unit_interval):
                 self._last_row_ts = time.time()
                 df = pl.DataFrame([row])
                 await self._ensure_tables(df)
@@ -321,28 +316,34 @@ class _ConnectionWorker:
         likely unreachable)."""
         start_ts = self._parse_start_ts()
         end_ts   = self._safe_end()
-        gaps = await self._detect_gaps(start_ts, end_ts)
-        if not gaps:
-            return True
-
-        self._log.info(f"Found {len(gaps)} gaps in {self._symbol}/{self._timeframe}")
-        batches = self._gap_batcher.create_batches(gaps)
         now = time.time()
         self._inflight = {k: v for k, v in self._inflight.items() if now - v < self._inflight_ttl}
 
-        attempted_any = False
-        stored_any = False
-        for batch in batches:
-            key = (self._symbol, self._timeframe, batch["start_timestamp"], batch["end_timestamp"])
+        async def _detect() -> list[dict]:
+            gaps = await self._detect_gaps(start_ts, end_ts)
+            if gaps:
+                self._log.info(f"Found {len(gaps)} gaps in {self._symbol}/{self._timeframe}")
+            return gaps
+
+        async def _fetch_batch(bstart: int, bend: int) -> int | None:
+            key = (self._symbol, self._timeframe, bstart, bend)
             if key in self._inflight:
-                continue
-            attempted_any = True
+                return None
             self._inflight[key] = now
-            n = await self._fetch_and_store(batch["start_timestamp"], batch["end_timestamp"], 1, 1)
+            n = await self._fetch_and_store(bstart, bend, 1, 1)
             self.progress["total_stored"] += n
-            if n > 0:
-                stored_any = True
-        return stored_any or not attempted_any
+            return n
+
+        # detect comes from the worker (ClickHouse knows what's missing), batch from the
+        # source (the exchange's own limits decide what fits in one request).
+        results = await recover_gaps(
+            detect=_detect, batch=self._source.batch_gaps, fetch=_fetch_batch,
+        )
+        if not results:
+            return True
+
+        attempted = [n for n in results if n is not None]
+        return any(n > 0 for n in attempted) or not attempted
 
     async def _detect_gaps(self, start_ts: int, end_ts: int) -> list[dict]:
         gaps: list[dict] = []
@@ -350,7 +351,7 @@ class _ConnectionWorker:
             min_ts, max_ts = await self._db.get_unit_range(
                 self._table, self._exchange, self._symbol,
             )
-            iv = self._unit_interval_s
+            iv = self._unit_interval
             if min_ts is None:
                 missing = (end_ts - start_ts) // iv
                 if missing > 0:
@@ -391,18 +392,17 @@ class _ConnectionWorker:
     ) -> int:
         if await self._batch_complete(start_ts, end_ts):
             return 0
-        await self._rate_limit()
         try:
-            import polars as pl
-            rows = await self._source.historical(self._symbol, self._timeframe, start_ts, end_ts)
-            if isinstance(rows, pl.DataFrame):
-                if rows.is_empty():
-                    return 0
-                df = rows
-            else:
-                if not rows:
-                    return 0
-                df = pl.DataFrame(rows)
+            # Through the executor rather than calling the script directly, so a
+            # SubprocessExecutor actually isolates user code here (LocalExecutor keeps
+            # the previous in-process behaviour). Throttling lives on the source now --
+            # rate limits belong to the exchange, not to this worker.
+            await self._source.rate_limit()
+            df = await self._executor.fetch_source_data(
+                self._source, self._symbol, self._unit_interval, start_ts, end_ts,
+            )
+            if df is None or df.is_empty():
+                return 0
             row_count = len(df)
             await self._ensure_tables(df)
             await self._db.insert_unit_batch(
@@ -427,35 +427,25 @@ class _ConnectionWorker:
             if min_ts is None:
                 return False
             # Rough check: if range covers the window, assume complete
-            return min_ts <= start_ts and max_ts >= end_ts - self._unit_interval_s * 2
+            return min_ts <= start_ts and max_ts >= end_ts - self._unit_interval * 2
         except Exception:
             return False
 
-    async def _rate_limit(self) -> None:
-        now = time.time()
-        self._request_times = [t for t in self._request_times if now - t <= self._per_seconds]
-        if len(self._request_times) >= self._max_requests:
-            oldest = min(self._request_times)
-            wait = self._per_seconds - (now - oldest)
-            if wait > 0:
-                await asyncio.sleep(wait)
-        min_delay = self._rate_limit_ms / 1000.0
-        elapsed = now - self._last_request
-        if elapsed < min_delay:
-            await asyncio.sleep(min_delay - elapsed)
-        now = time.time()
-        self._request_times.append(now)
-        self._last_request = now
+    def _scale(self) -> int:
+        """Wall-clock seconds -> this source's timestamp unit. The only place the
+        framework needs to know the unit at all: gap and batching arithmetic is
+        unit-relative, but comparing `now` against stored timestamps is not."""
+        return UNIT_SCALE.get(self._source.timestamp_unit, 1)
 
     def _parse_start_ts(self) -> int:
-        raw = int(datetime.fromisoformat(self._start_date).timestamp())
-        iv = self._unit_interval_s
+        raw = int(datetime.fromisoformat(self._start_date).timestamp() * self._scale())
+        iv = self._unit_interval
         period_start = (raw // iv) * iv
         return period_start + iv if period_start < raw else period_start
 
     def _safe_end(self) -> int:
-        now = int(time.time())
-        iv = self._unit_interval_s
+        now = int(time.time() * self._scale())
+        iv = self._unit_interval
         return (now // iv) * iv - iv
 
 
@@ -487,26 +477,27 @@ class DataCollector:
         db:        ClickHouseManager,
         live_feed: Any | None = None,
         *,
+        executor:           Any = None,
         concurrency:        int = _CONCURRENCY,
         gap_interval:       int = _GAP_INTERVAL,
         health_interval:    int = _HEALTH_INTERVAL,
         reconnect_cooldown: int = _RECONNECT_CD,
         inflight_ttl:       int = _INFLIGHT_TTL,
-        max_batch:          int = _MAX_BATCH,
-        max_time_gap:       int = _MAX_TIME_GAP,
         max_gap_interval:   int = _MAX_GAP_INTERVAL,
         stalled_threshold:  int = _STALLED_THRESHOLD,
     ) -> None:
         self._db        = db
         self._live_feed = live_feed
+        #: Executor used to run source scripts. Defaults to in-process (LocalExecutor);
+        #: pass SubprocessExecutor() to isolate user-submitted connection scripts.
+        self._executor  = executor
         self._timing = {
+            "executor": executor,
             "concurrency": concurrency,
             "gap_interval": gap_interval,
             "health_interval": health_interval,
             "reconnect_cooldown": reconnect_cooldown,
             "inflight_ttl": inflight_ttl,
-            "max_batch": max_batch,
-            "max_time_gap": max_time_gap,
             "max_gap_interval": max_gap_interval,
             "stalled_threshold": stalled_threshold,
         }
@@ -587,7 +578,7 @@ class DataCollector:
 
             config = json.loads(conn.get("config", "{}")) if isinstance(conn.get("config"), str) \
                      else conn.get("config", {})
-            source = ConnectionScriptSource(code=code, config=config)
+            source = ScriptSource(code=code, config=config)
 
             agg_script = None
             agg_name = conn.get("aggregation", "").strip()

@@ -11,7 +11,9 @@ Usage:
         indicators={"rsi": WeightedRSI(14), "ema": EMA(50)},
         strategy=MyStrategy(),
     )
-    result = await pipeline.run("SOL_USDT", "4h", start_ts=..., end_ts=...)
+    result = await pipeline.run(
+        "SOL_USDT", parse_timeframe("4h"), start_ts=..., end_ts=...
+    )
     print(result.summary())
 """
 from __future__ import annotations
@@ -23,7 +25,6 @@ from typing import Any
 
 import polars as pl
 
-from tradingkit.core.timeframe import parse_timeframe
 from tradingkit.indicator import Indicator, IndicatorContext
 from tradingkit.source import DataSource
 from tradingkit.strategy import BarContext, Signal, Strategy
@@ -120,7 +121,7 @@ class Pipeline:
     async def run(
         self,
         symbol: str,
-        timeframe: str | int,
+        timeframe: int,
         start_ts: int,
         end_ts: int,
     ) -> PipelineResult:
@@ -130,12 +131,15 @@ class Pipeline:
         2. Compute all indicators
         3. Call strategy.on_bar() for each bar
         Returns PipelineResult with signals, data, and indicator series.
+
+        `timeframe` is an integer step in the source's own timestamp unit (see
+        DataSource.timestamp_unit) — call parse_timeframe("4h") yourself to convert a
+        human string, rather than the Pipeline guessing the unit for you.
         """
         executor = self._get_executor()
-        tf_seconds = parse_timeframe(timeframe)
 
         df: pl.DataFrame = await executor.fetch_source_data(
-            self.source, symbol, tf_seconds, start_ts, end_ts
+            self.source, symbol, timeframe, start_ts, end_ts
         )
         if df.height == 0:
             return PipelineResult(signals=[], data=df, indicators={})
@@ -176,19 +180,20 @@ class Pipeline:
     async def run_live(
         self,
         symbol: str,
-        timeframe: str | int,
+        timeframe: int,
     ) -> AsyncIterator[Signal]:
         """
         Stream live signals as new rows arrive from source.stream().
         Yields Signal objects. Requires source to support streaming.
+
+        `timeframe` is an integer step in the source's own timestamp unit — see run().
         """
         executor = self._get_executor()
-        tf_seconds = parse_timeframe(timeframe)
 
         ind_series: dict[str, pl.Series] = {}
         rows_acc: list[dict] = []
 
-        async for row in self.source.stream(symbol, tf_seconds):
+        async for row in self.source.stream(symbol, timeframe):
             rows_acc.append(row)
             df = pl.DataFrame(rows_acc)
             ctx = IndicatorContext(df)

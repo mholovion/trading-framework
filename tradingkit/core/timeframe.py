@@ -10,25 +10,37 @@ from __future__ import annotations
 import re
 from typing import ClassVar
 
+#: Multiplier from wall-clock seconds into a source's own timestamp unit. Consulted only
+#: where wall-clock time meets data timestamps (see DataSource.timestamp_unit) — never in
+#: gap or batching arithmetic, which is unit-relative by construction.
+UNIT_SCALE = {"s": 1, "ms": 1_000, "us": 1_000_000, "ns": 1_000_000_000}
 
-def parse_timeframe(tf: str | int) -> int:
+
+def parse_timeframe(tf: str | int, unit: str = "s") -> int:
     """
-    Convert any timeframe representation to seconds.
+    Convert any timeframe representation to an integer step.
 
     Accepts:
-      - int (already seconds): returned as-is
+      - int (already a step in `unit`): returned as-is
       - strings: "1m", "5m", "15m", "30m", "1h", "2h", "4h", "6h", "8h",
                  "12h", "1d", "3d", "1w" and any custom N+unit like "90m", "3h"
 
-    Units: s=1, m=60, h=3600, d=86400, w=604800
+    Timeframe units: s=1, m=60, h=3600, d=86400, w=604800
+
+    `unit` is the timestamp unit of the data this step will be compared against — see
+    DataSource.timestamp_unit. Defaults to seconds; pass "ms"/"us"/"ns" for a source
+    whose timestamps are finer, e.g. parse_timeframe("4h", "ms") == 14_400_000.
     """
+    if unit not in UNIT_SCALE:
+        raise ValueError(f"Invalid unit: {unit!r}. Use one of {sorted(UNIT_SCALE)}")
+    scale = UNIT_SCALE[unit]
     if isinstance(tf, int):
         return tf
     units = {"s": 1, "m": 60, "h": 3600, "d": 86400, "w": 604800}
     m = re.fullmatch(r"(\d+)([smhdw])", tf.strip().lower())
     if not m:
         raise ValueError(f"Invalid timeframe: {tf!r}. Use format like '4h', '90m', '1d'")
-    return int(m.group(1)) * units[m.group(2)]
+    return int(m.group(1)) * units[m.group(2)] * scale
 
 
 def seconds_to_tf_string(seconds: int) -> str:

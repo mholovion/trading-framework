@@ -28,6 +28,25 @@ def test_parse_timeframe_invalid_raises(tf):
         parse_timeframe(tf)
 
 
+@pytest.mark.parametrize("unit,expected", [
+    ("s", 14_400), ("ms", 14_400_000), ("us", 14_400_000_000), ("ns", 14_400_000_000_000),
+])
+def test_parse_timeframe_scales_to_source_unit(unit, expected):
+    """A source whose timestamps are finer than seconds needs its step in the same unit
+    (see DataSource.timestamp_unit)."""
+    assert parse_timeframe("4h", unit) == expected
+
+
+def test_parse_timeframe_int_passes_through_regardless_of_unit():
+    """An int is already a step in the target unit -- rescaling it would double-convert."""
+    assert parse_timeframe(500, "ms") == 500
+
+
+def test_parse_timeframe_invalid_unit_raises():
+    with pytest.raises(ValueError, match="Invalid unit"):
+        parse_timeframe("4h", "fortnights")
+
+
 def test_parse_timeframe_case_and_whitespace_insensitive():
     assert parse_timeframe(" 4H ") == 14400
 

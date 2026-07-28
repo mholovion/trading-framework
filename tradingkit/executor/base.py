@@ -59,7 +59,7 @@ class PluginExecutor(ABC):
         self,
         source: DataSource,
         symbol: str,
-        timeframe_seconds: int,
+        timeframe: int,
         start_ts: int,
         end_ts: int,
         limit: int = 5000,

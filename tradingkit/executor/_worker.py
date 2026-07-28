@@ -53,7 +53,7 @@ async def _run_source(payload: dict) -> dict:
     source = pickle.loads(payload["source"])
     df: pl.DataFrame = await source.get_historical_data(
         symbol=payload["symbol"],
-        timeframe_seconds=payload["timeframe_seconds"],
+        timeframe=payload["timeframe"],
         start_ts=payload["start_ts"],
         end_ts=payload["end_ts"],
         limit=payload["limit"],

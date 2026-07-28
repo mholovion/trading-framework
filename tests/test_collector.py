@@ -1,63 +1,14 @@
-"""tradingkit.collector — _GapBatcher, _ConnectionWorker gap/date logic, DataCollector lifecycle."""
+"""tradingkit.collector — _ConnectionWorker gap/date logic and its use of the source's
+hooks, plus DataCollector lifecycle."""
 from __future__ import annotations
 
 import time
 
+import polars as pl
 import pytest
 
-from tradingkit.collector import DataCollector, _ConnectionWorker, _GapBatcher
-from tradingkit.source import ConnectionScriptSource
-
-# ------------------------------------------------------------------ #
-# _GapBatcher — pure logic                                             #
-# ------------------------------------------------------------------ #
-
-def test_gap_batcher_empty_input():
-    assert _GapBatcher().create_batches([]) == []
-
-
-def test_gap_batcher_merges_close_gaps_under_max_batch():
-    batcher = _GapBatcher(max_batch=1000, max_time_gap=3600)
-    gaps = [
-        {"start_timestamp": 0, "end_timestamp": 60, "missing_rows": 10},
-        {"start_timestamp": 120, "end_timestamp": 180, "missing_rows": 10},
-    ]
-    batches = batcher.create_batches(gaps)
-    assert len(batches) == 1
-    assert batches[0]["total_rows"] == 20
-    assert batches[0]["start_timestamp"] == 0
-    assert batches[0]["end_timestamp"] == 180
-
-
-def test_gap_batcher_splits_when_over_max_batch():
-    batcher = _GapBatcher(max_batch=15, max_time_gap=3600)
-    gaps = [
-        {"start_timestamp": 0, "end_timestamp": 60, "missing_rows": 10},
-        {"start_timestamp": 120, "end_timestamp": 180, "missing_rows": 10},
-    ]
-    batches = batcher.create_batches(gaps)
-    assert len(batches) == 2
-
-
-def test_gap_batcher_splits_when_time_gap_too_large():
-    batcher = _GapBatcher(max_batch=1000, max_time_gap=100)
-    gaps = [
-        {"start_timestamp": 0, "end_timestamp": 60, "missing_rows": 1},
-        {"start_timestamp": 10000, "end_timestamp": 10060, "missing_rows": 1},
-    ]
-    batches = batcher.create_batches(gaps)
-    assert len(batches) == 2
-
-
-def test_gap_batcher_sorts_unordered_input():
-    batcher = _GapBatcher(max_batch=1000, max_time_gap=3600)
-    gaps = [
-        {"start_timestamp": 120, "end_timestamp": 180, "missing_rows": 1},
-        {"start_timestamp": 0, "end_timestamp": 60, "missing_rows": 1},
-    ]
-    batches = batcher.create_batches(gaps)
-    assert batches[0]["start_timestamp"] == 0
-
+from tradingkit.collector import DataCollector, _ConnectionWorker
+from tradingkit.source import ScriptSource
 
 # ------------------------------------------------------------------ #
 # _ConnectionWorker — date math + gap detection with a fake db          #
@@ -72,21 +23,67 @@ def _make_conn(**overrides) -> dict:
     return conn
 
 
-class FakeSource(ConnectionScriptSource):
+class FakeSource(ScriptSource):
+    """A real ScriptSource (hence a real DataSource), so the worker exercises the
+    inherited batch_gaps/rate_limit rather than a hand-rolled stand-in. Every hook the
+    worker is supposed to delegate to records that it was called."""
+
+    def __init__(self, config: dict | None = None, timestamp_unit: str = "s"):
+        super().__init__(
+            code="TABLE_NAME = 'unit_test'\nasync def historical(*a): return []",
+            config=config,
+        )
+        self._unit = timestamp_unit
+        self.calls: list[str] = []
+
+    @property
+    def timestamp_unit(self) -> str:
+        return self._unit
+
+    def batch_gaps(self, gaps):
+        self.calls.append("batch_gaps")
+        return super().batch_gaps(gaps)
+
+    async def rate_limit(self) -> None:
+        self.calls.append("rate_limit")
+
+    async def get_historical_data(self, symbol, timeframe, start_ts, end_ts, limit=5000):
+        self.calls.append("get_historical_data")
+        return pl.DataFrame({"timestamp": [start_ts], "close": [1.0]})
+
+
+class FakeExecutor:
+    """Stands in for LocalExecutor/SubprocessExecutor — records that the worker fetches
+    *through* the executor rather than calling the source script directly."""
+
     def __init__(self):
-        super().__init__(code="TABLE_NAME = 'unit_test'\nasync def historical(*a): return []")
+        self.calls: list[tuple] = []
+
+    async def fetch_source_data(self, source, symbol, timeframe, start_ts, end_ts, limit=5000):
+        self.calls.append((symbol, timeframe, start_ts, end_ts))
+        return await source.get_historical_data(symbol, timeframe, start_ts, end_ts, limit)
 
 
 class FakeDb:
     def __init__(self):
         self.unit_range = (None, None)
         self.gaps = []
+        self.inserted: list[pl.DataFrame] = []
 
     async def get_unit_range(self, table, exchange, symbol):
         return self.unit_range
 
     async def find_unit_gaps(self, table, exchange, symbol, start_ts, end_ts, unit_interval_s=60):
         return self.gaps
+
+    async def ensure_raw_table(self, table, schema):
+        pass
+
+    async def insert_unit_batch(self, table, df, exchange, symbol, timeframe):
+        self.inserted.append(df)
+
+    async def flush(self):
+        pass
 
 
 def _async_return(value):
@@ -97,9 +94,18 @@ def _async_return(value):
     return _fn
 
 
+def _make_worker(source=None, db=None, **conn_overrides) -> _ConnectionWorker:
+    return _ConnectionWorker(
+        _make_conn(**conn_overrides),
+        db=db or FakeDb(),
+        source=source or FakeSource(),
+        executor=FakeExecutor(),
+    )
+
+
 @pytest.fixture
 def worker():
-    return _ConnectionWorker(_make_conn(), db=FakeDb(), source=FakeSource())
+    return _make_worker()
 
 
 def test_parse_start_ts_aligns_to_interval(worker):
@@ -112,6 +118,83 @@ def test_safe_end_is_at_least_one_interval_before_now(worker):
     end = worker._safe_end()
     assert end <= now - 60
     assert end % 60 == 0
+
+
+# ------------------------------------------------------------------ #
+# The worker delegates to the source's hooks (not its own copies)      #
+# ------------------------------------------------------------------ #
+
+async def test_fetch_and_store_goes_through_the_executor():
+    """User script code must run via the executor so a SubprocessExecutor can isolate
+    it — the worker used to call source.historical() directly, unsandboxed."""
+    source, db = FakeSource(), FakeDb()
+    worker = _ConnectionWorker(
+        _make_conn(), db=db, source=source, executor=FakeExecutor(),
+    )
+    stored = await worker._fetch_and_store(0, 600, 1, 1)
+
+    assert worker._executor.calls == [("BTC_USDT", 60, 0, 600)]
+    assert stored == 1
+    assert len(db.inserted) == 1
+
+
+async def test_fetch_and_store_rate_limits_through_the_source():
+    """Rate limits belong to the exchange, so the worker asks the source rather than
+    keeping its own throttling state."""
+    source = FakeSource()
+    worker = _ConnectionWorker(
+        _make_conn(), db=FakeDb(), source=source, executor=FakeExecutor(),
+    )
+    await worker._fetch_and_store(0, 600, 1, 1)
+    assert "rate_limit" in source.calls
+    assert source.calls.index("rate_limit") < source.calls.index("get_historical_data")
+
+
+async def test_recover_gaps_batches_through_the_source():
+    """Batching is the source's business (its exchange's request limits), detection is
+    the worker's (ClickHouse knows what is actually missing)."""
+    source, db = FakeSource(), FakeDb()
+    db.unit_range = (0, 10_000_000_000)          # window fully covered except the middle
+    db.gaps = [{"start_timestamp": 300, "end_timestamp": 360, "missing_rows": 1}]
+    worker = _ConnectionWorker(
+        _make_conn(), db=db, source=source, executor=FakeExecutor(),
+    )
+    await worker._recover_gaps()
+    assert "batch_gaps" in source.calls
+
+
+async def test_worker_has_no_private_rate_limit_or_batcher():
+    """Regression: these moved onto DataSource; leaving stale copies behind would mean
+    two sources of truth for the same exchange-level settings."""
+    worker = _make_worker()
+    assert not hasattr(worker, "_rate_limit")
+    assert not hasattr(worker, "_batch_gaps")
+    assert not hasattr(worker, "_gap_batcher")
+
+
+# ------------------------------------------------------------------ #
+# Unit-agnostic wall-clock conversion                                  #
+# ------------------------------------------------------------------ #
+
+def test_unit_interval_follows_source_timestamp_unit():
+    worker = _make_worker(source=FakeSource(timestamp_unit="ms"))
+    assert worker._unit_interval == 60_000
+
+
+def test_safe_end_scales_to_millisecond_source():
+    """Wall-clock time is the one place the framework must know the unit — gap and
+    batching arithmetic stays unit-relative."""
+    worker = _make_worker(source=FakeSource(timestamp_unit="ms"))
+    now_ms = int(time.time() * 1000)
+    end = worker._safe_end()
+    assert end % 60_000 == 0
+    assert now_ms - 2 * 60_000 <= end <= now_ms
+
+
+def test_parse_start_ts_scales_to_millisecond_source():
+    sec_worker = _make_worker()
+    ms_worker  = _make_worker(source=FakeSource(timestamp_unit="ms"))
+    assert ms_worker._parse_start_ts() == sec_worker._parse_start_ts() * 1000
 
 
 async def test_detect_gaps_no_data_at_all(worker):
@@ -167,14 +250,14 @@ async def test_batch_complete_false_when_no_data(worker):
 
 def test_table_name_from_source_table_name():
     conn = _make_conn()
-    source = ConnectionScriptSource(code="TABLE_NAME = 'funding_rates'")
+    source = ScriptSource(code="TABLE_NAME = 'funding_rates'")
     w = _ConnectionWorker(conn, db=FakeDb(), source=source)
     assert w._table == "funding_rates"
 
 
 def test_table_name_falls_back_to_exchange_prefix():
     conn = _make_conn(source="whitebit.py")
-    source = ConnectionScriptSource(code="pass")  # no TABLE_NAME declared
+    source = ScriptSource(code="pass")  # no TABLE_NAME declared
     w = _ConnectionWorker(conn, db=FakeDb(), source=source)
     assert w._table == "unit_whitebit"
 

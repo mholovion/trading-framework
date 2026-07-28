@@ -146,7 +146,7 @@ class RemoteExecutor(PluginExecutor):
         self,
         source: DataSource,
         symbol: str,
-        timeframe_seconds: int,
+        timeframe: int,
         start_ts: int,
         end_ts: int,
         limit: int = 5000,
@@ -154,7 +154,7 @@ class RemoteExecutor(PluginExecutor):
         payload = {
             "source":            pickle.dumps(source),
             "symbol":            symbol,
-            "timeframe_seconds": timeframe_seconds,
+            "timeframe": timeframe,
             "start_ts":          start_ts,
             "end_ts":            end_ts,
             "limit":             limit,
