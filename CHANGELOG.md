@@ -5,6 +5,64 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.3.0] - 2026-07-28
+
+### Fixed
+- Indicators were computed **positionally**, with no awareness of time: TA-Lib and numpy
+  see an array index, not a timestamp, so a missing bar silently made two rows minutes
+  apart look adjacent, corrupting every value after the gap. `Pipeline.run()` and
+  `run_live()` now close gaps with **real re-fetched bars** before computing anything.
+  Synthetic fill was ruled out empirically, not assumed: verified against real TA-Lib, a
+  single NaN poisons every subsequent output for the rest of the array — RSI, EMA, and
+  even SMA, despite being a plain sliding window — so NaN-reindexing would have been
+  strictly worse than doing nothing, and forward-filling invents prices that never traded.
+  Backfilled bars run fully through the strategy and can produce signals of their own,
+  marked `Signal.gap_recovered=True` so a consumer can treat a signal for an
+  already-minutes-old bar differently from a live one. A bar re-fetched to close a gap
+  that then arrives on the stream anyway (delayed rather than lost) is deduplicated
+  instead of processed twice.
+- `run_live()` had no error handling around indicator or strategy execution — one bad bar
+  killed the entire live stream. It now logs and continues, matching `run()`.
+- `Pipeline` had no rate limiting at all, so gap backfill would have hammered an
+  exchange's REST API unthrottled. Throttling moved onto `DataSource` (see below), which
+  both `Pipeline` and `DataCollector` now share.
+- `DataCollector` executed user-submitted connection scripts **in-process, bypassing the
+  executor layer entirely** — unsandboxed, while the same code went through
+  `SubprocessExecutor` under `Pipeline`. The historical/gap path now fetches via the
+  executor. Streaming still does not: `PluginExecutor` has no streaming method, which is
+  a separate design problem, tracked rather than hidden.
+
+### Changed
+- **Breaking: `Pipeline.run()` / `run_live()` take `timeframe: int`**, not `str | int`.
+  Callers convert human strings themselves with the same public `parse_timeframe()` the
+  framework used internally.
+- **Breaking: `timeframe` is now an integer *step* in the source's own timestamp unit**,
+  not "seconds". `DataSource.timestamp_unit` (`"s"`/`"ms"`/`"us"`/`"ns"`, default `"s"`)
+  declares that unit; the framework consults it only where wall-clock time meets stored
+  timestamps, since gap and batching arithmetic was already unit-relative. This unblocks
+  sub-second sources (ticks, order books), which were previously blocked by naming
+  convention rather than by any actual arithmetic. `parse_timeframe(tf, unit="s")` gained
+  an optional unit (`parse_timeframe("4h", "ms") == 14_400_000`). Known cosmetic gap left
+  alone deliberately: aggregate tables are still named `{raw_table}_{bucket}s`, so a
+  millisecond source produces a name like `..._60000s`; renaming would touch existing
+  ClickHouse tables and the name takes part in no computation.
+- **`ConnectionScriptSource` merged into `ScriptSource`**, which now subclasses
+  `DataSource` (the old name remains as an alias). The two classes did the same thing —
+  `exec()` user code — and differed only in calling convention, which meant
+  `DataCollector` could reuse nothing from `DataSource`. One class now handles three
+  conventions: a script that subclasses `DataSource` (full control — it can override
+  `detect_gaps`, `batch_gaps`, `fetch_gap`, `rate_limit`, `timestamp_unit`), module-level
+  `historical()`/`realtime()` functions (existing connection scripts, unchanged), or
+  `result = ...` (UI editor).
+- Script sources compile and exec **once** instead of on every call — each gap fetch used
+  to recompile the whole script. The cache is keyed on the code itself and excluded from
+  pickling, since `SubprocessExecutor` pickles the source per call and a live namespace
+  can hold sockets or HTTP sessions.
+- `DataSource` gained `detect_gaps()`, `batch_gaps()`, `fetch_gap()` and `rate_limit()`,
+  all with working defaults. Gap batching and rate limiting previously lived on
+  `_ConnectionWorker`, though both are properties of the exchange rather than of the
+  worker; they now have one home, shared by every consumer.
+
 ## [0.2.0] - 2026-07-27
 
 ### Added
