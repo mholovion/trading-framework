@@ -32,6 +32,59 @@ from tradingkit.strategy import BarContext, Signal, Strategy
 logger = logging.getLogger(__name__)
 
 
+async def _gap_rows(
+    rows: list[dict], source: DataSource, symbol: str, timeframe: int,
+) -> list[dict]:
+    """Real rows missing from a timestamp-ordered sequence, re-fetched from the source.
+
+    Indicators are computed positionally — TA-Lib and numpy see an array index, not a
+    timestamp — so a missing bar silently makes two rows that are minutes apart look
+    adjacent. Filling the hole with synthetic data is not an option: verified against
+    real TA-Lib, a single NaN poisons every subsequent output for the rest of the array
+    (RSI, EMA and even SMA alike), and forward-filling invents prices that never traded.
+    So the gap is closed with the real bars, re-fetched the same way DataCollector's
+    gap recovery does.
+
+    Detection, batching and fetching are all the source's own hooks, so a source that
+    knows better — one with maintenance windows, or a tighter request limit — overrides
+    them once and both run() and run_live() follow.
+    """
+    if len(rows) < 2:
+        return []
+
+    # Imported lazily: collector.py pulls in ClickHouse at module level, and Pipeline is
+    # deliberately storage-agnostic — only the orchestration is shared, not the backend.
+    from tradingkit.collector import recover_gaps
+
+    filler: list[dict] = []
+
+    async def _fetch(start_ts: int, end_ts: int) -> None:
+        try:
+            filler.extend(await source.fetch_gap(symbol, timeframe, start_ts, end_ts))
+        except Exception as exc:
+            # An unreachable exchange leaves the gap open, exactly as before this
+            # existed — it must not take down the backtest or the live stream.
+            logger.warning(f"Gap backfill failed for [{start_ts}, {end_ts}]: {exc}")
+
+    await recover_gaps(
+        detect=lambda: source.detect_gaps(rows, timeframe),
+        batch=source.batch_gaps,
+        fetch=_fetch,
+    )
+    return sorted(filler, key=lambda r: r["timestamp"])
+
+
+def _merge_rows(rows: list[dict], filler: list[dict]) -> list[dict]:
+    """Splice backfilled rows into the original sequence, deduplicated by timestamp.
+    Rows that were already there win — a re-fetch that overlaps must not replace data
+    the source already streamed."""
+    if not filler:
+        return rows
+    merged = {r["timestamp"]: r for r in filler}
+    merged.update({r["timestamp"]: r for r in rows})
+    return [merged[ts] for ts in sorted(merged)]
+
+
 # ------------------------------------------------------------------ #
 # PipelineResult                                                       #
 # ------------------------------------------------------------------ #
@@ -144,6 +197,14 @@ class Pipeline:
         if df.height == 0:
             return PipelineResult(signals=[], data=df, indicators={})
 
+        # Close gaps before computing anything: indicators are positional, so a hole in
+        # the history silently shifts every value after it (see _gap_rows).
+        rows = df.to_dicts()
+        filler = await _gap_rows(rows, self.source, symbol, timeframe)
+        if filler:
+            logger.info(f"Backfilled {len(filler)} missing bars for {symbol}")
+            df = pl.DataFrame(_merge_rows(rows, filler))
+
         ctx = IndicatorContext(df)
 
         ind_series: dict[str, pl.Series] = {}
@@ -187,34 +248,75 @@ class Pipeline:
         Yields Signal objects. Requires source to support streaming.
 
         `timeframe` is an integer step in the source's own timestamp unit — see run().
+
+        A stream that drops bars (a WebSocket reconnect that doesn't replay what was
+        missed) would otherwise corrupt every indicator value afterwards, since they are
+        computed positionally. Missing bars are re-fetched as real data and run fully
+        through the strategy, so they can produce signals of their own — those carry
+        `gap_recovered=True` so a consumer can treat a signal for an already-minutes-old
+        bar differently from a live one.
         """
         executor = self._get_executor()
 
         ind_series: dict[str, pl.Series] = {}
         rows_acc: list[dict] = []
 
-        async for row in self.source.stream(symbol, timeframe):
-            rows_acc.append(row)
-            df = pl.DataFrame(rows_acc)
-            ctx = IndicatorContext(df)
+        async def _step(row: dict, *, gap_recovered: bool) -> Signal | None:
+            # A bar re-fetched to close a gap can race with the same bar arriving from
+            # the stream moments later (delayed, not actually lost) -- replace rather
+            # than append, or one bar would be processed twice and could yield two
+            # signals.
+            if rows_acc and rows_acc[-1]["timestamp"] == row["timestamp"]:
+                rows_acc[-1] = row
+            else:
+                rows_acc.append(row)
 
+            ctx = IndicatorContext(pl.DataFrame(rows_acc))
             for name, indicator in self.indicators.items():
-                ind_series[name] = await executor.compute_indicator(indicator, ctx)
+                try:
+                    ind_series[name] = await executor.compute_indicator(indicator, ctx)
+                except Exception as exc:
+                    # run() already tolerates a bad bar per-strategy; run_live() had no
+                    # equivalent, so one exception killed the whole stream.
+                    logger.debug(f"Indicator {name!r} error: {exc}")
 
             i = len(rows_acc) - 1
             indicators_at_bar = {
-                name: (series[i] if series[i] is not None else float("nan"))
+                name: (series[i] if i < len(series) and series[i] is not None
+                       else float("nan"))
                 for name, series in ind_series.items()
             }
             bar = BarContext(row, indicators_at_bar, {
                 name: series[:i + 1] for name, series in ind_series.items()
             })
-            signal = await executor.process_strategy_bar(self.strategy, bar)
+            try:
+                signal = await executor.process_strategy_bar(self.strategy, bar)
+            except Exception as exc:
+                logger.debug(f"Strategy error at {row.get('timestamp')}: {exc}")
+                return None
+
             if signal is not None:
                 if signal.timestamp is None:
                     signal.timestamp = row.get("timestamp")
                 if getattr(signal, "price", None) is None:
                     signal.price = row.get("close")
+                signal.gap_recovered = gap_recovered
+            return signal
+
+        async for row in self.source.stream(symbol, timeframe):
+            if rows_acc:
+                filler = await _gap_rows(
+                    [rows_acc[-1], row], self.source, symbol, timeframe,
+                )
+                if filler:
+                    logger.info(f"Backfilled {len(filler)} missing bars for {symbol}")
+                for missing_row in filler:
+                    signal = await _step(missing_row, gap_recovered=True)
+                    if signal is not None:
+                        yield signal
+
+            signal = await _step(row, gap_recovered=False)
+            if signal is not None:
                 yield signal
 
     def to_dict(self) -> dict:

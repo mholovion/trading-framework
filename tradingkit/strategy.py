@@ -23,10 +23,15 @@ class Signal:
     """
     Universal signal produced by a strategy.
 
-    type:       arbitrary string — strategy defines its own taxonomy
-    confidence: 0.0 – 1.0
-    metadata:   any extra data the strategy wants to store,
-                accessible as attributes (signal.price, signal.zscore, …)
+    type:          arbitrary string — strategy defines its own taxonomy
+    confidence:    0.0 – 1.0
+    metadata:      any extra data the strategy wants to store,
+                   accessible as attributes (signal.price, signal.zscore, …)
+    gap_recovered: set by Pipeline.run_live() when this signal came from a bar that was
+                   backfilled with real historical data after a stream gap, rather than
+                   from a genuinely live tick — lets a consumer (SignalSink etc.) treat
+                   it differently (e.g. log but don't alert on a signal for a bar that's
+                   already minutes old by the time it's generated)
 
     Example:
         Signal("anomaly", 0.95, metadata={"zscore": 4.2})
@@ -36,6 +41,7 @@ class Signal:
     confidence: float
     timestamp:  int | None = None
     metadata:   dict = field(default_factory=dict)
+    gap_recovered: bool = False
 
     def __getattr__(self, name: str):
         md = self.__dict__.get("metadata")
@@ -57,10 +63,11 @@ class Signal:
 
     def to_dict(self) -> dict:
         return {
-            "signal_type": self.type,
-            "confidence":  self.confidence,
-            "timestamp":   self.timestamp,
-            "metadata":    self.metadata,
+            "signal_type":   self.type,
+            "confidence":    self.confidence,
+            "timestamp":     self.timestamp,
+            "metadata":      self.metadata,
+            "gap_recovered": self.gap_recovered,
         }
 
     @classmethod
@@ -70,6 +77,7 @@ class Signal:
             confidence=d["confidence"],
             timestamp=d.get("timestamp"),
             metadata=d.get("metadata", {}),
+            gap_recovered=d.get("gap_recovered", False),
         )
 
 
