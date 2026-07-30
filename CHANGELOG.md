@@ -5,6 +5,106 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.4.0] - 2026-07-30
+
+Signals stop being a rigid struct, and two silent-corruption bugs in cross-source
+aggregation are fixed.
+
+**This release deliberately ships without backtest metrics.** The built-in trade pairing
+was removed because it reported wrong numbers convincingly (details below), and its
+replacement — user-written `Metric`/`ScriptMetric` analytics, where PnL is computed from
+columns you name rather than from a guess about what `"buy"` means — is the next piece of
+work, not part of this release. A backtest currently returns the data, the indicator
+series and `signals_df`; anything derived is yours to compute until then. Nothing is
+better than confidently wrong.
+
+### Fixed — cross-source aggregation on a shared table
+- **`SourceRef` had no way to say *which rows* of a table it means**, so cross-source
+  aggregation was unusable on the schema a real collector produces. `ensure_cross_source_mv()`
+  generated its Materialized View with no `WHERE` at all, which is fine when each source has
+  its own table (`candles_btc_usdt`, as every docstring assumed) and silently wrong when one
+  shared `candles` table is keyed by exchange/symbol/timeframe — which is what the default
+  source script writes. `argMaxState(field, timestamp) GROUP BY timestamp` then picks
+  whichever series won at each timestamp, so **one column interleaved BTC, ETH and SOL
+  prices**: found by dogfooding a BTC−ETH spread that came back all zeros because both
+  aliases were reading the same rows, with individual timestamps carrying an ETH price in
+  the "btc" column. No error, no warning, a perfectly plausible series of garbage.
+  `SourceRef(..., filters={"exchange": "whitebit", "symbol": "BTC_USDT"})` now pins it, and
+  the same filters go into `backfill_cross_source()` — a mismatch there would leave clean
+  live data sitting on mixed history. Filters are equality-only by design: a MV body is DDL
+  and cannot be parameterized, so a free-form `WHERE` string would have to be defended by a
+  hand-written SQL validator, the approach already bypassed once in this codebase
+  (`"btc -- eth"` initially passed as two valid operators). Instead the column name goes
+  through the existing identifier grammar and the value through the same `_fmt()` escaping
+  every ordinary query value uses.
+- **`setup_aggregation()` now refuses to build an ambiguous aggregation** instead of
+  producing one that mixes series. If a source table holds more than one distinct
+  `exchange`/`symbol`/`timeframe` and the filters don't pin it, it raises and names the
+  column. A table that genuinely holds one series still needs no filters, so the
+  one-table-per-source style is unaffected. This is the check whose absence let the bug
+  above survive to production data rather than failing at creation.
+- **`AggregationContext` filtered source data by the *project name*.**
+  `AggregationWorker._run_one()` did `exchange = script_info.get("exchange", namespace)` and
+  `fetch_from_unit_table()` applied `exchange = %(ex)s` unconditionally, so an aggregation in
+  a project called `my_bot`, over data tagged `whitebit`, matched zero rows — `combine()`
+  returned `[]`, the worker hit `if not rows: return`, and nothing was logged. The script had
+  no legal way out either: `ctx.query()` took no exchange and `AggregationContext` was never
+  injected into the script namespace. The root cause was one variable serving two roles —
+  tagging the aggregation's *output* rows and filtering its *input* data. They are now
+  separate: the namespace still tags output (so existing rows stay readable by
+  `_get_last_ts`), while input comes from the aggregation's own
+  `SOURCE_FILTERS = {"exchange": "whitebit"}`, with `ctx.query(..., exchange=...)` for
+  per-query narrowing. `fetch_from_unit_table`'s `exchange` argument is optional now, since
+  a mandatory filter with nothing sensible to put in it is what caused this.
+
+### Removed
+- **Built-in trade pairing and PnL are gone**: `PipelineResult.trades`,
+  `PipelineResult.summary()`, `Trade`, `BacktestRunner._pair_signals()`, and every
+  trade-derived property of `BacktestResult` (`total_trades`, `winning_trades`,
+  `losing_trades`, `win_rate`, `total_pnl`, `avg_pnl`, `max_drawdown`, `summary()`).
+  They did not merely lack short support — they **reported numbers that were wrong**, and
+  plausibly so. Verified against the real code: a short strategy going `sell@100 → buy@90`
+  then `sell@95 → buy@80` (a genuine +25) came back as *one* trade, `side="buy"`,
+  `entry@90 → exit@95`, `pnl=+5`, `win_rate=100%` — it silently re-paired the signals as a
+  long, invented a trade the strategy never took, and dropped both real shorts. An
+  unclosed position vanished with no trace, and a signal without a `price` made `.trades`
+  raise `AttributeError` outright, which is every non-OHLCV source. The root cause was
+  structural: pairing had to *guess* intent from `Signal.type == "buy"`, because the
+  framework has no notion of a position and a strategy therefore had no way to say what it
+  meant. Interpreting a strategy's own vocabulary belongs to analytics that are told which
+  columns mean what — arriving as `Metric`/`ScriptMetric` in a following release.
+- `Signal.is_buy` / `Signal.is_sell` — they existed only to feed that pairing.
+- `Strategy.parameters` — assigned in `__init__` and read by nothing in the framework.
+
+### Changed
+- **Breaking: `Signal` has no mandatory fields.** It was the one entity in the framework
+  with a rigid schema, while `IndicatorContext` — "wraps *any* Polars DataFrame" — requires
+  only a `timestamp` column and `DataSource` rows are free-form. `Signal` is now a sparse
+  timestamped record whose schema the strategy author owns: `Signal(action="short",
+  price=42.0, zscore=4.2)`, or a plain `dict` from `on_bar()` with no import at all.
+  `type`, `confidence`, `metadata` and `price` are no longer declared fields; nothing is
+  privileged. The framework *adds* exactly two fields rather than requiring any:
+  `timestamp`, and `gap_recovered` on the live path.
+- `PipelineResult.signals_df` / `BacktestResult.signals_df` — the emitted signals as a
+  `pl.DataFrame`, columns unioned across signals so bars that carried different fields
+  simply leave nulls. Since `timestamp` is always present, `IndicatorContext(signals_df)`
+  works directly: analytics over signals is the same primitive as indicators over prices.
+- `run()` no longer copies `row["close"]` onto `signal.price`. That assumed the source was
+  OHLCV and privileged one field name; a strategy that wants a price has `bar.close` and
+  puts it there itself.
+
+### Fixed
+- `Signal.to_dict()` silently dropped fields. `signal.price = x` wrote to `__dict__` while
+  `to_dict()` serialised only the declared fields plus `metadata`, so **every signal the
+  API returned had lost its price**. With one field store this cannot recur by
+  construction rather than by vigilance — and `from_dict(to_dict(sig)) == sig` now holds
+  for anything, including fields the framework added.
+- A `Strategy` subclass whose own `__init__` skipped `super().__init__()` had no `.config`
+  at all, so `get_required_indicators()` raised `AttributeError` on it — and writing such
+  an `__init__` is the normal case, since a strategy's parameters are usually plain
+  arguments. `config` now falls back to an empty dict per instance (verified not shared
+  between instances, which a mutable class attribute would have been).
+
 ## [0.3.0] - 2026-07-28
 
 ### Fixed
