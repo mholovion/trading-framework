@@ -45,7 +45,7 @@ import asyncio
 import logging
 import time
 from abc import ABC
-from typing import Any
+from typing import Any, ClassVar
 
 import polars as pl
 
@@ -73,9 +73,14 @@ class AggregationContext:
         joined = btc.join(eth, on="timestamp", suffix="_eth")
     """
 
-    def __init__(self, db: ClickHouseManager, exchange: str) -> None:
-        self._db       = db
-        self._exchange = exchange
+    def __init__(self, db: ClickHouseManager, source_filters: dict | None = None) -> None:
+        self._db = db
+        #: Default equality filters applied to every query() — declared by the aggregation
+        #: (Aggregation.SOURCE_FILTERS), not inferred. This used to be a single `exchange`
+        #: string that the worker filled in from the *project namespace*, so a project
+        #: named "my_bot" reading data tagged "whitebit" matched zero rows and combine()
+        #: returned nothing, silently.
+        self._source_filters = dict(source_filters or {})
 
     async def query(
         self,
@@ -83,16 +88,21 @@ class AggregationContext:
         symbol: str | None = None,
         start_ts: int | None = None,
         end_ts:   int | None = None,
+        **filters: Any,
     ) -> pl.DataFrame:
         """
-        Fetch from any ClickHouse table with optional symbol and time filters.
+        Fetch from any ClickHouse table with optional identity and time filters.
+
+        Keyword filters narrow further for this one call and override the aggregation's
+        SOURCE_FILTERS, e.g. ctx.query("candles", exchange="binance").
 
         For raw unit tables (ReplacingMergeTree): plain SELECT *.
         For aggregating tables, the script is responsible for using the right table name
         (e.g. 'candles_3600s' for pre-computed 1h buckets).
         """
+        merged = {**self._source_filters, **filters}
         return await self._db.fetch_from_unit_table(
-            table, self._exchange, symbol, start_ts, end_ts
+            table, symbol=symbol, start_ts=start_ts, end_ts=end_ts, filters=merged
         )
 
 
@@ -102,17 +112,33 @@ class AggregationContext:
 
 class SourceRef:
     """
-    Declares one source a cross-source Aggregation reads from — a ClickHouse table plus
-    which column to combine (usually a raw candles-shaped table, but any table with a
-    timestamp column works).
+    Declares one source a cross-source Aggregation reads from — a ClickHouse table, which
+    column to combine, and which rows of that table belong to this source.
 
+        # one table per series
         btc = SourceRef("candles_btc_usdt", field="close")
+
+        # one shared table holding many series -- what a real collector writes
+        btc = SourceRef("candles", field="close",
+                        filters={"exchange": "whitebit", "symbol": "BTC_USDT"})
+
+    `filters` is equality-only and is rendered into the source's Materialized View. Without
+    it on a shared table the MV aggregates every row, and argMax picks whichever series won
+    at each timestamp — one column silently interleaving BTC, ETH and SOL. setup_aggregation()
+    refuses to build such an aggregation rather than let it return plausible garbage.
     """
 
-    def __init__(self, table: str, field: str = "close", ch_type: str = "Float64") -> None:
+    def __init__(
+        self,
+        table: str,
+        field: str = "close",
+        ch_type: str = "Float64",
+        filters: dict | None = None,
+    ) -> None:
         self.table   = table
         self.field   = field
         self.ch_type = ch_type
+        self.filters = dict(filters or {})
 
 
 class Aggregation(ABC):
@@ -123,14 +149,22 @@ class Aggregation(ABC):
 
         class BtcEthSpread(Aggregation):
             OUTPUT_TABLE = "btc_eth_spread"
-            btc = SourceRef("candles_btc_usdt", field="close")
-            eth = SourceRef("candles_eth_usdt", field="close")
+            btc = SourceRef("candles", field="close", filters={"symbol": "BTC_USDT"})
+            eth = SourceRef("candles", field="close", filters={"symbol": "ETH_USDT"})
 
             def combine_sql(self) -> str:
                 return "btc - eth"
     """
 
     OUTPUT_TABLE: str
+
+    #: Equality filters applied to every ctx.query() on the combine() path — the
+    #: aggregation stating which data it reads, e.g. {"exchange": "whitebit"}. The worker
+    #: used to substitute the *project namespace* here, so an aggregation in project
+    #: "my_bot" filtered source rows by exchange="my_bot" and found none, silently. Only
+    #: the combine() path needs this; combine_sql() sources carry their own SourceRef
+    #: filters instead.
+    SOURCE_FILTERS: ClassVar[dict] = {}
 
     @classmethod
     def required_sources(cls) -> dict[str, SourceRef]:
@@ -285,15 +319,25 @@ async def setup_aggregation(db: ClickHouseManager, agg: Aggregation) -> None:
     sql = agg.combine_sql()
 
     if sql is not None:
+        # Refuse to build an aggregation whose sources are ambiguous, before any DDL runs:
+        # a shared table with no filter yields a column that interleaves several series,
+        # and nothing downstream can tell that apart from a real one.
+        for ref in sources.values():
+            await db.assert_source_unambiguous(ref.table, ref.filters)
+
         await db.ensure_cross_source_table(
             agg.OUTPUT_TABLE, {alias: ref.ch_type for alias, ref in sources.items()}
         )
         for alias, ref in sources.items():
+            # The MV covers rows from now on, the backfill covers rows already there --
+            # both must get the same filters or history and live data disagree.
             await db.ensure_cross_source_mv(
-                agg.OUTPUT_TABLE, ref.table, alias, ref.field, ref.ch_type
+                agg.OUTPUT_TABLE, ref.table, alias, ref.field, ref.ch_type,
+                filters=ref.filters,
             )
             await db.backfill_cross_source(
-                agg.OUTPUT_TABLE, ref.table, alias, ref.field, ref.ch_type
+                agg.OUTPUT_TABLE, ref.table, alias, ref.field, ref.ch_type,
+                filters=ref.filters,
             )
         return
 
@@ -334,7 +378,14 @@ async def query_aggregation(
         aliases = list(agg.required_sources())
         return await db.query_cross_source(agg.OUTPUT_TABLE, aliases, sql, start_ts, end_ts)
 
-    df = await AggregationContext(db, exchange).query(agg.OUTPUT_TABLE, start_ts=start_ts, end_ts=end_ts)
+    # `exchange` here selects rows by the tag AggregationWorker stamped on its own output,
+    # not by a source exchange. Empty means "any", matching fetch_from_unit_table's now
+    # optional filter -- it used to filter for exchange = '' and so matched nothing unless
+    # the caller happened to know the worker's tag.
+    filters = {"exchange": exchange} if exchange else {}
+    df = await AggregationContext(db, filters).query(
+        agg.OUTPUT_TABLE, start_ts=start_ts, end_ts=end_ts
+    )
     return df.to_dicts()
 
 
@@ -414,15 +465,22 @@ class AggregationWorker:
     async def _run_one(self, script_info: dict) -> None:
         namespace = script_info.get("namespace", "default")
         name      = script_info.get("name", "unknown")
-        exchange  = script_info.get("exchange", namespace)
         agg: Aggregation = script_info["agg"]
+
+        # `namespace` tags this aggregation's OUTPUT rows ("who computed this") and is read
+        # back by _get_last_ts, so the two stay consistent. It is deliberately NOT used to
+        # filter INPUT data any more: the two roles were one variable, which is why an
+        # aggregation in project "my_bot" searched source rows for exchange="my_bot".
+        # What to read is the aggregation's own declaration.
+        output_tag     = script_info.get("exchange", namespace)
+        source_filters = dict(getattr(agg, "SOURCE_FILTERS", {}) or {})
 
         if agg.combine_sql() is not None:
             return  # MV-driven — setup_aggregation() already installed it, nothing to poll
 
         output_table = agg.OUTPUT_TABLE
         now_ts  = int(time.time())
-        last_ts = await self._get_last_ts(output_table, exchange)
+        last_ts = await self._get_last_ts(output_table, output_tag)
 
         if last_ts is None:
             last_ts = 0  # first run: aggregate from the beginning
@@ -430,7 +488,7 @@ class AggregationWorker:
         if now_ts <= last_ts:
             return  # nothing new
 
-        ctx = AggregationContext(self._db, exchange)
+        ctx = AggregationContext(self._db, source_filters)
         rows = await agg.combine(ctx, last_ts, now_ts)
         if not rows:
             return
@@ -449,7 +507,7 @@ class AggregationWorker:
 
         table_schema = dict(zip(df.columns, df.dtypes))
         await self._db.ensure_raw_table(output_table, table_schema)
-        await self._db.insert_unit_batch(output_table, df, exchange, "", "")
+        await self._db.insert_unit_batch(output_table, df, output_tag, "", "")
         await self._db.flush()
         logger.info(
             f"AggregationWorker: {name!r} → {output_table} stored {len(rows)} rows"

@@ -85,9 +85,9 @@ result = pl.DataFrame({"timestamp": np.arange(n) * 60, "open": close, "high": cl
         indicators={"rsi": ScriptIndicator(code="result = ta.rsi(close, 14)", period=14)},
         strategy=ScriptStrategy(code="""
 if bar.rsi < 30:
-    signal = Signal("buy", 0.8)
+    signal = Signal(action="buy", price=bar.close)
 elif bar.rsi > 70:
-    signal = Signal("sell", 0.7)
+    signal = Signal(action="sell", price=bar.close)
 """),
     )
     result = await p.run("BTC_USDT", 60, start_ts=0, end_ts=3600)
@@ -95,39 +95,32 @@ elif bar.rsi > 70:
     assert "rsi" in result.indicators
 
 
-def _signal_with_price(type_: str, timestamp: int, price: float) -> Signal:
-    sig = Signal(type_, 0.8, timestamp=timestamp)
-    sig.price = price
-    return sig
+def test_pipeline_result_signals_df_unions_columns():
+    """Signals are a timestamped table with whatever schema the strategy chose — the
+    seam a Metric computes PnL over."""
+    result = PipelineResult(
+        signals=[Signal(timestamp=100, action="buy", px=10.0),
+                 Signal(timestamp=200, zscore=4.2)],
+        data=pl.DataFrame(), indicators={},
+    )
+    df = result.signals_df
+    assert set(df.columns) == {"timestamp", "action", "px", "zscore"}
+    assert df["zscore"].to_list() == [None, 4.2]
 
 
-def test_pipeline_result_trades_pairs_buy_sell_signals():
-    """Regression: .trades used sig.is_buy/is_sell, which didn't exist on Signal."""
-    signals = [
-        _signal_with_price("buy", 100, 10.0),
-        _signal_with_price("sell", 200, 12.0),
-    ]
-    result = PipelineResult(signals=signals, data=pl.DataFrame(), indicators={})
-
-    trades = result.trades
-    assert len(trades) == 1
-    trade = trades[0]
-    assert trade.side == "buy"
-    assert trade.entry_ts == 100
-    assert trade.exit_ts == 200
-    assert trade.entry_price == 10.0
-    assert trade.exit_price == 12.0
-    assert trade.pnl == pytest.approx(2.0)
-    assert trade.pnl_pct == pytest.approx(20.0)
+def test_pipeline_result_empty_signals_df_still_has_timestamp():
+    result = PipelineResult(signals=[], data=pl.DataFrame(), indicators={})
+    assert result.signals_df.columns == ["timestamp"]
 
 
-def test_pipeline_result_trades_ignores_unmatched_signals():
-    signals = [
-        _signal_with_price("sell", 50, 9.0),   # sell with no open trade -> ignored
-        _signal_with_price("buy", 100, 10.0),  # never closed
-    ]
-    result = PipelineResult(signals=signals, data=pl.DataFrame(), indicators={})
-    assert result.trades == []
+def test_pipeline_result_no_longer_computes_trades():
+    """Regression on the reason this was removed: the built-in pairing string-matched
+    "buy"/"sell" and hardcoded side="buy", so a short strategy's real +25 was reported
+    as a fabricated long trade of +5. Interpreting a strategy's own vocabulary belongs
+    to a configurable Metric, not to the result object."""
+    result = PipelineResult(signals=[], data=pl.DataFrame(), indicators={})
+    assert not hasattr(result, "trades")
+    assert not hasattr(result, "summary")
 
 # ------------------------------------------------------------------ #
 # Gap-aware indicator computation (TASK-014)                           #
@@ -247,7 +240,7 @@ async def test_run_live_marks_backfilled_signals():
         name="p",
         source=GappySource(streamed, missing),
         indicators={},
-        strategy=ScriptStrategy(code='signal = Signal("buy", 1.0)'),
+        strategy=ScriptStrategy(code='signal = Signal(action="buy", price=bar.close)'),
     )
 
     signals = [s async for s in p.run_live("BTC", 60)]
@@ -265,7 +258,7 @@ async def test_run_live_deduplicates_a_backfilled_bar_that_also_arrives_live():
         name="p",
         source=GappySource(streamed, missing),
         indicators={},
-        strategy=ScriptStrategy(code='signal = Signal("buy", 1.0)'),
+        strategy=ScriptStrategy(code='signal = Signal(action="buy", price=bar.close)'),
     )
 
     signals = [s async for s in p.run_live("BTC", 60)]
@@ -292,7 +285,7 @@ async def test_run_live_survives_a_failing_indicator():
         name="p",
         source=GappySource([_bar(0, 1.0), _bar(60, 2.0)]),
         indicators={"bad": ScriptIndicator(code="raise RuntimeError('boom')", period=1)},
-        strategy=ScriptStrategy(code='signal = Signal("buy", 1.0)'),
+        strategy=ScriptStrategy(code='signal = Signal(action="buy", price=bar.close)'),
     )
     signals = [s async for s in p.run_live("BTC", 60)]
     assert [s.timestamp for s in signals] == [0, 60]

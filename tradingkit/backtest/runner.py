@@ -19,11 +19,21 @@ from typing import Any
 
 import polars as pl
 
-from tradingkit.backtest.result import BacktestResult, Trade
+from tradingkit.backtest.result import BacktestResult
 from tradingkit.indicator import Indicator, IndicatorContext
 from tradingkit.strategy import BarContext, Signal, Strategy
 
 logger = logging.getLogger(__name__)
+
+
+def _as_signal_dict(result: Signal | dict, row: dict) -> dict:
+    """Normalise whatever on_bar() returned into a plain record, stamping the bar's
+    timestamp when the strategy didn't set one. Only `timestamp` is filled in -- see
+    Pipeline._as_signal() for why nothing else is."""
+    fields = result.to_dict() if isinstance(result, Signal) else dict(result)
+    if fields.get("timestamp") is None:
+        fields["timestamp"] = row.get("timestamp")
+    return fields
 
 
 class BacktestRunner:
@@ -55,10 +65,10 @@ class BacktestRunner:
             strategy:   Strategy instance with on_bar()
 
         Returns:
-            BacktestResult with trades, signals, data, and indicator series
+            BacktestResult with signals, data, and indicator series
         """
         if data.height == 0:
-            return BacktestResult(trades=[], signals=[], data=data, indicators={})
+            return BacktestResult(signals=[], data=data, indicators={})
 
         ctx = IndicatorContext(data)
 
@@ -85,49 +95,11 @@ class BacktestRunner:
                 signal = None
 
             if signal is not None:
-                if signal.timestamp is None:
-                    signal.timestamp = row.get("timestamp")
-                if getattr(signal, "price", None) is None:
-                    signal.price = row.get("close")
-                d = signal.to_dict()
-                d["timestamp"] = signal.timestamp
-                d["price"] = signal.price
-                signals.append(d)
+                signals.append(_as_signal_dict(signal, row))
 
-        trades = self._pair_signals(signals)
-        return BacktestResult(
-            trades=trades,
-            signals=signals,
-            data=data,
-            indicators=ind_series,
-        )
+        return BacktestResult(signals=signals, data=data, indicators=ind_series)
 
-    @staticmethod
-    def _pair_signals(signals: list[dict]) -> list[Trade]:
-        trades: list[Trade] = []
-        open_trade = None
-        for sig in sorted(signals, key=lambda s: s.get("timestamp", 0)):
-            st = sig.get("signal_type")
-            price = sig.get("price") or 0.0
-            ts = sig.get("timestamp") or 0
-            conf = sig.get("confidence", 0.0)
-
-            if st == "buy" and open_trade is None:
-                open_trade = {"ts": ts, "price": price, "conf": conf}
-            elif st == "sell" and open_trade is not None:
-                ep = open_trade["price"]
-                pnl = price - ep
-                pnl_pct = (pnl / ep * 100) if ep else 0.0
-                trades.append(Trade(
-                    entry_ts=open_trade["ts"],
-                    exit_ts=ts,
-                    side="buy",
-                    entry_price=ep,
-                    exit_price=price,
-                    pnl=pnl,
-                    pnl_pct=pnl_pct,
-                    entry_signal_confidence=open_trade["conf"],
-                    exit_signal_confidence=conf,
-                ))
-                open_trade = None
-        return trades
+    # _pair_signals() lived here: it string-matched "buy"/"sell", hardcoded side="buy",
+    # and so reported a short strategy's +25 as a fabricated long trade of +5. Pairing
+    # needs to know what the strategy's own field values mean, which only the author does,
+    # so it now belongs to a configurable Metric over signals_df rather than here.

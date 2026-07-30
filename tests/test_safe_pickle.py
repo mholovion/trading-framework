@@ -23,9 +23,9 @@ def test_roundtrip_script_indicator():
 
 
 def test_roundtrip_signal():
-    sig = Signal("buy", 0.8, metadata={"direction": "long"})
+    sig = Signal(action="buy", confidence=0.8, direction="long")
     restored = _safe_pickle.loads(pickle.dumps(sig))
-    assert restored.type == "buy"
+    assert restored.action == "buy"
     assert restored.direction == "long"
 
 

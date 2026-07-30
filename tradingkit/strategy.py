@@ -7,7 +7,6 @@ Usage:
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from dataclasses import dataclass, field
 from typing import Any
 
 import polars as pl
@@ -18,67 +17,79 @@ from tradingkit.indicator import Indicator, IndicatorDeclaration
 # Signal                                                               #
 # ------------------------------------------------------------------ #
 
-@dataclass
 class Signal:
     """
-    Universal signal produced by a strategy.
+    A sparse, timestamped record emitted by a strategy.
 
-    type:          arbitrary string — strategy defines its own taxonomy
-    confidence:    0.0 – 1.0
-    metadata:      any extra data the strategy wants to store,
-                   accessible as attributes (signal.price, signal.zscore, …)
-    gap_recovered: set by Pipeline.run_live() when this signal came from a bar that was
-                   backfilled with real historical data after a stream gap, rather than
-                   from a genuinely live tick — lets a consumer (SignalSink etc.) treat
-                   it differently (e.g. log but don't alert on a signal for a bar that's
-                   already minutes old by the time it's generated)
+    The framework mandates no fields at all — the strategy author owns the schema, the
+    same way a DataSource owns its row schema. `Signal` is convenience sugar; on_bar()
+    may equally return a plain dict.
 
-    Example:
-        Signal("anomaly", 0.95, metadata={"zscore": 4.2})
-        signal.zscore  # → 4.2 via __getattr__
+        Signal(action="short", price=42.0, zscore=4.2)
+        Signal(regime="high_vol")                    # not a trade at all
+        {"action": "buy", "price": 42.0}              # same thing, no import needed
+
+    Two fields the framework *adds* when absent, rather than requires:
+        timestamp      — the bar's timestamp, so signals form a queryable table
+        gap_recovered  — True when Pipeline.run_live() produced this from a bar that was
+                         backfilled after a stream gap rather than from a live tick, so a
+                         consumer can treat an already-minutes-old signal differently
+
+    What a field *means* is not the framework's business: pairing signals into trades and
+    computing PnL is the job of a Metric over signals_df, which reads whichever columns
+    it was configured with. That is why nothing here is privileged.
     """
-    type:       str
-    confidence: float
-    timestamp:  int | None = None
-    metadata:   dict = field(default_factory=dict)
-    gap_recovered: bool = False
 
-    def __getattr__(self, name: str):
-        md = self.__dict__.get("metadata")
-        if md is not None and name in md:
-            return md[name]
-        raise AttributeError(f"Signal has no attribute '{name}'")
+    __slots__ = ("_fields",)
 
-    @property
-    def is_buy(self) -> bool:
-        return self.type == "buy"
+    def __init__(self, **fields: Any) -> None:
+        object.__setattr__(self, "_fields", dict(fields))
 
-    @property
-    def is_sell(self) -> bool:
-        return self.type == "sell"
+    def __getattr__(self, name: str) -> Any:
+        # __slots__ means _fields is the only real attribute, so anything else is a field
+        # lookup. Raising AttributeError (not KeyError) keeps getattr(sig, x, default)
+        # working, which callers rely on for optional fields.
+        try:
+            return object.__getattribute__(self, "_fields")[name]
+        except KeyError:
+            raise AttributeError(f"Signal has no field {name!r}") from None
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        self._fields[name] = value
+
+    def __contains__(self, name: str) -> bool:
+        return name in self._fields
+
+    # Explicit pickle protocol: unpickling builds the object without __init__, so the
+    # default path would restore state through __setattr__ before _fields exists and
+    # blow up looking it up. Setting the slot directly avoids that.
+    def __getstate__(self) -> dict:
+        return dict(self._fields)
+
+    def __setstate__(self, state: dict) -> None:
+        object.__setattr__(self, "_fields", dict(state))
+
+    def __eq__(self, other: object) -> bool:
+        if isinstance(other, Signal):
+            return self._fields == other._fields
+        return NotImplemented
+
+    def __repr__(self) -> str:
+        inner = ", ".join(f"{k}={v!r}" for k, v in self._fields.items())
+        return f"Signal({inner})"
 
     # ------------------------------------------------------------------ #
     # Serialisation                                                        #
     # ------------------------------------------------------------------ #
 
     def to_dict(self) -> dict:
-        return {
-            "signal_type":   self.type,
-            "confidence":    self.confidence,
-            "timestamp":     self.timestamp,
-            "metadata":      self.metadata,
-            "gap_recovered": self.gap_recovered,
-        }
+        """Every field, including any the framework added. Nothing can be lost here:
+        there is only one place fields live, so this cannot drift from __setattr__."""
+        return dict(self._fields)
 
     @classmethod
     def from_dict(cls, d: dict) -> Signal:
-        return cls(
-            type=d["signal_type"],
-            confidence=d["confidence"],
-            timestamp=d.get("timestamp"),
-            metadata=d.get("metadata", {}),
-            gap_recovered=d.get("gap_recovered", False),
-        )
+        return cls(**d)
 
 
 # ------------------------------------------------------------------ #
@@ -151,19 +162,35 @@ class Strategy(ABC):
     Implement on_bar() to produce signals:
         async def on_bar(self, bar: BarContext) -> Optional[Signal]:
             if bar.rsi < 30:
-                return Signal("entry", 0.8)
+                return Signal(action="buy", price=bar.close)
 
     The framework resolves and computes all declared indicators before
     calling on_bar() for each bar.
     """
 
+    #: Class-level fallback so a subclass that writes its own __init__ without calling
+    #: super() still has a usable config. Without this, get_required_indicators() raised
+    #: AttributeError on such a strategy -- and writing one is the common case, since a
+    #: strategy's parameters are usually plain __init__ arguments.
+    _config: dict | None = None
+
     def __init__(self, config: dict | None = None) -> None:
-        self.config = config or {}
-        self.parameters = self.config.get("parameters", self.config)
+        self._config = config or {}
+
+    @property
+    def config(self) -> dict:
+        if self._config is None:
+            self._config = {}   # per-instance, so the class-level default stays immutable
+        return self._config
+
+    @config.setter
+    def config(self, value: dict | None) -> None:
+        self._config = value or {}
 
     @abstractmethod
-    async def on_bar(self, bar: BarContext) -> Signal | None:
-        """Process one bar. Return Signal or None (hold)."""
+    async def on_bar(self, bar: BarContext) -> Signal | dict | None:
+        """Process one bar. Return a Signal, a plain dict of the same shape, or None
+        (nothing to emit). The fields are yours to choose — see Signal."""
         ...
 
     @classmethod
@@ -276,7 +303,13 @@ class ScriptStrategy(Strategy):
             return None
         if isinstance(result, Signal):
             return result
-        raise TypeError(f"Strategy code must assign a Signal to 'signal', got {type(result)}")
+        if isinstance(result, dict):
+            # A dict is the same record without the import -- the shape the framework
+            # actually consumes, so accept it rather than making Signal mandatory.
+            return Signal(**result)
+        raise TypeError(
+            f"Strategy code must assign a Signal or dict to 'signal', got {type(result)}"
+        )
 
     def get_required_indicators(self, params: Any = None) -> list:
         fn = self._ns.get("get_required_indicators")

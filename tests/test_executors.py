@@ -30,11 +30,11 @@ async def test_local_executor_compute_indicator(ctx):
 
 async def test_local_executor_process_strategy_bar():
     executor = LocalExecutor()
-    strategy = ScriptStrategy(code='signal = Signal("buy", 0.9) if bar.rsi < 30 else None')
+    strategy = ScriptStrategy(code='signal = Signal(action="buy", confidence=0.9) if bar.rsi < 30 else None')
     bar = BarContext(row={"timestamp": 1}, indicators={"rsi": 10.0})
     signal = await executor.process_strategy_bar(strategy, bar)
     assert signal is not None
-    assert signal.type == "buy"
+    assert signal.action == "buy"
 
 
 async def test_local_executor_process_strategy_bar_no_signal():
@@ -82,10 +82,10 @@ async def test_subprocess_executor_compute_indicator(ctx):
 
 async def test_subprocess_executor_process_strategy_bar():
     async with SubprocessExecutor(timeout_s=15) as executor:
-        strategy = ScriptStrategy(code='signal = Signal("buy", 0.9) if bar.rsi < 30 else None')
+        strategy = ScriptStrategy(code='signal = Signal(action="buy", confidence=0.9) if bar.rsi < 30 else None')
         bar = BarContext(row={"timestamp": 1}, indicators={"rsi": 10.0})
         signal = await executor.process_strategy_bar(strategy, bar)
-        assert signal.type == "buy"
+        assert signal.action == "buy"
 
 
 async def test_subprocess_executor_fetch_source_data():

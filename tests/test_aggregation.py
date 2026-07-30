@@ -16,6 +16,11 @@ from tradingkit.aggregation import (
     SourceRef,
     load_aggregation_plugin,
 )
+from tradingkit.core.clickhouse._sql import _SqlMixin
+from tradingkit.core.clickhouse._unit_tables import (
+    _render_equality_filters,
+    _UnitTablesMixin,
+)
 
 CH_MV_SCRIPT = '''
 SOURCE_TABLE = "candles"
@@ -185,15 +190,179 @@ def test_load_aggregation_plugin_builtin_registry(monkeypatch):
 # AggregationContext
 # ---------------------------------------------------------------------------
 
+class _RecordingDb:
+    """Captures what AggregationContext.query() forwarded, so the filters it applies are
+    asserted rather than inferred."""
+
+    def __init__(self):
+        self.calls: list[dict] = []
+
+    async def fetch_from_unit_table(self, table, exchange=None, symbol=None,
+                                    start_ts=None, end_ts=None, filters=None):
+        self.calls.append({"table": table, "exchange": exchange, "symbol": symbol,
+                           "start_ts": start_ts, "end_ts": end_ts,
+                           "filters": dict(filters or {})})
+        return "fake-dataframe"
+
+
 async def test_aggregation_context_query_delegates_to_db():
-    calls = []
-
-    class FakeDb:
-        async def fetch_from_unit_table(self, table, exchange, symbol, start_ts, end_ts):
-            calls.append((table, exchange, symbol, start_ts, end_ts))
-            return "fake-dataframe"
-
-    ctx = AggregationContext(FakeDb(), exchange="whitebit")
+    db = _RecordingDb()
+    ctx = AggregationContext(db, {"exchange": "whitebit"})
     result = await ctx.query("candles", symbol="BTC_USDT", start_ts=1, end_ts=2)
     assert result == "fake-dataframe"
-    assert calls == [("candles", "whitebit", "BTC_USDT", 1, 2)]
+    assert db.calls == [{
+        "table": "candles", "exchange": None, "symbol": "BTC_USDT",
+        "start_ts": 1, "end_ts": 2, "filters": {"exchange": "whitebit"},
+    }]
+
+
+async def test_aggregation_context_applies_no_filter_when_none_declared():
+    """Regression on TASK-023: the worker used to pass the *project namespace* as an
+    exchange, so a project named "my_bot" filtered source rows by exchange="my_bot" and
+    matched nothing, silently. No declaration must now mean no filter, not a wrong one."""
+    db = _RecordingDb()
+    await AggregationContext(db).query("candles")
+    assert db.calls[0]["filters"] == {}
+    assert db.calls[0]["exchange"] is None
+
+
+async def test_aggregation_context_per_query_filter_overrides_declared():
+    db = _RecordingDb()
+    ctx = AggregationContext(db, {"exchange": "whitebit"})
+    await ctx.query("candles", exchange="binance", timeframe="1m")
+    assert db.calls[0]["filters"] == {"exchange": "binance", "timeframe": "1m"}
+
+
+# ---------------------------------------------------------------------------
+# SourceRef filters + generated WHERE (TASK-022)
+# ---------------------------------------------------------------------------
+
+def test_source_ref_defaults_to_no_filters():
+    ref = SourceRef("candles_btc_usdt", field="close")
+    assert ref.filters == {}
+
+
+def test_source_ref_copies_filters():
+    """A shared dict would let one SourceRef's filters mutate another's."""
+    shared = {"symbol": "BTC_USDT"}
+    ref = SourceRef("candles", filters=shared)
+    shared["symbol"] = "ETH_USDT"
+    assert ref.filters == {"symbol": "BTC_USDT"}
+
+
+def test_render_equality_filters_empty_keeps_sql_unchanged():
+    """Backwards compatibility: a one-series table with no filters must produce exactly
+    the SQL it produced before filters existed."""
+    assert _render_equality_filters(None, _SqlMixin._fmt) == ""
+    assert _render_equality_filters({}, _SqlMixin._fmt) == ""
+
+
+def test_render_equality_filters_sorts_for_determinism():
+    where = _render_equality_filters(
+        {"symbol": "BTC_USDT", "exchange": "whitebit"}, _SqlMixin._fmt
+    )
+    assert where == " WHERE exchange = 'whitebit' AND symbol = 'BTC_USDT'"
+
+
+def test_render_equality_filters_rejects_a_non_identifier_column():
+    with pytest.raises(ValueError, match="filter column"):
+        _render_equality_filters({"symbol; DROP TABLE x": "BTC"}, _SqlMixin._fmt)
+
+
+@pytest.mark.parametrize("value,expected", [
+    ("x' OR 1=1 --",        "'x\\' OR 1=1 --'"),
+    ("back\\slash",         "'back\\\\slash'"),
+    ("plain",               "'plain'"),
+])
+def test_render_equality_filters_escapes_values(value, expected):
+    """A Materialized View body is DDL and cannot be parameterized, so the value has to be
+    rendered safely. This is the injection path that matters: the aggregation comes from
+    plugin_library, i.e. from user input."""
+    assert _render_equality_filters({"symbol": value}, _SqlMixin._fmt) == \
+        f" WHERE symbol = {expected}"
+
+
+class _SqlCapturingDb(_UnitTablesMixin, _SqlMixin):
+    """Captures generated SQL without a ClickHouse connection, so the MV/backfill DDL can
+    be asserted directly."""
+
+    def __init__(self, schema=None, distinct=None):
+        self.sql: list[str] = []
+        self._schema = schema or {}
+        self._distinct = distinct or {}
+
+    async def _execute(self, sql, params=None, settings=None):
+        self.sql.append(sql)
+        for col, values in self._distinct.items():
+            if f"SELECT DISTINCT {col} " in sql:
+                return [(v,) for v in values]
+        return []
+
+    async def get_table_schema(self, table_name):
+        return dict(self._schema)
+
+
+async def test_mv_and_backfill_receive_identical_where():
+    """The MV covers rows from now on and the backfill covers rows already there; if their
+    WHERE clauses differ, clean live data ends up sitting on mixed history."""
+    db = _SqlCapturingDb()
+    filters = {"exchange": "whitebit", "symbol": "BTC_USDT"}
+    await db.ensure_cross_source_mv("out", "candles", "btc", "close", "Float64",
+                                    filters=filters)
+    await db.backfill_cross_source("out", "candles", "btc", "close", "Float64",
+                                   filters=filters)
+
+    mv_sql, backfill_sql = db.sql
+    where = " WHERE exchange = 'whitebit' AND symbol = 'BTC_USDT' "
+    assert where in mv_sql
+    assert where in backfill_sql
+
+
+async def test_mv_without_filters_matches_the_previous_sql_shape():
+    db = _SqlCapturingDb()
+    await db.ensure_cross_source_mv("out", "candles_btc_usdt", "btc", "close", "Float64")
+    assert "FROM candles_btc_usdt GROUP BY timestamp" in db.sql[0]
+    assert "WHERE" not in db.sql[0]
+
+
+# ---------------------------------------------------------------------------
+# Ambiguity detection (TASK-022) — fail loudly instead of mixing series
+# ---------------------------------------------------------------------------
+
+async def test_ambiguous_source_raises_naming_the_column():
+    db = _SqlCapturingDb(
+        schema={"timestamp": None, "exchange": None, "symbol": None, "close": None},
+        distinct={"symbol": ["BTC_USDT", "ETH_USDT", "SOL_USDT"], "exchange": ["whitebit"]},
+    )
+    with pytest.raises(ValueError, match="symbol"):
+        await db.assert_source_unambiguous("candles")
+
+
+async def test_pinned_column_is_not_ambiguous():
+    db = _SqlCapturingDb(
+        schema={"timestamp": None, "symbol": None, "close": None},
+        distinct={"symbol": ["BTC_USDT", "ETH_USDT"]},
+    )
+    await db.assert_source_unambiguous("candles", {"symbol": "BTC_USDT"})
+
+
+async def test_single_series_table_passes_without_filters():
+    """The one-table-per-source style from the docstrings keeps working untouched."""
+    db = _SqlCapturingDb(
+        schema={"timestamp": None, "symbol": None, "close": None},
+        distinct={"symbol": ["BTC_USDT"]},
+    )
+    await db.assert_source_unambiguous("candles_btc_usdt")
+
+
+async def test_table_without_identity_columns_passes():
+    db = _SqlCapturingDb(schema={"timestamp": None, "value": None})
+    await db.assert_source_unambiguous("some_derived_table")
+
+
+async def test_missing_table_is_not_treated_as_ambiguous():
+    class Exploding(_SqlCapturingDb):
+        async def get_table_schema(self, table_name):
+            raise RuntimeError("table does not exist")
+
+    await Exploding().assert_source_unambiguous("not_created_yet")

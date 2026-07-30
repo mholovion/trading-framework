@@ -1,17 +1,16 @@
-"""tradingkit.backtest — BacktestRunner, BacktestResult, Trade pairing."""
+"""tradingkit.backtest — BacktestRunner and BacktestResult."""
 from __future__ import annotations
 
 import polars as pl
 import pytest
 
 from tradingkit.backtest import BacktestResult, BacktestRunner
-from tradingkit.backtest.result import Trade
 from tradingkit.indicator import Indicator, IndicatorContext
 from tradingkit.strategy import BarContext, Signal, Strategy
 
 
 class ConstantRSI(Indicator):
-    """Feeds a scripted sequence of RSI values so buy/sell pairing is deterministic."""
+    """Feeds a scripted sequence of RSI values so signal emission is deterministic."""
     def __init__(self, values, **params):
         super().__init__(**params)
         self._values = values
@@ -25,11 +24,12 @@ class ConstantRSI(Indicator):
 
 
 class ThresholdStrategy(Strategy):
+    """Emits its own vocabulary — the framework privileges none of these field names."""
     async def on_bar(self, bar: BarContext):
         if bar.rsi < 30:
-            return Signal("buy", 0.8)
+            return Signal(action="open_long", price=bar.close)
         if bar.rsi > 70:
-            return Signal("sell", 0.7)
+            return Signal(action="close", price=bar.close)
         return None
 
 
@@ -45,71 +45,78 @@ def data() -> pl.DataFrame:
     })
 
 
-async def test_backtest_pairs_buy_and_sell_into_a_trade(data):
+async def test_backtest_collects_signals_with_the_strategys_own_fields(data):
     runner = BacktestRunner()
     result = await runner.run(
         data=data,
         indicators={"rsi": ConstantRSI([20, 50, 50, 50, 80], period=1)},
         strategy=ThresholdStrategy(),
     )
-    assert result.total_trades == 1
-    trade = result.trades[0]
-    assert trade.side == "buy"
-    assert trade.entry_price == 10.0
-    assert trade.exit_price == 14.0
-    assert trade.pnl == 4.0
-    assert trade.is_win is True
+    assert [s["action"] for s in result.signals] == ["open_long", "close"]
+    assert [s["price"] for s in result.signals] == [10.0, 14.0]
+    assert [s["timestamp"] for s in result.signals] == [0, 240]
 
 
-async def test_backtest_no_signals_produces_no_trades(data):
+async def test_backtest_no_signals(data):
     runner = BacktestRunner()
     result = await runner.run(
         data=data,
         indicators={"rsi": ConstantRSI([50, 50, 50, 50, 50], period=1)},
         strategy=ThresholdStrategy(),
     )
-    assert result.total_trades == 0
-    assert result.win_rate == 0.0
+    assert result.signals == []
 
 
 async def test_backtest_empty_data_returns_empty_result():
     runner = BacktestRunner()
     empty = pl.DataFrame(schema={"timestamp": pl.Int64, "close": pl.Float64})
     result = await runner.run(data=empty, indicators={}, strategy=ThresholdStrategy())
-    assert result.total_trades == 0
     assert result.signals == []
+    assert result.signals_df.height == 0
 
 
-def test_backtest_result_summary_and_properties():
-    trades = [
-        Trade(entry_ts=0, exit_ts=1, side="buy", entry_price=10, exit_price=12, pnl=2, pnl_pct=20),
-        Trade(entry_ts=2, exit_ts=3, side="buy", entry_price=10, exit_price=8, pnl=-2, pnl_pct=-20),
-    ]
-    result = BacktestResult(trades=trades, signals=[], data=pl.DataFrame(), indicators={})
-    assert result.total_trades == 2
-    assert len(result.winning_trades) == 1
-    assert len(result.losing_trades) == 1
-    assert result.win_rate == 0.5
-    assert result.total_pnl == 0
-    assert result.avg_pnl == 0
-    summary = result.summary()
-    assert summary["total_trades"] == 2
-    assert summary["wins"] == 1
+async def test_backtest_stamps_timestamp_but_nothing_else(data):
+    """The framework fills in `timestamp` only — auto-filling a `price` from `close`
+    would privilege one field name and assume the source is OHLCV."""
+    class Minimal(Strategy):
+        async def on_bar(self, bar: BarContext):
+            return Signal(note="hi")
+
+    result = await BacktestRunner().run(data=data, indicators={}, strategy=Minimal())
+    assert result.signals[0] == {"note": "hi", "timestamp": 0}
 
 
-def test_backtest_result_max_drawdown():
-    trades = [
-        Trade(entry_ts=0, exit_ts=1, side="buy", entry_price=10, exit_price=15, pnl=5, pnl_pct=50),
-        Trade(entry_ts=2, exit_ts=3, side="buy", entry_price=10, exit_price=7, pnl=-3, pnl_pct=-30),
-        Trade(entry_ts=4, exit_ts=5, side="buy", entry_price=10, exit_price=8, pnl=-2, pnl_pct=-20),
-    ]
-    result = BacktestResult(trades=trades, signals=[], data=pl.DataFrame(), indicators={})
-    # peak after trade1 = 5, trough after trade3 = 0 -> drawdown = 5
-    assert result.max_drawdown == 5
+async def test_backtest_accepts_a_plain_dict_from_on_bar(data):
+    class DictStrategy(Strategy):
+        async def on_bar(self, bar: BarContext):
+            return {"action": "buy", "px": bar.close}
+
+    result = await BacktestRunner().run(data=data, indicators={}, strategy=DictStrategy())
+    assert result.signals[0] == {"action": "buy", "px": 10.0, "timestamp": 0}
 
 
-def test_backtest_result_empty_trades_properties_dont_crash():
-    result = BacktestResult(trades=[], signals=[], data=pl.DataFrame(), indicators={})
-    assert result.win_rate == 0.0
-    assert result.avg_pnl == 0.0
-    assert result.max_drawdown == 0.0
+def test_signals_df_unions_columns_across_signals():
+    """A strategy may emit different fields on different bars; the table unions them."""
+    result = BacktestResult(
+        signals=[{"timestamp": 1, "action": "buy"}, {"timestamp": 2, "zscore": 4.2}],
+        data=pl.DataFrame(), indicators={},
+    )
+    df = result.signals_df
+    assert set(df.columns) == {"timestamp", "action", "zscore"}
+    assert df["zscore"].to_list() == [None, 4.2]
+
+
+def test_signals_df_is_indicator_context_ready():
+    """This is the seam a Metric will use: analytics over signals is the same primitive
+    as indicators over prices, so signals_df must always carry `timestamp`."""
+    result = BacktestResult(
+        signals=[{"timestamp": 1, "px": 10.0}], data=pl.DataFrame(), indicators={},
+    )
+    ctx = IndicatorContext(result.signals_df)
+    assert ctx.px.to_list() == [10.0]
+
+
+def test_empty_signals_df_still_has_timestamp():
+    result = BacktestResult(signals=[], data=pl.DataFrame(), indicators={})
+    assert result.signals_df.columns == ["timestamp"]
+    IndicatorContext(result.signals_df)  # must not raise

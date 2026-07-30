@@ -55,6 +55,34 @@ def _validate_cross_source_expr(expr: str, aliases: list[str]) -> str:
     return expr
 
 
+#: Columns that identify *which* series a row belongs to in a shared table. A cross-source
+#: alias must pin every one of these that the table actually has, or its Materialized View
+#: silently mixes several series into one column (see _assert_source_unambiguous).
+_IDENTITY_COLUMNS = ("exchange", "symbol", "timeframe")
+
+
+def _render_equality_filters(filters: dict | None, fmt) -> str:
+    """Render `{"symbol": "BTC_USDT"}` as ` WHERE symbol = 'BTC_USDT'` for a Materialized
+    View body.
+
+    Equality only, and deliberately not a caller-supplied SQL string: a MV body is DDL
+    stored server-side, so it cannot be parameterized and must be rendered as text. The
+    one defense available for a free-form WHERE would be a hand-written SQL validator --
+    the approach _validate_cross_source_expr takes, and one already bypassed once in this
+    codebase ("btc -- eth" first passed as two valid operators). Equality on the identity
+    columns is what selecting a source actually needs, and it reuses two primitives that
+    already exist: identifiers validated against a closed grammar, values escaped by the
+    same _fmt() every ordinary query value goes through.
+    """
+    if not filters:
+        return ""
+    parts = []
+    for col in sorted(filters):
+        _validate_identifier(col, kind="filter column")
+        parts.append(f"{col} = {fmt(filters[col])}")
+    return " WHERE " + " AND ".join(parts)
+
+
 class _UnitTablesMixin:
     """Generic raw/aggregated DataUnit tables, backing AggregationContext.query()."""
 
@@ -233,17 +261,31 @@ class _UnitTablesMixin:
     async def fetch_from_unit_table(
         self,
         table_name: str,
-        exchange: str,
+        exchange: str | None = None,
         symbol: str | None = None,
         start_ts: int | None = None,
         end_ts:   int | None = None,
+        filters: dict | None = None,
     ) -> pl.DataFrame:
         """
-        Generic SELECT * FROM any raw unit table with exchange/symbol/time filters.
+        Generic SELECT * FROM any raw unit table with optional identity/time filters.
         Returns a Polars DataFrame. Used by AggregationContext.query().
+
+        `exchange` is optional: it used to be mandatory, which meant a caller with no
+        exchange to give still got `exchange = <something wrong>` silently filtering every
+        row away. `filters` takes arbitrary equality pairs the same way — parameterized
+        here, since unlike a Materialized View body this is an ordinary SELECT.
         """
-        where_parts = ["exchange = %(ex)s"]
-        params: dict[str, Any] = {"ex": exchange}
+        where_parts: list[str] = []
+        params: dict[str, Any] = {}
+        if exchange is not None:
+            where_parts.append("exchange = %(ex)s")
+            params["ex"] = exchange
+        for i, col in enumerate(sorted(filters or {})):
+            _validate_identifier(col, kind="filter column")
+            key = f"f{i}"
+            where_parts.append(f"{col} = %({key})s")
+            params[key] = filters[col]
         if symbol is not None:
             where_parts.append("symbol = %(sym)s")
             params["sym"] = symbol
@@ -253,11 +295,10 @@ class _UnitTablesMixin:
         if end_ts is not None:
             where_parts.append("timestamp <= %(et)s")
             params["et"] = end_ts
-        sql = (
-            f"SELECT * FROM {table_name}"
-            f" WHERE {' AND '.join(where_parts)}"
-            f" ORDER BY timestamp ASC"
-        )
+        # Every filter is optional now, so the WHERE clause itself has to be -- previously
+        # `exchange` was mandatory and there was always at least one part.
+        where = f" WHERE {' AND '.join(where_parts)}" if where_parts else ""
+        sql = f"SELECT * FROM {table_name}{where} ORDER BY timestamp ASC"
         rows = await self._execute(sql, params)
         if not rows:
             return pl.DataFrame()
@@ -335,6 +376,7 @@ class _UnitTablesMixin:
         field: str,
         ch_type: str,
         timestamp_col: str = "timestamp",
+        filters: dict | None = None,
     ) -> None:
         """
         CREATE MATERIALIZED VIEW IF NOT EXISTS mv_{source_table}_to_{output_table}_{alias}.
@@ -354,18 +396,64 @@ class _UnitTablesMixin:
         (found via real dogfooding: WhiteBitDataSource's schema uses Int64) would otherwise
         produce a state ClickHouse refuses to write into a UInt64-typed state column at all
         (CANNOT_CONVERT_TYPE), rather than silently coercing it.
+
+        `filters` pins which rows of source_table belong to this alias, for the common case
+        where one shared table holds many series (a `candles` table keyed by
+        exchange/symbol/timeframe, which is what a real collector writes). Without it the
+        MV aggregates the whole table, and argMaxState picks whichever series happened to
+        win at each timestamp -- one column silently interleaving BTC, ETH and SOL prices.
+        backfill_cross_source() must be given the SAME filters, or history and live data
+        disagree.
         """
         _validate_identifier(alias, kind="cross-source alias")
         _validate_identifier(field, kind="column name")
         _validate_identifier(ch_type, kind="ch_type")
         _validate_identifier(timestamp_col, kind="column name")
         mv_name = f"mv_{source_table}_to_{output_table}_{alias}"
+        where = _render_equality_filters(filters, self._fmt)
         await self._execute(
             f"CREATE MATERIALIZED VIEW IF NOT EXISTS {mv_name} TO {output_table} AS"
             f" SELECT CAST({timestamp_col} AS UInt64) AS timestamp,"
             f" argMaxState(CAST({field} AS Nullable({ch_type})), CAST({timestamp_col} AS UInt64)) AS {alias}"
-            f" FROM {source_table} GROUP BY {timestamp_col}"
+            f" FROM {source_table}{where} GROUP BY {timestamp_col}"
         )
+
+    @_validates_identifiers("table_name")
+    async def assert_source_unambiguous(
+        self, table_name: str, filters: dict | None = None, *, sample: int = 3,
+    ) -> None:
+        """
+        Raise if table_name holds more than one series along an identity column that
+        `filters` doesn't pin.
+
+        This is the check whose absence made the whole class of bug possible: aggregating a
+        shared `candles` table with no filter produces a column that interleaves several
+        symbols, and nothing anywhere errors -- the caller just gets a plausible series of
+        garbage. Failing at setup time turns that into an immediate, explainable error
+        instead of days of dogfooding.
+
+        A table that genuinely holds one series (candles_btc_usdt) passes with no filters,
+        so the one-table-per-source style keeps working unchanged.
+        """
+        filters = filters or {}
+        try:
+            columns = set(await self.get_table_schema(table_name))
+        except Exception:
+            return  # table not created yet -- nothing to disambiguate
+        for col in _IDENTITY_COLUMNS:
+            if col not in columns or col in filters:
+                continue
+            rows = await self._execute(
+                f"SELECT DISTINCT {col} FROM {table_name} LIMIT {int(sample) + 1}"
+            )
+            values = [r[0] for r in rows]
+            if len(values) > 1:
+                raise ValueError(
+                    f"Ambiguous source {table_name!r}: it holds {len(values)}+ distinct "
+                    f"{col!r} values ({values[:sample]}...) and no filter pins {col!r}. "
+                    f"Aggregating it as-is would silently mix them into one column — pass "
+                    f'filters={{"{col}": ...}} to select which series this source means.'
+                )
 
     @_validates_identifiers("output_table", "source_table")
     async def backfill_cross_source(
@@ -376,6 +464,7 @@ class _UnitTablesMixin:
         field: str,
         ch_type: str,
         timestamp_col: str = "timestamp",
+        filters: dict | None = None,
     ) -> None:
         """
         One-time INSERT INTO {output_table} (timestamp, {alias}) SELECT ... for rows that
@@ -389,11 +478,17 @@ class _UnitTablesMixin:
         same partial-write shape ensure_cross_source_mv's own MV already relies on, just
         issued once instead of continuously. Same convention as backfill_agg() for the
         single-table Fold/bucket-aggregation path this mirrors.
+
+        `filters` must be the SAME dict ensure_cross_source_mv() was given for this alias:
+        the MV covers rows arriving from now on and this covers the ones already there, so
+        a mismatch means clean live data sitting on top of history that mixed every series
+        in the table.
         """
         _validate_identifier(alias, kind="cross-source alias")
         _validate_identifier(field, kind="column name")
         _validate_identifier(ch_type, kind="ch_type")
         _validate_identifier(timestamp_col, kind="column name")
+        where = _render_equality_filters(filters, self._fmt)
         # Same explicit UInt64 cast as ensure_cross_source_mv, same reason: the state's type
         # parameters are fixed at creation time and must match output_table's declared
         # column type exactly, regardless of source_table's own timestamp column type.
@@ -401,7 +496,7 @@ class _UnitTablesMixin:
             f"INSERT INTO {output_table} (timestamp, {alias})"
             f" SELECT CAST({timestamp_col} AS UInt64),"
             f" argMaxState(CAST({field} AS Nullable({ch_type})), CAST({timestamp_col} AS UInt64))"
-            f" FROM {source_table} GROUP BY {timestamp_col}"
+            f" FROM {source_table}{where} GROUP BY {timestamp_col}"
         )
 
     @_validates_identifiers("output_table")

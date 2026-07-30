@@ -51,13 +51,13 @@ class RSI(Indicator):
 
 class MeanReversion(Strategy):
     async def on_bar(self, bar: BarContext) -> Signal | None:
-        # Signal.type is a free-form string in general, but BacktestRunner's
-        # FIFO trade pairing specifically recognizes "buy"/"sell" — use those
-        # two if you want trades in BacktestResult.trades.
+        # A signal has no mandatory fields — you pick the schema, exactly as a
+        # DataSource picks its row schema. The framework only adds `timestamp`.
+        # A plain dict works just as well as Signal(...).
         if bar.rsi < 30:
-            return Signal("buy", confidence=0.8, metadata={"direction": "long"})
+            return Signal(action="open_long", price=bar.close, rsi=bar.rsi)
         if bar.rsi > 70:
-            return Signal("sell", confidence=0.7)
+            return Signal(action="close", price=bar.close, rsi=bar.rsi)
         return None
 
 
@@ -110,7 +110,7 @@ ClickHouseManager + DependencyResolver (optional, application layer)
   | `RemoteExecutor` | separate host over HTTP | horizontal scaling, dedicated compute nodes — see [Security model](#security-model) before exposing it beyond localhost |
   | `CppRunnerPool` (attach to any of the above) | Docker, `--network=none`, seccomp, read-only rootfs | compiled `CppIndicator`/`CppStrategyPlugin` payloads |
 
-- **`BacktestRunner`** ([tradingkit/backtest/](tradingkit/backtest/)) — runs a strategy bar-by-bar over a pre-loaded `pl.DataFrame` and returns a `BacktestResult` (trades, win rate, drawdown, ...).
+- **`BacktestRunner`** ([tradingkit/backtest/](tradingkit/backtest/)) — runs a strategy bar-by-bar over a pre-loaded `pl.DataFrame` and returns a `BacktestResult` (the data, the indicator series, and `signals_df`: the emitted signals as a timestamped table). It computes no PnL of its own — a signal's fields are the strategy's own vocabulary, so interpreting them belongs to analytics you configure, not to a built-in rule that has to guess which string means "buy".
 - **`ClickHouseManager` + `DependencyResolver`** ([tradingkit/core/](tradingkit/core/)) — optional application-layer caching: resolves an indicator/strategy request by walking its dependency chain and only recomputing what's missing from ClickHouse.
 - **`AggregationContext` / `AggregationWorker`** ([tradingkit/aggregation.py](tradingkit/aggregation.py)) — periodic scripts that read arbitrary ClickHouse tables and write derived series (cross-symbol spreads, higher-timeframe values projected onto a lower timeframe, etc.).
 

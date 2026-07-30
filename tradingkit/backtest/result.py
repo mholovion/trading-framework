@@ -1,5 +1,5 @@
 """
-tradingkit.backtest.result — BacktestResult and Trade.
+tradingkit.backtest.result — BacktestResult.
 """
 from __future__ import annotations
 
@@ -9,90 +9,25 @@ import polars as pl
 
 
 @dataclass
-class Trade:
-    entry_ts:    int
-    exit_ts:     int
-    side:        str      # "buy" or "sell"
-    entry_price: float
-    exit_price:  float
-    pnl:         float
-    pnl_pct:     float
-    entry_signal_confidence: float = 0.0
-    exit_signal_confidence:  float = 0.0
-
-    @property
-    def is_win(self) -> bool:
-        return self.pnl > 0
-
-    def to_dict(self) -> dict:
-        return {
-            "entry_ts":    self.entry_ts,
-            "exit_ts":     self.exit_ts,
-            "side":        self.side,
-            "entry_price": self.entry_price,
-            "exit_price":  self.exit_price,
-            "pnl":         self.pnl,
-            "pnl_pct":     self.pnl_pct,
-        }
-
-
-@dataclass
 class BacktestResult:
-    trades:     list[Trade]
+    """What a backtest produced: the data it ran over, the indicator series, and the
+    signals the strategy emitted.
+
+    Holds no trade or PnL logic on purpose. A signal's fields are the strategy author's
+    own vocabulary (see Signal), so pairing them into positions and computing PnL is the
+    job of a Metric over signals_df, told which columns mean what — not of a hardcoded
+    rule that has to guess.
+    """
+
     signals:    list[dict]
     data:       pl.DataFrame
     indicators: dict[str, pl.Series]
 
     @property
-    def total_trades(self) -> int:
-        return len(self.trades)
-
-    @property
-    def winning_trades(self) -> list[Trade]:
-        return [t for t in self.trades if t.is_win]
-
-    @property
-    def losing_trades(self) -> list[Trade]:
-        return [t for t in self.trades if not t.is_win]
-
-    @property
-    def win_rate(self) -> float:
-        if not self.trades:
-            return 0.0
-        return len(self.winning_trades) / len(self.trades)
-
-    @property
-    def total_pnl(self) -> float:
-        return sum(t.pnl for t in self.trades)
-
-    @property
-    def avg_pnl(self) -> float:
-        if not self.trades:
-            return 0.0
-        return self.total_pnl / len(self.trades)
-
-    @property
-    def max_drawdown(self) -> float:
-        if not self.trades:
-            return 0.0
-        cumulative = 0.0
-        peak = 0.0
-        max_dd = 0.0
-        for t in sorted(self.trades, key=lambda x: x.entry_ts):
-            cumulative += t.pnl
-            peak = max(peak, cumulative)
-            dd = peak - cumulative
-            max_dd = max(max_dd, dd)
-        return max_dd
-
-    def summary(self) -> dict:
-        return {
-            "total_trades": self.total_trades,
-            "wins":         len(self.winning_trades),
-            "losses":       len(self.losing_trades),
-            "win_rate":     self.win_rate,
-            "total_pnl":    self.total_pnl,
-            "avg_pnl":      self.avg_pnl,
-            "max_drawdown": self.max_drawdown,
-            "signals":      len(self.signals),
-        }
+    def signals_df(self) -> pl.DataFrame:
+        """Signals as a timestamped table, ready for IndicatorContext — the same
+        primitive indicators are computed over. Columns are whatever the strategy
+        emitted, unioned across signals, so bars carrying different fields leave nulls."""
+        if not self.signals:
+            return pl.DataFrame(schema={"timestamp": pl.Int64})
+        return pl.DataFrame(self.signals)

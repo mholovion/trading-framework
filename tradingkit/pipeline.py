@@ -74,6 +74,21 @@ async def _gap_rows(
     return sorted(filler, key=lambda r: r["timestamp"])
 
 
+def _as_signal(result: Signal | dict, row: dict) -> Signal:
+    """Normalise whatever on_bar() returned into a Signal, stamping the bar's timestamp
+    when the strategy didn't set one.
+
+    Only `timestamp` is filled in: auto-filling anything else -- a `price` taken from
+    `row["close"]`, as this used to do -- would privilege one field name and assume the
+    source is OHLCV, which sources are not required to be. A strategy that wants a price
+    on its signal has `bar.close` and can say so.
+    """
+    signal = result if isinstance(result, Signal) else Signal(**result)
+    if getattr(signal, "timestamp", None) is None:
+        signal.timestamp = row.get("timestamp")
+    return signal
+
+
 def _merge_rows(rows: list[dict], filler: list[dict]) -> list[dict]:
     """Splice backfilled rows into the original sequence, deduplicated by timestamp.
     Rows that were already there win — a re-fetch that overlaps must not replace data
@@ -90,61 +105,26 @@ def _merge_rows(rows: list[dict], filler: list[dict]) -> list[dict]:
 # ------------------------------------------------------------------ #
 
 @dataclass
-class Trade:
-    entry_ts:   int
-    exit_ts:    int
-    side:       str   # "buy" or "sell"
-    entry_price: float
-    exit_price:  float
-    pnl:         float
-    pnl_pct:     float
-
-
-@dataclass
 class PipelineResult:
+    """Carrier of what a run produced: the data it ran over, the indicator series, and
+    the signals the strategy emitted. Deliberately holds no trade/PnL logic — a signal's
+    fields are the strategy author's own vocabulary, so interpreting them (pairing
+    positions, computing PnL) belongs to a Metric over signals_df, configured with which
+    columns mean what."""
+
     signals:    list[Signal]
     data:       pl.DataFrame
     indicators: dict[str, pl.Series]
 
     @property
-    def trades(self) -> list[Trade]:
-        """Pair BUY/SELL signals into trades."""
-        trades: list[Trade] = []
-        open_trade: dict | None = None
-        for sig in sorted(self.signals, key=lambda s: s.timestamp or 0):
-            if sig.is_buy and open_trade is None:
-                open_trade = {"ts": sig.timestamp, "price": sig.price or 0.0}
-            elif sig.is_sell and open_trade is not None:
-                ep = open_trade["price"]
-                xp = sig.price or 0.0
-                pnl = xp - ep
-                pnl_pct = (pnl / ep * 100) if ep else 0.0
-                trades.append(Trade(
-                    entry_ts=open_trade["ts"],
-                    exit_ts=sig.timestamp or 0,
-                    side="buy",
-                    entry_price=ep,
-                    exit_price=xp,
-                    pnl=pnl,
-                    pnl_pct=pnl_pct,
-                ))
-                open_trade = None
-        return trades
-
-    def summary(self) -> dict:
-        trades = self.trades
-        if not trades:
-            return {"trades": 0, "win_rate": 0.0, "total_pnl": 0.0, "signals": len(self.signals)}
-        wins = [t for t in trades if t.pnl > 0]
-        total_pnl = sum(t.pnl for t in trades)
-        return {
-            "trades":    len(trades),
-            "wins":      len(wins),
-            "win_rate":  len(wins) / len(trades),
-            "total_pnl": total_pnl,
-            "avg_pnl":   total_pnl / len(trades),
-            "signals":   len(self.signals),
-        }
+    def signals_df(self) -> pl.DataFrame:
+        """Signals as a timestamped table, ready for IndicatorContext — the same
+        primitive indicators are computed over. Columns are whatever the strategy
+        emitted, unioned across signals, so bars that carried different fields simply
+        leave nulls."""
+        if not self.signals:
+            return pl.DataFrame(schema={"timestamp": pl.Int64})
+        return pl.DataFrame([s.to_dict() for s in self.signals])
 
 
 # ------------------------------------------------------------------ #
@@ -230,11 +210,7 @@ class Pipeline:
                 signal = None
 
             if signal is not None:
-                if signal.timestamp is None:
-                    signal.timestamp = row.get("timestamp")
-                if getattr(signal, "price", None) is None:
-                    signal.price = row.get("close")
-                signals.append(signal)
+                signals.append(_as_signal(signal, row))
 
         return PipelineResult(signals=signals, data=df, indicators=ind_series)
 
@@ -295,12 +271,10 @@ class Pipeline:
                 logger.debug(f"Strategy error at {row.get('timestamp')}: {exc}")
                 return None
 
-            if signal is not None:
-                if signal.timestamp is None:
-                    signal.timestamp = row.get("timestamp")
-                if getattr(signal, "price", None) is None:
-                    signal.price = row.get("close")
-                signal.gap_recovered = gap_recovered
+            if signal is None:
+                return None
+            signal = _as_signal(signal, row)
+            signal.gap_recovered = gap_recovered
             return signal
 
         async for row in self.source.stream(symbol, timeframe):
@@ -358,4 +332,4 @@ class Pipeline:
         )
 
 
-__all__ = ["Pipeline", "PipelineResult", "Trade"]
+__all__ = ["Pipeline", "PipelineResult"]
