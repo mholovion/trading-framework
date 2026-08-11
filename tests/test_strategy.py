@@ -207,3 +207,22 @@ def test_strategy_dead_parameters_attribute_is_gone():
             return None
 
     assert not hasattr(S(), "parameters")
+
+
+async def test_script_strategy_process_style_can_use_signal():
+    """Regression (TASK-025): Signal was injected only into on_bar()'s per-call namespace,
+    so a process()-style script -- the form the resolver drives -- raised NameError on the
+    very example the docs give."""
+    s = ScriptStrategy(code='''
+async def process(indicators_data, row, config, signal_timestamp=None):
+    return Signal(action="short", price=row["close"])
+''')
+    assert await s.process({}, {"close": 74.5}) == {"action": "short", "price": 74.5}
+
+
+async def test_script_strategy_process_may_return_a_plain_dict():
+    s = ScriptStrategy(code='''
+async def process(indicators_data, row, config, signal_timestamp=None):
+    return {"action": "short", "px": row["close"]}
+''')
+    assert await s.process({}, {"close": 74.5}) == {"action": "short", "px": 74.5}

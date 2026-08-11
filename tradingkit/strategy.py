@@ -265,9 +265,15 @@ class ScriptStrategy(Strategy):
     def _exec_ns(self) -> None:
         # Execute script once so top-level definitions (get_required_indicators,
         # process, process_batch) persist across calls.
-        # on_bar-style scripts reference `bar` / `Signal` which aren't defined here —
-        # that's expected; they get injected in on_bar(). Ignore NameError.
-        self._ns: dict[str, Any] = {}
+        #
+        # Signal is injected here, not only in on_bar(): a process()-style script runs
+        # from this namespace, so Signal(...) inside one used to raise NameError -- the
+        # very example the docs give could not be written in a script plugin. Same
+        # injection ScriptAggregation does for SourceRef.
+        #
+        # on_bar-style scripts also reference `bar`, which genuinely isn't available until
+        # the call; that NameError is still expected and ignored.
+        self._ns: dict[str, Any] = {"Signal": Signal}
         try:
             exec(compile(self._code, "<strategy_script>", "exec"), self._ns)  # noqa: S102
         except (NameError, AttributeError):

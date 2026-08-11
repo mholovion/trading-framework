@@ -189,3 +189,53 @@ async def test_resolve_strategy_with_hash_reference_looks_up_params():
     # indicator values/candles are seeded in FakeDb, so _compute_strategy has nothing to
     # iterate over and returns [] -- this test is really about the hash-lookup not raising.
     assert signals == []
+
+# ---------------------------------------------------------------------------
+# Free-record signals through the resolver (TASK-024)
+# ---------------------------------------------------------------------------
+
+def _free_record_resolver():
+    """Resolver wired to a strategy written in the documented free-record style: no
+    signal_type, no confidence, just the author's own fields."""
+    db = FakeDb()
+    rsi_params = _rsi_params()
+    db.indicator_coverage = (0, 5940, 100)
+    db.indicator_rows = {rsi_params.to_hash(): [(60, 20.0)]}
+    db.all_rows = [{"timestamp": 60, "close": 74.5}]
+
+    class FreeRecordPlugin:
+        def get_required_indicators(self, params):
+            return [rsi_params]
+
+        async def process(self, indicators_data, row, signal_timestamp=None):
+            return {"action": "short", "zscore": 4.2}
+
+    resolver = DependencyResolver(db, executor=FakeExecutor([]))
+    resolver._load_strategy_plugin = lambda params: FreeRecordPlugin()
+    return db, resolver
+
+
+async def test_resolve_strategy_accepts_a_free_record_signal():
+    """Regression: resolver indexed sig_dict["signal_type"] directly, so a strategy in the
+    style v0.4.0 documents raised KeyError -- and because the try/except only wrapped
+    plugin.process(), it took the whole call down instead of skipping one bar."""
+    _, resolver = _free_record_resolver()
+
+    signals = await resolver.resolve_strategy(
+        StrategyParams.create("s"), "wb", "BTC_USDT",
+    )
+
+    assert signals == [{"action": "short", "zscore": 4.2, "timestamp": 60}]
+
+
+async def test_resolve_strategy_stores_the_whole_record():
+    """Fields the table has no column for must still reach store_signal -- dropping them
+    on the way in is what made price vanish before."""
+    db, resolver = _free_record_resolver()
+
+    await resolver.resolve_strategy(StrategyParams.create("s"), "wb", "BTC_USDT")
+
+    _, _, _, kw = db.stored_signals[0]
+    assert kw["record"]["action"] == "short"
+    assert kw["record"]["zscore"] == 4.2
+    assert kw["record"]["price"] == 74.5      # filled from the bar, still overridable

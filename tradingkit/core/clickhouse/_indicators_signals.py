@@ -29,22 +29,54 @@ class _IndicatorsSignalsMixin:
             if len(self._indicator_buffer) >= _IND_BATCH:
                 await self._flush_indicators()
 
+    #: Columns strategy_signals has of its own. Anything else a strategy emits is kept in
+    #: the metadata JSON rather than dropped -- see store_signal().
+    _SIGNAL_COLUMNS = ("signal_type", "confidence", "price", "metadata")
+
     async def store_signal(
         self,
         params: StrategyParams,
         exchange: str,
         symbol: str,
         timestamp: int,
-        signal_type: str,
-        confidence: float,
-        price: float,
-        metadata: dict | None = None,
+        record: dict | None = None,
+        **fields: Any,
     ) -> None:
+        """
+        Store one signal. A signal is a free record (see Signal): the strategy author owns
+        its schema, so this takes whatever it was given.
+
+        `strategy_signals` still has fixed columns, so fields matching them fill those and
+        **everything else goes into the metadata JSON** — recovered on the way out by
+        fetch_signals(), which merges it back. That round-trip has to stay lossless: the
+        bug this replaces put a field somewhere the serializer didn't know about, so it
+        silently disappeared. Storing signals under the strategy's own schema, the way
+        DataCollector already stores arbitrary source schemas, is the cleaner end state
+        and a separate migration — this keeps the data intact until then.
+
+        Accepts either a record dict or keyword fields, so callers can pass a signal
+        straight through.
+        """
         await self._ensure_params_registered(params, "strategy")
+        fields = {**(record or {}), **fields}
+
+        metadata = dict(fields.get("metadata") or {})
+        extra = {
+            k: v for k, v in fields.items()
+            if k not in self._SIGNAL_COLUMNS and k != "timestamp"
+        }
+        metadata.update(extra)
+
+        signal_type = fields.get("signal_type") or ""
+        confidence  = fields.get("confidence")
+        price       = fields.get("price")
+
         self._signal_buffer.append((
             params.type, params.to_hash(), exchange, symbol,
-            timestamp, signal_type.upper(), float(confidence), float(price),
-            json.dumps(metadata or {}),
+            timestamp, str(signal_type).upper(),
+            float(confidence) if confidence is not None else 0.0,
+            float(price) if price is not None else 0.0,
+            json.dumps(metadata, default=str),
         ))
         if len(self._signal_buffer) >= 200:
             await self._flush_signals()
@@ -114,11 +146,18 @@ class _IndicatorsSignalsMixin:
         sql = (f"SELECT timestamp, signal_type, confidence, price, metadata"
                f" FROM strategy_signals WHERE {where} ORDER BY timestamp ASC")
         rows = await self._execute(sql, kw)
-        return [
-            {"timestamp": r[0], "signal_type": r[1], "confidence": r[2],
-             "price": r[3], "metadata": json.loads(r[4])}
-            for r in rows
-        ]
+        out = []
+        for r in rows:
+            metadata = json.loads(r[4])
+            # Fields the strategy emitted that this table has no column for were parked in
+            # metadata by store_signal(); lift them back so the record the caller gets is
+            # the record the strategy produced. metadata itself stays, so a reader that
+            # only knows the old shape is unaffected.
+            out.append({
+                "timestamp": r[0], "signal_type": r[1], "confidence": r[2],
+                "price": r[3], "metadata": metadata, **metadata,
+            })
+        return out
 
     async def _ensure_params_registered(
         self, params: IndicatorParams | StrategyParams, kind: str,

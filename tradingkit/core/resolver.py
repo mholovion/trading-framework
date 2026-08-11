@@ -331,16 +331,21 @@ class DependencyResolver:
                 sig_dict = None
 
             if sig_dict is not None:
+                if not isinstance(sig_dict, dict):
+                    sig_dict = sig_dict.to_dict()   # a Signal, not the older dict form
                 sig_dict["timestamp"] = ts
                 signals.append(sig_dict)
-                await self.db.store_signal(
-                    params, exchange, symbol,
-                    timestamp=ts,
-                    signal_type=sig_dict["signal_type"],
-                    confidence=sig_dict["confidence"],
-                    price=row.get("close"),
-                    metadata=sig_dict.get("metadata", {}),
-                )
+                # The whole record goes through: a signal has no mandatory fields, so
+                # indexing sig_dict["signal_type"] here raised KeyError on any strategy
+                # written in the documented free-record style and took the entire call
+                # down with it -- the try/except above only guards plugin.process().
+                try:
+                    await self.db.store_signal(
+                        params, exchange, symbol, timestamp=ts,
+                        record={"price": row.get("close"), **sig_dict},
+                    )
+                except Exception as exc:
+                    logger.debug(f"Signal store error at {ts}: {exc}")
 
         await self.db.flush()
         return signals

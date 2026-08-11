@@ -1,6 +1,8 @@
 """tradingkit.core.clickhouse.ClickHouseManager — SQL construction, no real ClickHouse needed."""
 from __future__ import annotations
 
+import json
+
 import polars as pl
 
 from tests.conftest import FakeChResponse
@@ -9,6 +11,7 @@ from tradingkit.core.clickhouse import (
     _basic_auth_header,
     create_clickhouse_manager,
 )
+from tradingkit.core.clickhouse._indicators_signals import _IndicatorsSignalsMixin
 
 
 def _sql(fake_ch_http, index: int = -1) -> str:
@@ -190,3 +193,75 @@ def test_create_clickhouse_manager_defaults(monkeypatch):
     assert db.host == "localhost"
     assert db.port == 9000
     assert db.database == "default"
+
+
+# ---------------------------------------------------------------------------
+# store_signal / fetch_signals with free-record signals (TASK-024)
+# ---------------------------------------------------------------------------
+
+class _SignalDb(_IndicatorsSignalsMixin):
+    """Exercises the buffer/serialisation without a ClickHouse connection."""
+
+    def __init__(self):
+        self._signal_buffer: list = []
+        self._conn = True
+        self.rows: list = []
+
+    async def _ensure_params_registered(self, *a, **kw):
+        pass
+
+    async def _execute(self, sql, params=None, settings=None):
+        return self.rows
+
+
+class _Params:
+    type = "s"
+
+    def to_hash(self):
+        return "h"
+
+
+async def test_store_signal_keeps_unknown_fields_in_metadata():
+    """The table has fixed columns, but a signal has no mandatory fields -- anything
+    without a column of its own is parked in metadata rather than dropped."""
+    db = _SignalDb()
+    await db.store_signal(_Params(), "whitebit", "BTC", timestamp=1,
+                          record={"action": "short", "price": 74.5, "zscore": 4.2})
+
+    _, _, _, _, ts, signal_type, confidence, price, metadata = db._signal_buffer[0]
+    assert (ts, price) == (1, 74.5)
+    assert signal_type == "" and confidence == 0.0     # absent, defaulted, not invented
+    assert json.loads(metadata) == {"action": "short", "zscore": 4.2}
+
+
+async def test_store_signal_does_not_crash_without_signal_type():
+    """The exact shape that raised KeyError on installed 0.4.0."""
+    db = _SignalDb()
+    await db.store_signal(_Params(), "wb", "BTC", timestamp=1,
+                          record={"action": "short", "price": 74.5})
+    assert len(db._signal_buffer) == 1
+
+
+async def test_signal_roundtrip_is_lossless():
+    """The whole reason metadata is used as the overflow: what goes in must come back.
+    A field that survives the write but not the read is the bug this replaces."""
+    db = _SignalDb()
+    await db.store_signal(_Params(), "wb", "BTC", timestamp=1,
+                          record={"action": "short", "price": 74.5, "zscore": 4.2})
+    row = db._signal_buffer[0]
+    db.rows = [(row[4], row[5], row[6], row[7], row[8])]
+
+    got = (await db.fetch_signals(_Params(), "wb", "BTC"))[0]
+    assert got["action"] == "short"
+    assert got["zscore"] == 4.2
+    assert got["price"] == 74.5
+
+
+async def test_store_signal_still_accepts_the_old_keyword_form():
+    db = _SignalDb()
+    await db.store_signal(_Params(), "wb", "BTC", timestamp=1,
+                          signal_type="buy", confidence=0.8, price=10.0,
+                          metadata={"rsi": 20})
+    _, _, _, _, _, signal_type, confidence, price, metadata = db._signal_buffer[0]
+    assert (signal_type, confidence, price) == ("BUY", 0.8, 10.0)
+    assert json.loads(metadata) == {"rsi": 20}
