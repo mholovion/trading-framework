@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+- **Regression from 0.4.0: a strategy written in the style 0.4.0 documents crashed the
+  resolver.** `Signal` lost its mandatory fields in 0.4.0, but `DependencyResolver` still
+  read `sig_dict["signal_type"]` and `sig_dict["confidence"]` by direct indexing, so a
+  `process()` returning `{"action": "short", "price": 74.5}` — literally the documented
+  free-record form — raised `KeyError`. Worse, the surrounding `try/except` only wrapped
+  `plugin.process()`, not the store, so the error took the whole call down instead of
+  skipping one bar; anything driving the resolver (in this repo, `/api/strategies/compute`)
+  died with it. The 0.4.0 migration covered the `on_bar` path and missed the older
+  `process()` one entirely.
+- `store_signal()` now takes the whole record. `strategy_signals` still has fixed columns,
+  so recognised fields fill them (absent ones default rather than being invented) and
+  **everything else is kept in the metadata JSON**, which `fetch_signals()` merges back on
+  read. That round-trip is covered by a test on purpose: parking a field somewhere the
+  reader doesn't know about is exactly how `price` used to disappear. Storing signals under
+  the strategy's own schema — the way `DataCollector` already stores arbitrary source
+  schemas — is the cleaner end state and a separate migration; this keeps the data intact
+  until then. The old keyword form still works.
+- **`ScriptStrategy` never injected `Signal` into the script namespace**, only into
+  `on_bar()`'s per-call one. A `process()`-style script — the form the resolver drives —
+  therefore raised `NameError: name 'Signal' is not defined` on the example the docs give.
+  Same injection `ScriptAggregation` already does for `SourceRef`.
+
 ### Added
 - **`Metric` / `MetricContext` / `ScriptMetric`** — analytics over a finished run: a scalar
   (win rate), a table for charting (equity curve), or a trade list. `compute(ctx)` runs over
