@@ -5,6 +5,31 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+- **`Metric` / `MetricContext` / `ScriptMetric`** — analytics over a finished run: a scalar
+  (win rate), a table for charting (equity curve), or a trade list. `compute(ctx)` runs over
+  the whole window, unlike an Indicator's value-per-bar, and `ctx.data` / `ctx.signals` are
+  the same `IndicatorContext` everything else already uses, so analytics over signals is the
+  same primitive as indicators over prices.
+- Declared like indicators — `Pipeline(metrics={"pnl": ...})` → `PipelineResult.metrics` —
+  or run ad hoc with `result.compute(metric)` on either result type. A metric that fails
+  (asking for a column these signals don't have, say) reports `None` and logs why rather
+  than discarding the run.
+- `load_metric_plugin()` and an empty `BUILTIN_METRICS`, mirroring strategies and
+  aggregations: **the framework still ships no metrics**. That is the point rather than an
+  omission — computing PnL means knowing which column value means "open a long", which is
+  the strategy author's vocabulary, not the framework's. The host app registers its own via
+  `TRADINGKIT_METRICS_MODULE`, and this repo's live under `plugins/metrics/` with every
+  vocabulary word (`action_col`, `price_col`, `open_long`, `open_short`, `close`) as a
+  parameter, so the same metric works against a schema its author never saw.
+
+  This closes the gap 0.4.0 shipped with. Verified against the case that motivated all of
+  it: the short sequence that the old built-in pairing reported as a fabricated long trade
+  of +5 now comes back as two short trades totalling +25, and a position still open at the
+  end is reported instead of vanishing.
+
 ## [0.4.0] - 2026-07-30
 
 Signals stop being a rigid struct, and two silent-corruption bugs in cross-source
