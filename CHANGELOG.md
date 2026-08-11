@@ -5,7 +5,9 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [0.5.0] - 2026-08-09
+
+Analytics come back as user-written plugins, and the regression 0.4.0 shipped is fixed.
 
 ### Fixed
 - **Regression from 0.4.0: a strategy written in the style 0.4.0 documents crashed the
