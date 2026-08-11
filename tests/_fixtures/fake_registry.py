@@ -12,3 +12,8 @@ SOURCES = {
 COMBINE_SQL = "btc - eth"
 ''',
 }
+
+# Used by test_metric.py to exercise load_metric_plugin()'s builtin-registry branch.
+BUILTIN_METRICS = {
+    "my_metric": "result = signals.height",
+}

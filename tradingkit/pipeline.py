@@ -14,13 +14,13 @@ Usage:
     result = await pipeline.run(
         "SOL_USDT", parse_timeframe("4h"), start_ts=..., end_ts=...
     )
-    print(result.summary())
+    print(result.signals_df)
 """
 from __future__ import annotations
 
 import logging
 from collections.abc import AsyncIterator
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 import polars as pl
@@ -89,6 +89,15 @@ def _as_signal(result: Signal | dict, row: dict) -> Signal:
     return signal
 
 
+def _signals_to_df(signals: list[Signal]) -> pl.DataFrame:
+    """Signals as a timestamped table: columns are whatever the strategy emitted, unioned
+    across signals, so bars that carried different fields simply leave nulls. `timestamp`
+    is always present (run() stamps it), which is what IndicatorContext requires."""
+    if not signals:
+        return pl.DataFrame(schema={"timestamp": pl.Int64})
+    return pl.DataFrame([s.to_dict() for s in signals])
+
+
 def _merge_rows(rows: list[dict], filler: list[dict]) -> list[dict]:
     """Splice backfilled rows into the original sequence, deduplicated by timestamp.
     Rows that were already there win — a re-fetch that overlaps must not replace data
@@ -115,16 +124,23 @@ class PipelineResult:
     signals:    list[Signal]
     data:       pl.DataFrame
     indicators: dict[str, pl.Series]
+    #: Results of the metrics declared on the Pipeline, by name. Empty unless the pipeline
+    #: declared any -- anything derived is opt-in, since it depends on what this strategy's
+    #: signal fields mean.
+    metrics:    dict[str, Any] = field(default_factory=dict)
+
+    def compute(self, metric: Any) -> Any:
+        """Run a Metric over this result, without having declared it up front."""
+        from tradingkit.metric import MetricContext
+        return metric.compute(MetricContext(
+            data=self.data, signals=self.signals_df, indicators=self.indicators,
+        ))
 
     @property
     def signals_df(self) -> pl.DataFrame:
         """Signals as a timestamped table, ready for IndicatorContext — the same
-        primitive indicators are computed over. Columns are whatever the strategy
-        emitted, unioned across signals, so bars that carried different fields simply
-        leave nulls."""
-        if not self.signals:
-            return pl.DataFrame(schema={"timestamp": pl.Int64})
-        return pl.DataFrame([s.to_dict() for s in self.signals])
+        primitive indicators are computed over."""
+        return _signals_to_df(self.signals)
 
 
 # ------------------------------------------------------------------ #
@@ -144,6 +160,10 @@ class Pipeline:
     indicators: dict[str, Indicator]
     strategy:   Strategy
     executor:   Any = None   # PluginExecutor | None → defaults to LocalExecutor
+    #: Metrics computed after every run(), by name -> PipelineResult.metrics. The framework
+    #: ships none: what a signal's fields mean is the strategy author's business, so a
+    #: metric has to be told which columns it reads (see tradingkit.metric).
+    metrics:    dict[str, Any] = field(default_factory=dict)
 
     def _get_executor(self) -> Any:
         if self.executor is not None:
@@ -212,7 +232,29 @@ class Pipeline:
             if signal is not None:
                 signals.append(_as_signal(signal, row))
 
-        return PipelineResult(signals=signals, data=df, indicators=ind_series)
+        return PipelineResult(
+            signals=signals, data=df, indicators=ind_series,
+            metrics=self._compute_metrics(df, _signals_to_df(signals), ind_series),
+        )
+
+    def _compute_metrics(
+        self, data: pl.DataFrame, signals_df: pl.DataFrame, indicators: dict[str, pl.Series],
+    ) -> dict[str, Any]:
+        """Run the declared metrics over one shared context. A metric that asks for a
+        column these signals don't have reports None and logs why, rather than discarding
+        the whole run — the same per-item tolerance run() already gives a failing bar."""
+        if not self.metrics:
+            return {}
+        from tradingkit.metric import MetricContext
+        ctx = MetricContext(data=data, signals=signals_df, indicators=indicators)
+        results: dict[str, Any] = {}
+        for name, metric in self.metrics.items():
+            try:
+                results[name] = metric.compute(ctx)
+            except Exception as exc:
+                logger.warning(f"Metric {name!r} failed: {exc}")
+                results[name] = None
+        return results
 
     async def run_live(
         self,

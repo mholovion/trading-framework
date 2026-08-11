@@ -77,6 +77,14 @@ from tradingkit.indicator import (
     ta_indicator,
 )
 
+# ── Metric ───────────────────────────────────────────────────────────
+from tradingkit.metric import (
+    Metric,
+    MetricContext,
+    ScriptMetric,
+    load_metric_plugin,
+)
+
 # ── Pipeline ─────────────────────────────────────────────────────────
 from tradingkit.pipeline import (
     Pipeline,
@@ -145,6 +153,11 @@ __all__ = [
     "ScriptAggregation",
     "SourceRef",
     "load_aggregation_plugin",
+    # Metric
+    "Metric",
+    "MetricContext",
+    "ScriptMetric",
+    "load_metric_plugin",
     "query_aggregation",
     "setup_aggregation",
     # Application

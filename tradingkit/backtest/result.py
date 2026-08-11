@@ -4,6 +4,7 @@ tradingkit.backtest.result — BacktestResult.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any
 
 import polars as pl
 
@@ -31,3 +32,12 @@ class BacktestResult:
         if not self.signals:
             return pl.DataFrame(schema={"timestamp": pl.Int64})
         return pl.DataFrame(self.signals)
+
+    def compute(self, metric: Any) -> Any:
+        """Run a Metric over this result. Anything derived — PnL, win rate, an equity
+        curve — is computed here rather than baked into the result, because it depends on
+        what this strategy's signal fields mean."""
+        from tradingkit.metric import MetricContext
+        return metric.compute(MetricContext(
+            data=self.data, signals=self.signals_df, indicators=self.indicators,
+        ))
